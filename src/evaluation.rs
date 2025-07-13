@@ -132,6 +132,9 @@ impl ProjectEvaluator {
         Ok(())
     }
 
+    /// Get a reference to the loaded project model
+    /// Useful for inspecting properties, items, and targets after loading
+    #[allow(dead_code)] // Public API method for library users
     pub fn get_model(&self) -> &ProjectModel {
         &self.model
     }

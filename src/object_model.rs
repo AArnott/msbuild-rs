@@ -2,15 +2,10 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
-pub struct Property {
-    pub name: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct Item {
     pub item_type: String,
     pub name: String,
+    #[allow(dead_code)] // Metadata support planned for future implementation
     pub metadata: HashMap<String, String>,
 }
 

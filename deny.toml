@@ -12,34 +12,11 @@ targets = [
 
 [licenses]
 # Allow these licenses
-allow = [
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
-    "Unicode-3.0",
-]
-
-# Allow these specific crates with non-standard licenses
-[[licenses.exceptions]]
-allow = ["OpenSSL"]
-name = "ring"
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
 
 [bans]
 # Lint level for when multiple versions of the same crate are detected
 multiple-versions = "warn"
-
-# Skip certain crates when checking for multiple versions
-skip = [
-    # Windows-specific crates often have multiple versions
-    { name = "windows-sys" },
-    { name = "windows_x86_64_msvc" },
-    { name = "windows_x86_64_gnu" },
-    { name = "windows_aarch64_msvc" },
-]
 
 # Deny specific crates
 deny = [

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Test">
+
+  <!-- Properties with conditions -->
+  <PropertyGroup>
+    <Configuration>FailMe</Configuration>
+    <TestEnabled Condition="'$(Configuration)' == 'Debug'">true</TestEnabled>
+    <TestEnabled Condition="'$(Configuration)' != 'Debug'">false</TestEnabled>
+    <OutputPath>bin/$(Configuration)/</OutputPath>
+  </PropertyGroup>
+
+  <!-- Conditional item groups -->
+  <ItemGroup Condition="'$(TestEnabled)' == 'true'">
+    <TestFile Include="test1.cs" />
+    <TestFile Include="test2.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Source Include="main.cs" />
+  </ItemGroup>
+
+  <!-- Test target with condition -->
+  <Target Name="Test" Condition="'$(TestEnabled)' == 'true'">
+    <Message Text="Running tests for $(Configuration) configuration" />
+    <Message Text="Test files: @(TestFile)" />
+  </Target>
+
+  <!-- Build target without condition -->
+  <Target Name="Build">
+    <Message Text="Building main application" />
+    <Message Text="Sources: @(Source)" />
+    <Message Text="Test enabled: $(TestEnabled)" />
+  </Target>
+
+  <!-- Error example -->
+  <Target Name="FailBuild" Condition="'$(Configuration)' == 'FailMe'">
+    <Error Text="This build was configured to fail!" />
+  </Target>
+
+</Project>

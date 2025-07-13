@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build">
+
+  <!-- Import common properties -->
+  <Import Project="common.props" Condition="Exists('common.props')" />
+
+  <PropertyGroup>
+    <OutputPath>bin/$(Configuration)/</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectFile Include="project1.cs" />
+    <ProjectFile Include="project2.cs" />
+  </ItemGroup>
+
+  <Target Name="Build">
+    <Message Text="Building with imported configuration: $(Configuration)" />
+    <Message Text="Project files: @(ProjectFile)" />
+    <Message Text="Common property: $(CommonProperty)" />
+  </Target>
+
+</Project>

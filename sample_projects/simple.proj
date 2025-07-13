@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build">
+
+  <!-- Define basic properties -->
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">AnyCPU</Platform>
+    <OutputPath>bin/$(Configuration)/</OutputPath>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>HelloWorld</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Define source files -->
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Utils.cs" />
+  </ItemGroup>
+
+  <!-- Define resource files -->
+  <ItemGroup>
+    <Content Include="readme.txt" />
+    <Content Include="config.xml" />
+  </ItemGroup>
+
+  <!-- Clean target -->
+  <Target Name="Clean">
+    <Message Text="Cleaning $(OutputPath)" />
+  </Target>
+
+  <!-- Compile target -->
+  <Target Name="Compile" DependsOnTargets="Clean">
+    <Message Text="Compiling @(Compile) for $(Configuration) $(Platform)" />
+    <Message Text="Output directory: $(OutputPath)" />
+  </Target>
+
+  <!-- Copy resources target -->
+  <Target Name="CopyResources" DependsOnTargets="Compile">
+    <Message Text="Copying content files to $(OutputPath)" />
+    <Copy SourceFiles="@(Content)" DestinationFolder="$(OutputPath)" />
+  </Target>
+
+  <!-- Main build target -->
+  <Target Name="Build" DependsOnTargets="CopyResources">
+    <Message Text="Build completed successfully!" />
+    <Message Text="Assembly: $(AssemblyName)" />
+    <Message Text="Output: $(OutputPath)$(AssemblyName).exe" />
+  </Target>
+
+</Project>

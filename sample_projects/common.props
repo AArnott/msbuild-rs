@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <CommonProperty>This is from common.props</CommonProperty>
+    <SharedOutputPath>shared/bin</SharedOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <SharedResource Include="shared1.txt" />
+    <SharedResource Include="shared2.txt" />
+  </ItemGroup>
+
+</Project>

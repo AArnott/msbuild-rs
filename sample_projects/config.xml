@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <settings>
+    <debug>true</debug>
+    <logging>enabled</logging>
+  </settings>
+</configuration>

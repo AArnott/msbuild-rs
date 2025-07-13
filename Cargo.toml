@@ -5,14 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-quick-xml = "0.31"
+quick-xml = "0.38.0"
 clap = { version = "4.4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
 anyhow = "1.0"
-regex = "1.10.6"
+regex = "1.11.1"
 serde = { version = "1.0", features = ["derive"] }
-indexmap = "2.0.2"
+indexmap = "2.10.0"
 
 [dev-dependencies]
 tempfile = "3.8"

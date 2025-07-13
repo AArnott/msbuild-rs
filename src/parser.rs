@@ -24,7 +24,7 @@ impl ProjectParser {
         let file = File::open(&path)?;
         let buf_reader = BufReader::new(file);
         let mut reader = Reader::from_reader(buf_reader);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut buf = Vec::new();
         let mut current_target: Option<Target> = None;
@@ -195,7 +195,7 @@ impl ProjectParser {
                     }
                 }
                 Ok(Event::Text(e)) => {
-                    let text = e.unescape()?.trim().to_string();
+                    let text = e.decode()?.trim().to_string();
                     if !text.is_empty() {
                         if let Some(ref prop_name) = current_property_name {
                             // Store the raw property value, don't evaluate yet

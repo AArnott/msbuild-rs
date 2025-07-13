@@ -31,9 +31,9 @@ jobs:
 
       - name: Check for vulnerabilities
         run: |
-          if [ $(jq '.vulnerabilities | length' audit-results.json) -gt 0 ]; then
+          if [ $(jq '.vulnerabilities.count' audit-results.json) -gt 0 ]; then
             echo "Security vulnerabilities found:"
-            jq '.vulnerabilities' audit-results.json
+            jq '.vulnerabilities.list' audit-results.json
             exit 1
           else
             echo "No security vulnerabilities found"
@@ -58,18 +58,7 @@ jobs:
         uses: actions/dependency-review-action@da24556b548a50705dd671f47852072ea4c105d9 # v4
         with:
           fail-on-severity: moderate
-          allow-licenses: |
-            MIT
-            Apache-2.0
-            BSD-2-Clause
-            BSD-3-Clause
-            ISC
-            Unicode-DFS-2016
-          deny-licenses: |
-            GPL-2.0
-            GPL-3.0
-            AGPL-1.0
-            AGPL-3.0
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-DFS-2016
 
   cargo-deny:
     name: Cargo Deny

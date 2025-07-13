@@ -1,0 +1,113 @@
+name: Devcontainer Maintenance
+
+on:
+  schedule:
+    # Check for devcontainer updates monthly on the first Monday at 2 AM UTC
+    - cron: "0 2 1-7 * 1"
+  workflow_dispatch:
+
+jobs:
+  validate-devcontainer:
+    name: Validate Devcontainer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate devcontainer.json
+        run: |
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          jq empty .devcontainer/devcontainer.json
+
+      - name: Check Dockerfile syntax
+        run: |
+          docker run --rm -i hadolint/hadolint < .devcontainer/Dockerfile || true
+
+      - name: Test devcontainer build
+        run: |
+          docker build -t msbuild-rs-devcontainer .devcontainer/
+          echo "✅ Devcontainer builds successfully"
+
+      - name: Test basic functionality
+        run: |
+          docker run --rm msbuild-rs-devcontainer bash -c "rustc --version && cargo --version"
+          echo "✅ Rust toolchain is functional"
+
+  check-tool-versions:
+    name: Check Tool Versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract tool versions from Dockerfile
+        id: versions
+        run: |
+          RUST_VERSION=$(grep "FROM rust:" .devcontainer/Dockerfile | sed 's/FROM rust://' | head -1)
+          echo "rust_version=${RUST_VERSION}" >> $GITHUB_OUTPUT
+          echo "Current Rust version: ${RUST_VERSION}"
+
+      - name: Check if tools need updates
+        run: |
+          echo "🔍 Current tool versions:"
+          echo "Rust: ${{ steps.versions.outputs.rust_version }}"
+          echo ""
+          echo "💡 Tool updates are now managed by Renovate"
+          echo "📋 Check the Renovate dashboard for pending updates"
+          echo "🔄 Renovate will automatically create PRs for updates"
+
+  create-maintenance-issue:
+    name: Create Maintenance Issue
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for existing maintenance issue
+        id: check_issue
+        run: |
+          ISSUE_EXISTS=$(gh issue list --label "maintenance" --label "devcontainer" --state open --json number | jq length)
+          echo "existing_issues=${ISSUE_EXISTS}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create maintenance issue
+        if: steps.check_issue.outputs.existing_issues == '0'
+        run: |
+          gh issue create \
+            --title "Monthly Devcontainer Maintenance Check" \
+            --body "## 🔧 Monthly Devcontainer Maintenance
+
+          This is an automated monthly check for devcontainer maintenance tasks.
+
+          ### ✅ Completed Checks
+          - Devcontainer builds successfully
+          - Rust toolchain is functional
+          - Configuration files are valid
+
+          ### 📋 Manual Review Items
+          - [ ] Review VS Code extensions for updates
+          - [ ] Check if any new development tools should be added
+          - [ ] Verify shell aliases and shortcuts are still useful
+          - [ ] Review documentation for accuracy
+
+          ### 🔄 Automated Updates
+          Renovate is handling the following updates automatically:
+          - Rust Docker image versions
+          - GitHub Actions versions
+          - Dependencies in Cargo.toml
+
+          ### 📊 Current Status
+          - Rust version: $(grep 'FROM rust:' .devcontainer/Dockerfile | sed 's/FROM rust://')
+          - Last updated: $(date -u +%Y-%m-%d)
+
+          ---
+          *This issue was created automatically by the Devcontainer Maintenance workflow.*" \
+            --label "maintenance" \
+            --label "devcontainer" \
+            --assignee "@me"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

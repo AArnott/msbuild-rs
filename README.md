@@ -1,5 +1,9 @@
 # MSBuild-RS
 
+[![CI](https://github.com/your-username/msbuild-rs/workflows/CI/badge.svg)](https://github.com/your-username/msbuild-rs/actions/workflows/ci.yml)
+[![Security](https://github.com/your-username/msbuild-rs/workflows/Security/badge.svg)](https://github.com/your-username/msbuild-rs/actions/workflows/security.yml)
+[![codecov](https://codecov.io/gh/your-username/msbuild-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/your-username/msbuild-rs)
+
 A MSBuild project reader and executor written in Rust.
 
 ## Features
@@ -240,4 +244,48 @@ cargo fmt
 
 # Security audit
 cargo audit
+```
+
+## Continuous Integration
+
+MSBuild-RS uses GitHub Actions for continuous integration and deployment:
+
+### CI Pipeline
+- **Multi-platform testing**: Linux, Windows, macOS
+- **Multiple Rust versions**: Stable, beta, nightly, and MSRV (1.70.0)
+- **Code quality**: Formatting, linting with Clippy
+- **Security scanning**: Vulnerability audits and dependency checks
+- **Documentation**: Automated doc generation and validation
+- **Integration testing**: Sample project execution and parsing validation
+
+### Release Process
+- **Automated releases**: Triggered by version tags
+- **Cross-platform binaries**: Linux (glibc/musl), Windows, macOS (x64/ARM64)
+- **Changelog generation**: Automatic from git commits
+- **Crates.io publishing**: Automated package publishing
+
+### Security
+- **Daily security scans**: Automated vulnerability detection
+- **Dependency review**: License and security validation for PRs
+- **Supply chain security**: cargo-deny configuration for dependency policies
+
+### Dependency Management
+- **Renovate Bot**: Automated dependency updates with intelligent scheduling
+- **Security-first**: Immediate updates for security vulnerabilities
+- **Grouped updates**: Related dependencies updated together
+- **Release confidence**: Updates include adoption and compatibility metrics
+- **Lock file maintenance**: Automated Cargo.lock updates
+
+### Development Workflow
+```bash
+# All checks run automatically on PR
+git checkout -b feature/my-feature
+# ... make changes ...
+git push origin feature/my-feature
+# Create PR - CI will run automatically
+
+# Release process
+git tag v0.2.0
+git push origin v0.2.0
+# Release workflow runs automatically
 ```

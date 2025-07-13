@@ -2,19 +2,37 @@ use anyhow::{anyhow, Result};
 use log::{info, error};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::object_model::{ProjectModel, Task};
 
+/// Context passed to task executors containing all necessary execution parameters
+#[derive(Debug)]
+pub struct TaskExecutionContext {
+    /// Pre-evaluated attribute values from the task XML
+    pub attributes: HashMap<String, String>,
+    /// The directory containing the executing project file
+    pub project_directory: PathBuf,
+}
+
+impl TaskExecutionContext {
+    pub fn new(attributes: HashMap<String, String>, project_directory: PathBuf) -> Self {
+        Self {
+            attributes,
+            project_directory,
+        }
+    }
+}
+
 pub trait TaskExecutor {
-    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()>;
+    fn execute(&self, context: &TaskExecutionContext) -> Result<()>;
 }
 
 pub struct MessageTask;
 
 impl TaskExecutor for MessageTask {
-    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
-        if let Some(text) = attributes.get("Text") {
+    fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
+        if let Some(text) = context.attributes.get("Text") {
             info!("{}", text);
         }
         Ok(())
@@ -24,8 +42,8 @@ impl TaskExecutor for MessageTask {
 pub struct ErrorTask;
 
 impl TaskExecutor for ErrorTask {
-    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
-        if let Some(text) = attributes.get("Text") {
+    fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
+        if let Some(text) = context.attributes.get("Text") {
             error!("{}", text);
             return Err(anyhow!("Build failed: {}", text));
         }
@@ -37,15 +55,22 @@ impl TaskExecutor for ErrorTask {
 pub struct CopyTask;
 
 impl TaskExecutor for CopyTask {
-    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
-        let source_files = attributes.get("SourceFiles")
+    fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
+        let source_files = context.attributes.get("SourceFiles")
             .ok_or_else(|| anyhow!("Copy task missing SourceFiles attribute"))?;
 
-        let destination_folder = attributes.get("DestinationFolder")
+        let destination_folder = context.attributes.get("DestinationFolder")
             .ok_or_else(|| anyhow!("Copy task missing DestinationFolder attribute"))?;
 
+        // Resolve destination folder relative to project directory
+        let dest_path = if Path::new(destination_folder).is_absolute() {
+            PathBuf::from(destination_folder)
+        } else {
+            context.project_directory.join(destination_folder)
+        };
+
         // Create destination directory if it doesn't exist
-        fs::create_dir_all(destination_folder)?;
+        fs::create_dir_all(&dest_path)?;
 
         // Copy each file
         for source_file in source_files.split(';') {
@@ -53,17 +78,23 @@ impl TaskExecutor for CopyTask {
                 continue;
             }
 
-            let source_path = Path::new(source_file.trim());
+            // Resolve source file relative to project directory
+            let source_path = if Path::new(source_file.trim()).is_absolute() {
+                PathBuf::from(source_file.trim())
+            } else {
+                context.project_directory.join(source_file.trim())
+            };
+
             if source_path.exists() {
                 let file_name = source_path.file_name()
                     .ok_or_else(|| anyhow!("Invalid source file path: {}", source_file))?;
 
-                let dest_path = Path::new(destination_folder).join(file_name);
+                let final_dest_path = dest_path.join(file_name);
 
-                fs::copy(source_path, &dest_path)?;
-                info!("Copied {} to {}", source_file, dest_path.display());
+                fs::copy(&source_path, &final_dest_path)?;
+                info!("Copied {} to {}", source_path.display(), final_dest_path.display());
             } else {
-                error!("Source file does not exist: {}", source_file);
+                error!("Source file does not exist: {}", source_path.display());
             }
         }
 
@@ -114,7 +145,11 @@ impl TaskRegistry {
                 evaluated_attributes.insert(key.clone(), evaluated_value);
             }
 
-            executor.execute(&evaluated_attributes)
+            let project_directory = model.get_project_directory()
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            let context = TaskExecutionContext::new(evaluated_attributes, project_directory);
+            executor.execute(&context)
         } else {
             error!("Unknown task: {}", task.name);
             Ok(()) // Don't fail on unknown tasks for now
@@ -131,8 +166,9 @@ mod tests {
         let mut attributes = HashMap::new();
         attributes.insert("Text".to_string(), "Building Debug".to_string());
 
+        let context = TaskExecutionContext::new(attributes, PathBuf::from("."));
         let message_task = MessageTask;
-        message_task.execute(&attributes)?;
+        message_task.execute(&context)?;
 
         Ok(())
     }

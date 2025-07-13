@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Item {
@@ -37,6 +38,7 @@ pub struct ProjectModel {
     pub targets: IndexMap<String, Target>,
     pub imports: Vec<Import>,
     pub using_tasks: HashMap<String, String>, // task name -> assembly
+    pub project_file_path: Option<PathBuf>, // Path to the project file
 }
 
 impl ProjectModel {
@@ -89,5 +91,13 @@ impl ProjectModel {
         } else {
             String::new()
         }
+    }
+
+    pub fn set_project_file_path(&mut self, path: PathBuf) {
+        self.project_file_path = Some(path);
+    }
+
+    pub fn get_project_directory(&self) -> Option<PathBuf> {
+        self.project_file_path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf()))
     }
 }

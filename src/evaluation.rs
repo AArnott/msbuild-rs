@@ -25,7 +25,10 @@ impl ProjectEvaluator {
         info!("Loading project: {}", path.as_ref().display());
 
         let mut parser = ProjectParser::new();
-        self.model = parser.parse_file(path)?;
+        self.model = parser.parse_file(&path)?;
+
+        // Set the project file path for task execution context
+        self.model.set_project_file_path(path.as_ref().to_path_buf());
 
         debug!("Loaded {} properties", self.model.properties.len());
         debug!("Loaded {} item types", self.model.items.len());

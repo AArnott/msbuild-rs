@@ -106,18 +106,17 @@ mod integration_tests {
         fs::write(&test_file, "test content")?;
 
         // Create task attributes
-        use std::collections::HashMap;
-        // Execute the copy task
-        use crate::tasks::CopyTask;
-        use crate::tasks::TaskExecutor;
+        use std::collections::HashMap;        // Execute the copy task
+        use crate::tasks::{CopyTask, TaskExecutor, TaskExecutionContext};
 
         // Prepare evaluated attributes (simulating what TaskRegistry.execute_task does)
         let mut evaluated_attributes = HashMap::new();
         evaluated_attributes.insert("SourceFiles".to_string(), test_file.to_string_lossy().to_string());
         evaluated_attributes.insert("DestinationFolder".to_string(), dest_dir.to_string_lossy().to_string());
 
+        let context = TaskExecutionContext::new(evaluated_attributes, temp_dir.path().to_path_buf());
         let copy_task = CopyTask;
-        copy_task.execute(&evaluated_attributes)?;
+        copy_task.execute(&context)?;
 
         // Verify the file was copied
         let copied_file = dest_dir.join("test.txt");

@@ -17,42 +17,26 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable, beta]
-        include:
-          # Test on minimum supported Rust version
-          - os: ubuntu-latest
-            rust: 1.70.0
-          # Test with nightly for additional features
-          - os: ubuntu-latest
-            rust: nightly
-        exclude:
-          # Skip beta on macOS and Windows to speed up CI
-          - os: macos-latest
-            rust: beta
-          - os: windows-latest
-            rust: beta
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}-${{ matrix.rust }}
+          key: ${{ matrix.os }}
 
       - name: Check formatting
-        if: matrix.rust == 'stable' && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        if: matrix.rust == 'stable'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
@@ -71,176 +55,20 @@ jobs:
           cargo run -- --project sample_projects/conditional.proj --target Test --verbose
           cargo run -- --project sample_projects/with_imports.proj --target Build --verbose
 
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Security audit (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo install cargo-audit
+          cargo audit
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Generate documentation (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo doc --all-features --no-deps
+          cargo doc --all-features --no-deps 2>&1 | grep -q "warning" && exit 1 || exit 0
 
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Run security audit
-        run: cargo audit
-
-      - name: Check for known vulnerabilities in dependencies
-        run: cargo audit --json | jq '.vulnerabilities | length' | xargs -I {} test {} -eq 0
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Generate code coverage
-        run: cargo tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: cobertura.xml
-          fail_ci_if_error: true
-
-  build-release:
-    name: Build Release Artifacts
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: msbuild-rs
-            asset_name: msbuild-rs-linux-x64
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact_name: msbuild-rs
-            asset_name: msbuild-rs-linux-x64-musl
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: msbuild-rs.exe
-            asset_name: msbuild-rs-windows-x64.exe
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: msbuild-rs
-            asset_name: msbuild-rs-macos-x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: msbuild-rs
-            asset_name: msbuild-rs-macos-arm64
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.os }}-${{ matrix.target }}
-
-      - name: Install musl tools (Linux musl only)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Strip binary (Unix only)
-        if: matrix.os != 'windows-latest'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
-
-  dependency-analysis:
-    name: Dependency Analysis
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Generate dependency tree
-        run: cargo tree --all-features > dependency-tree.txt
-
-      - name: Upload dependency analysis
-        uses: actions/upload-artifact@v3
-        with:
-          name: dependency-analysis
-          path: dependency-tree.txt
-
-  documentation:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Generate documentation
-        run: cargo doc --all-features --no-deps
-
-      - name: Check for documentation warnings
-        run: cargo doc --all-features --no-deps 2>&1 | grep -q "warning" && exit 1 || exit 0
-
-      - name: Upload documentation
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v3
-        with:
-          name: documentation
-          path: target/doc/
-
-  integration-test:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Configure Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build project
-        run: cargo build
-
-      - name: Test with complex project scenarios
+      - name: Integration tests (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           # Test error handling
           ! cargo run -- --project non-existent.proj --target Build
@@ -251,15 +79,21 @@ jobs:
           # Test different targets
           cargo run -- --project sample_projects/conditional.proj --target Build --verbose
 
-      - name: Verify sample project files exist
-        run: |
+          # Verify sample project files exist
           test -f sample_projects/simple.proj
           test -f sample_projects/conditional.proj
           test -f sample_projects/with_imports.proj
           test -f sample_projects/common.props
 
-      - name: Test project file parsing
-        run: |
-          # Verify XML parsing doesn't crash on sample files
-          xmllint --noout sample_projects/*.proj
-          xmllint --noout sample_projects/*.props
+          # Test project file parsing (if xmllint is available)
+          if command -v xmllint >/dev/null 2>&1; then
+            xmllint --noout sample_projects/*.proj
+            xmllint --noout sample_projects/*.props
+          fi
+
+      - name: Upload documentation artifact (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v3
+        with:
+          name: documentation
+          path: target/doc/

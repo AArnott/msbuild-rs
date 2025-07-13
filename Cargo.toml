@@ -9,9 +9,9 @@ clap = { version = "4.4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
 anyhow = "1.0"
-regex = "1.10"
+regex = "1.10.6"
 serde = { version = "1.0", features = ["derive"] }
-indexmap = "2.0"
+indexmap = "2.0.2"
 
 [dev-dependencies]
 tempfile = "3.8"

@@ -67,8 +67,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-db
+          key: advisory-db-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            advisory-db-
+
+      - name: Configure Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache cargo-deny installation
+          cache-targets: false
+          shared-key: "cargo-deny"
+
       - name: Install cargo-deny
-        run: cargo install cargo-deny
+        run: cargo install --locked cargo-deny
 
       - name: Run cargo-deny
         run: cargo deny check

@@ -181,3 +181,63 @@ This is a simplified MSBuild implementation focused on core functionality:
 - Parallel execution
 - Incremental builds
 - Plugin system for custom tasks
+
+## Development Environment
+
+### Using Dev Containers (Recommended)
+
+The easiest way to get started with MSBuild-RS development is using the provided dev container:
+
+1. **Prerequisites**: Install [VS Code](https://code.visualstudio.com/) and [Docker](https://www.docker.com/)
+2. **Install Extension**: Add the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension
+3. **Open Project**: Open the project folder in VS Code
+4. **Start Container**: When prompted, click "Reopen in Container"
+5. **Wait for Setup**: The container will build and configure automatically
+
+The dev container includes:
+- **Rust toolchain** with rustfmt, clippy, and rust-analyzer
+- **Development tools** like cargo-watch, cargo-audit, cargo-outdated
+- **VS Code extensions** for Rust development, debugging, and testing
+- **Shell enhancements** with Zsh, Oh My Zsh, and useful aliases
+- **Cross-compilation** targets for Windows and ARM64
+
+### Manual Setup
+
+If you prefer a local development environment:
+
+```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Install development tools
+cargo install cargo-watch cargo-edit cargo-outdated cargo-audit
+
+# Clone and build
+git clone <repository-url>
+cd msbuild-rs
+cargo build
+```
+
+### Quick Development Commands
+
+```bash
+# Build and test
+cargo build
+cargo test
+
+# Run demo mode
+cargo run -- --demo
+
+# Run specific project
+cargo run -- --project sample_projects/simple.proj --target Build
+
+# Watch for changes
+cargo watch -x build
+
+# Lint and format
+cargo clippy
+cargo fmt
+
+# Security audit
+cargo audit
+```

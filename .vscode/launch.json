@@ -1,0 +1,83 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug MSBuild-RS",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/msbuild-rs",
+            "args": [
+                "--demo"
+            ],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "preLaunchTask": "Build"
+        },
+        {
+            "name": "Debug Simple Project",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/msbuild-rs",
+            "args": [
+                "--project",
+                "sample_projects/simple.proj",
+                "--target",
+                "Build",
+                "--verbose"
+            ],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "preLaunchTask": "Build"
+        },
+        {
+            "name": "Debug Conditional Project",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/msbuild-rs",
+            "args": [
+                "--project",
+                "sample_projects/conditional.proj",
+                "--target",
+                "Test",
+                "--verbose"
+            ],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "preLaunchTask": "Build"
+        },
+        {
+            "name": "Debug Tests",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/deps/msbuild_rs-${command:rust-analyzer.getTargetBinaryPath}",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "sourceLanguages": [
+                "rust"
+            ],
+            "env": {
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "preLaunchTask": "Test"
+        }
+    ]
+}

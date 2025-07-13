@@ -59,7 +59,7 @@ impl<'a> ExpressionEvaluator<'a> {
 
         // Check for comparison operators
         if let Some((left, right)) = self.parse_comparison(&evaluated)? {
-            return Ok(self.compare_values(&left, &right)?);
+            return self.compare_values(&left, &right);
         }
 
         // If it's not empty and not false, consider it true
@@ -81,16 +81,15 @@ impl<'a> ExpressionEvaluator<'a> {
             let left = expr[..pos].trim().to_string();
             let right = expr[pos + 2..].trim().to_string();
             // For != we'll return the comparison but negate the result
-            return Ok(Some((format!("!{}", left), right)));
+            return Ok(Some((format!("!{left}"), right)));
         }
 
         Ok(None)
     }
 
     fn compare_values(&self, left: &str, right: &str) -> Result<bool> {
-        if left.starts_with('!') {
+        if let Some(actual_left) = left.strip_prefix('!') {
             // Handle != comparison
-            let actual_left = &left[1..];
             return Ok(actual_left != right);
         }
 

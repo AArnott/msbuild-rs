@@ -33,7 +33,7 @@ pub struct MessageTask;
 impl TaskExecutor for MessageTask {
     fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
         if let Some(text) = context.attributes.get("Text") {
-            info!("{}", text);
+            info!("{text}");
         }
         Ok(())
     }
@@ -44,8 +44,8 @@ pub struct ErrorTask;
 impl TaskExecutor for ErrorTask {
     fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
         if let Some(text) = context.attributes.get("Text") {
-            error!("{}", text);
-            return Err(anyhow!("Build failed: {}", text));
+            error!("{text}");
+            return Err(anyhow!("Build failed: {text}"));
         }
 
         Err(anyhow!("Build failed"))

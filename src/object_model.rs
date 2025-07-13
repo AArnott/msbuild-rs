@@ -57,7 +57,7 @@ impl ProjectModel {
     pub fn add_item(&mut self, item: Item) {
         self.items
             .entry(item.item_type.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(item);
     }
 

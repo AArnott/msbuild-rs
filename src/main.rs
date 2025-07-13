@@ -72,9 +72,9 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
         match evaluator.load_project(&simple_project) {
             Ok(()) => match evaluator.execute_target("Build") {
                 Ok(()) => info!("✓ Simple project executed successfully"),
-                Err(e) => info!("✗ Failed to execute Build target: {}", e),
+                Err(e) => info!("✗ Failed to execute Build target: {e}"),
             },
-            Err(e) => info!("✗ Could not load simple.proj: {}", e),
+            Err(e) => info!("✗ Could not load simple.proj: {e}"),
         }
     } else {
         info!("Simple project not found at {}", simple_project.display());
@@ -89,14 +89,14 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
             Ok(()) => {
                 match evaluator.execute_target("Test") {
                     Ok(()) => info!("✓ Conditional Test target executed successfully"),
-                    Err(e) => info!("✗ Failed to execute Test target: {}", e),
+                    Err(e) => info!("✗ Failed to execute Test target: {e}"),
                 }
                 match evaluator.execute_target("Build") {
                     Ok(()) => info!("✓ Conditional Build target executed successfully"),
-                    Err(e) => info!("✗ Failed to execute Build target: {}", e),
+                    Err(e) => info!("✗ Failed to execute Build target: {e}"),
                 }
             }
-            Err(e) => info!("✗ Could not load conditional.proj: {}", e),
+            Err(e) => info!("✗ Could not load conditional.proj: {e}"),
         }
     } else {
         info!(
@@ -113,9 +113,9 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
         match evaluator.load_project(&import_project) {
             Ok(()) => match evaluator.execute_target("Build") {
                 Ok(()) => info!("✓ Import project executed successfully"),
-                Err(e) => info!("✗ Failed to execute Build target: {}", e),
+                Err(e) => info!("✗ Failed to execute Build target: {e}"),
             },
-            Err(e) => info!("✗ Could not load with_imports.proj: {}", e),
+            Err(e) => info!("✗ Could not load with_imports.proj: {e}"),
         }
     } else {
         info!("Import project not found at {}", import_project.display());

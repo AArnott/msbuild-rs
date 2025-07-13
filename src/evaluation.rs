@@ -45,7 +45,7 @@ impl ProjectEvaluator {
             }
 
             let import_path = evaluator.evaluate(&import.project)?;
-            info!("Processing import: {}", import_path);
+            info!("Processing import: {import_path}");
 
             // In a real implementation, this would resolve relative paths and handle SDK imports
             if Path::new(&import_path).exists() {
@@ -55,7 +55,7 @@ impl ProjectEvaluator {
                 // Merge the imported model into the current model
                 self.merge_model(import_model)?;
             } else {
-                warn!("Import file not found: {}", import_path);
+                warn!("Import file not found: {import_path}");
             }
         }
 
@@ -63,7 +63,7 @@ impl ProjectEvaluator {
     }
 
     pub fn execute_target(&mut self, target_name: &str) -> Result<()> {
-        info!("Executing target: {}", target_name);
+        info!("Executing target: {target_name}");
 
         let mut executed_targets = HashSet::new();
         self.execute_target_recursive(target_name, &mut executed_targets)
@@ -75,24 +75,21 @@ impl ProjectEvaluator {
         executed_targets: &mut HashSet<String>,
     ) -> Result<()> {
         if executed_targets.contains(target_name) {
-            debug!("Target {} already executed, skipping", target_name);
+            debug!("Target {target_name} already executed, skipping");
             return Ok(());
         }
 
         let target = self
             .model
             .get_target(target_name)
-            .ok_or_else(|| anyhow!("Target not found: {}", target_name))?
+            .ok_or_else(|| anyhow!("Target not found: {target_name}"))?
             .clone();
 
         // Check target condition
         if let Some(condition) = &target.condition {
             let evaluator = ExpressionEvaluator::new(&self.model);
             if !evaluator.evaluate_condition(condition)? {
-                info!(
-                    "Skipping target {} due to condition: {}",
-                    target_name, condition
-                );
+                info!("Skipping target {target_name} due to condition: {condition}");
                 return Ok(());
             }
         }

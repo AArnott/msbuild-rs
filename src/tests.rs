@@ -107,26 +107,17 @@ mod integration_tests {
 
         // Create task attributes
         use std::collections::HashMap;
-        use crate::object_model::Task;
-
-        let mut attributes = HashMap::new();
-        attributes.insert("SourceFiles".to_string(), test_file.to_string_lossy().to_string());
-        attributes.insert("DestinationFolder".to_string(), dest_dir.to_string_lossy().to_string());
-
-        let task = Task {
-            name: "Copy".to_string(),
-            attributes,
-            condition: None,
-        };
-
-        let model = ProjectModel::new();
-
         // Execute the copy task
         use crate::tasks::CopyTask;
         use crate::tasks::TaskExecutor;
 
+        // Prepare evaluated attributes (simulating what TaskRegistry.execute_task does)
+        let mut evaluated_attributes = HashMap::new();
+        evaluated_attributes.insert("SourceFiles".to_string(), test_file.to_string_lossy().to_string());
+        evaluated_attributes.insert("DestinationFolder".to_string(), dest_dir.to_string_lossy().to_string());
+
         let copy_task = CopyTask;
-        copy_task.execute(&task, &model)?;
+        copy_task.execute(&evaluated_attributes)?;
 
         // Verify the file was copied
         let copied_file = dest_dir.join("test.txt");

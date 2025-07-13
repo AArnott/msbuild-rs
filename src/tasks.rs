@@ -4,30 +4,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::expression::ExpressionEvaluator;
 use crate::object_model::{ProjectModel, Task};
 
 pub trait TaskExecutor {
-    fn execute(&self, task: &Task, model: &ProjectModel) -> Result<()>;
+    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()>;
 }
 
 pub struct MessageTask;
 
 impl TaskExecutor for MessageTask {
-    fn execute(&self, task: &Task, model: &ProjectModel) -> Result<()> {
-        let evaluator = ExpressionEvaluator::new(model);
-
-        if let Some(condition) = &task.condition {
-            if !evaluator.evaluate_condition(condition)? {
-                return Ok(());
-            }
+    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
+        if let Some(text) = attributes.get("Text") {
+            info!("{}", text);
         }
-
-        if let Some(text) = task.attributes.get("Text") {
-            let message = evaluator.evaluate(text)?;
-            info!("{}", message);
-        }
-
         Ok(())
     }
 }
@@ -35,19 +24,10 @@ impl TaskExecutor for MessageTask {
 pub struct ErrorTask;
 
 impl TaskExecutor for ErrorTask {
-    fn execute(&self, task: &Task, model: &ProjectModel) -> Result<()> {
-        let evaluator = ExpressionEvaluator::new(model);
-
-        if let Some(condition) = &task.condition {
-            if !evaluator.evaluate_condition(condition)? {
-                return Ok(());
-            }
-        }
-
-        if let Some(text) = task.attributes.get("Text") {
-            let message = evaluator.evaluate(text)?;
-            error!("{}", message);
-            return Err(anyhow!("Build failed: {}", message));
+    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
+        if let Some(text) = attributes.get("Text") {
+            error!("{}", text);
+            return Err(anyhow!("Build failed: {}", text));
         }
 
         Err(anyhow!("Build failed"))
@@ -57,26 +37,15 @@ impl TaskExecutor for ErrorTask {
 pub struct CopyTask;
 
 impl TaskExecutor for CopyTask {
-    fn execute(&self, task: &Task, model: &ProjectModel) -> Result<()> {
-        let evaluator = ExpressionEvaluator::new(model);
-
-        if let Some(condition) = &task.condition {
-            if !evaluator.evaluate_condition(condition)? {
-                return Ok(());
-            }
-        }
-
-        let source_files = task.attributes.get("SourceFiles")
+    fn execute(&self, attributes: &HashMap<String, String>) -> Result<()> {
+        let source_files = attributes.get("SourceFiles")
             .ok_or_else(|| anyhow!("Copy task missing SourceFiles attribute"))?;
 
-        let destination_folder = task.attributes.get("DestinationFolder")
+        let destination_folder = attributes.get("DestinationFolder")
             .ok_or_else(|| anyhow!("Copy task missing DestinationFolder attribute"))?;
 
-        let source_files = evaluator.evaluate(source_files)?;
-        let destination_folder = evaluator.evaluate(destination_folder)?;
-
         // Create destination directory if it doesn't exist
-        fs::create_dir_all(&destination_folder)?;
+        fs::create_dir_all(destination_folder)?;
 
         // Copy each file
         for source_file in source_files.split(';') {
@@ -89,7 +58,7 @@ impl TaskExecutor for CopyTask {
                 let file_name = source_path.file_name()
                     .ok_or_else(|| anyhow!("Invalid source file path: {}", source_file))?;
 
-                let dest_path = Path::new(&destination_folder).join(file_name);
+                let dest_path = Path::new(destination_folder).join(file_name);
 
                 fs::copy(source_path, &dest_path)?;
                 info!("Copied {} to {}", source_file, dest_path.display());
@@ -126,7 +95,26 @@ impl TaskRegistry {
 
     pub fn execute_task(&self, task: &Task, model: &ProjectModel) -> Result<()> {
         if let Some(executor) = self.tasks.get(&task.name) {
-            executor.execute(task, model)
+            // Check task condition first
+            if let Some(condition) = &task.condition {
+                use crate::expression::ExpressionEvaluator;
+                let evaluator = ExpressionEvaluator::new(model);
+                if !evaluator.evaluate_condition(condition)? {
+                    return Ok(());
+                }
+            }
+
+            // Evaluate all attribute values before passing to task
+            use crate::expression::ExpressionEvaluator;
+            let evaluator = ExpressionEvaluator::new(model);
+            let mut evaluated_attributes = HashMap::new();
+
+            for (key, value) in &task.attributes {
+                let evaluated_value = evaluator.evaluate(value)?;
+                evaluated_attributes.insert(key.clone(), evaluated_value);
+            }
+
+            executor.execute(&evaluated_attributes)
         } else {
             error!("Unknown task: {}", task.name);
             Ok(()) // Don't fail on unknown tasks for now
@@ -138,24 +126,13 @@ impl TaskRegistry {
 mod tests {
     use super::*;
     use crate::object_model::ProjectModel;
-    use std::collections::HashMap;
-
-    #[test]
+    use std::collections::HashMap;    #[test]
     fn test_message_task() -> Result<()> {
-        let mut model = ProjectModel::new();
-        model.set_property("Configuration".to_string(), "Debug".to_string());
-
         let mut attributes = HashMap::new();
-        attributes.insert("Text".to_string(), "Building $(Configuration)".to_string());
-
-        let task = Task {
-            name: "Message".to_string(),
-            attributes,
-            condition: None,
-        };
+        attributes.insert("Text".to_string(), "Building Debug".to_string());
 
         let message_task = MessageTask;
-        message_task.execute(&task, &model)?;
+        message_task.execute(&attributes)?;
 
         Ok(())
     }

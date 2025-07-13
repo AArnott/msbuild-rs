@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Result};
-use log::{info, debug, warn};
+use anyhow::{Result, anyhow};
+use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::expression::ExpressionEvaluator;
 use crate::object_model::ProjectModel;
 use crate::parser::ProjectParser;
 use crate::tasks::TaskRegistry;
-use crate::expression::ExpressionEvaluator;
 
 pub struct ProjectEvaluator {
     model: ProjectModel,
@@ -28,7 +28,8 @@ impl ProjectEvaluator {
         self.model = parser.parse_file(&path)?;
 
         // Set the project file path for task execution context
-        self.model.set_project_file_path(path.as_ref().to_path_buf());
+        self.model
+            .set_project_file_path(path.as_ref().to_path_buf());
 
         debug!("Loaded {} properties", self.model.properties.len());
         debug!("Loaded {} item types", self.model.items.len());
@@ -68,13 +69,19 @@ impl ProjectEvaluator {
         self.execute_target_recursive(target_name, &mut executed_targets)
     }
 
-    fn execute_target_recursive(&self, target_name: &str, executed_targets: &mut HashSet<String>) -> Result<()> {
+    fn execute_target_recursive(
+        &self,
+        target_name: &str,
+        executed_targets: &mut HashSet<String>,
+    ) -> Result<()> {
         if executed_targets.contains(target_name) {
             debug!("Target {} already executed, skipping", target_name);
             return Ok(());
         }
 
-        let target = self.model.get_target(target_name)
+        let target = self
+            .model
+            .get_target(target_name)
             .ok_or_else(|| anyhow!("Target not found: {}", target_name))?
             .clone();
 
@@ -82,7 +89,10 @@ impl ProjectEvaluator {
         if let Some(condition) = &target.condition {
             let evaluator = ExpressionEvaluator::new(&self.model);
             if !evaluator.evaluate_condition(condition)? {
-                info!("Skipping target {} due to condition: {}", target_name, condition);
+                info!(
+                    "Skipping target {} due to condition: {}",
+                    target_name, condition
+                );
                 return Ok(());
             }
         }

@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod integration_tests {
     use anyhow::Result;
+    use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
-    use std::fs;
 
     use crate::evaluation::ProjectEvaluator;
-    use crate::object_model::ProjectModel;
     use crate::expression::ExpressionEvaluator;
+    use crate::object_model::ProjectModel;
 
     #[test]
     fn test_simple_project_execution() -> Result<()> {
@@ -106,15 +106,22 @@ mod integration_tests {
         fs::write(&test_file, "test content")?;
 
         // Create task attributes
-        use std::collections::HashMap;        // Execute the copy task
-        use crate::tasks::{CopyTask, TaskExecutor, TaskExecutionContext};
+        use crate::tasks::{CopyTask, TaskExecutionContext, TaskExecutor};
+        use std::collections::HashMap; // Execute the copy task
 
         // Prepare evaluated attributes (simulating what TaskRegistry.execute_task does)
         let mut evaluated_attributes = HashMap::new();
-        evaluated_attributes.insert("SourceFiles".to_string(), test_file.to_string_lossy().to_string());
-        evaluated_attributes.insert("DestinationFolder".to_string(), dest_dir.to_string_lossy().to_string());
+        evaluated_attributes.insert(
+            "SourceFiles".to_string(),
+            test_file.to_string_lossy().to_string(),
+        );
+        evaluated_attributes.insert(
+            "DestinationFolder".to_string(),
+            dest_dir.to_string_lossy().to_string(),
+        );
 
-        let context = TaskExecutionContext::new(evaluated_attributes, temp_dir.path().to_path_buf());
+        let context =
+            TaskExecutionContext::new(evaluated_attributes, temp_dir.path().to_path_buf());
         let copy_task = CopyTask;
         copy_task.execute(&context)?;
 

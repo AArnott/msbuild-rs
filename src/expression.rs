@@ -22,7 +22,9 @@ impl<'a> ExpressionEvaluator<'a> {
             let full_match = &captures[0];
             let prop_name = &captures[1];
 
-            let replacement = self.model.get_property(prop_name)
+            let replacement = self
+                .model
+                .get_property(prop_name)
                 .cloned()
                 .unwrap_or_default();
 
@@ -99,7 +101,7 @@ impl<'a> ExpressionEvaluator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_model::{ProjectModel, Item};
+    use crate::object_model::{Item, ProjectModel};
     use std::collections::HashMap;
 
     #[test]
@@ -110,7 +112,9 @@ mod tests {
 
         let evaluator = ExpressionEvaluator::new(&model);
 
-        let result = evaluator.evaluate("bin/$(Configuration)/$(Platform)").unwrap();
+        let result = evaluator
+            .evaluate("bin/$(Configuration)/$(Platform)")
+            .unwrap();
         assert_eq!(result, "bin/Debug/x64");
     }
 
@@ -146,8 +150,16 @@ mod tests {
 
         let evaluator = ExpressionEvaluator::new(&model);
 
-        assert!(evaluator.evaluate_condition("'$(Configuration)' == 'Debug'").unwrap());
-        assert!(!evaluator.evaluate_condition("'$(Configuration)' == 'Release'").unwrap());
+        assert!(
+            evaluator
+                .evaluate_condition("'$(Configuration)' == 'Debug'")
+                .unwrap()
+        );
+        assert!(
+            !evaluator
+                .evaluate_condition("'$(Configuration)' == 'Release'")
+                .unwrap()
+        );
         assert!(!evaluator.evaluate_condition("").unwrap());
         assert!(evaluator.evaluate_condition("true").unwrap());
     }

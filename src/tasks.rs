@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use log::{info, error};
+use anyhow::{Result, anyhow};
+use log::{error, info};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,10 +56,14 @@ pub struct CopyTask;
 
 impl TaskExecutor for CopyTask {
     fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
-        let source_files = context.attributes.get("SourceFiles")
+        let source_files = context
+            .attributes
+            .get("SourceFiles")
             .ok_or_else(|| anyhow!("Copy task missing SourceFiles attribute"))?;
 
-        let destination_folder = context.attributes.get("DestinationFolder")
+        let destination_folder = context
+            .attributes
+            .get("DestinationFolder")
             .ok_or_else(|| anyhow!("Copy task missing DestinationFolder attribute"))?;
 
         // Resolve destination folder relative to project directory
@@ -86,13 +90,18 @@ impl TaskExecutor for CopyTask {
             };
 
             if source_path.exists() {
-                let file_name = source_path.file_name()
+                let file_name = source_path
+                    .file_name()
                     .ok_or_else(|| anyhow!("Invalid source file path: {}", source_file))?;
 
                 let final_dest_path = dest_path.join(file_name);
 
                 fs::copy(&source_path, &final_dest_path)?;
-                info!("Copied {} to {}", source_path.display(), final_dest_path.display());
+                info!(
+                    "Copied {} to {}",
+                    source_path.display(),
+                    final_dest_path.display()
+                );
             } else {
                 error!("Source file does not exist: {}", source_path.display());
             }
@@ -145,7 +154,8 @@ impl TaskRegistry {
                 evaluated_attributes.insert(key.clone(), evaluated_value);
             }
 
-            let project_directory = model.get_project_directory()
+            let project_directory = model
+                .get_project_directory()
                 .unwrap_or_else(|| PathBuf::from("."));
 
             let context = TaskExecutionContext::new(evaluated_attributes, project_directory);
@@ -161,7 +171,8 @@ impl TaskRegistry {
 mod tests {
     use super::*;
     use crate::object_model::ProjectModel;
-    use std::collections::HashMap;    #[test]
+    use std::collections::HashMap;
+    #[test]
     fn test_message_task() -> Result<()> {
         let mut attributes = HashMap::new();
         attributes.insert("Text".to_string(), "Building Debug".to_string());

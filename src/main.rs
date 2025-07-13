@@ -1,9 +1,9 @@
 mod evaluation;
+mod expression;
+mod logger;
 mod object_model;
 mod parser;
 mod tasks;
-mod logger;
-mod expression;
 mod tests;
 
 use anyhow::Result;
@@ -45,7 +45,8 @@ fn main() -> Result<()> {
         return run_sample_projects(&args);
     }
 
-    let project_path = args.project
+    let project_path = args
+        .project
         .ok_or_else(|| anyhow::anyhow!("Project path is required when not in demo mode"))?;
 
     info!("Starting MSBuild project execution");
@@ -69,12 +70,10 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
     if simple_project.exists() {
         let mut evaluator = ProjectEvaluator::new();
         match evaluator.load_project(&simple_project) {
-            Ok(()) => {
-                match evaluator.execute_target("Build") {
-                    Ok(()) => info!("✓ Simple project executed successfully"),
-                    Err(e) => info!("✗ Failed to execute Build target: {}", e),
-                }
-            }
+            Ok(()) => match evaluator.execute_target("Build") {
+                Ok(()) => info!("✓ Simple project executed successfully"),
+                Err(e) => info!("✗ Failed to execute Build target: {}", e),
+            },
             Err(e) => info!("✗ Could not load simple.proj: {}", e),
         }
     } else {
@@ -100,7 +99,10 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
             Err(e) => info!("✗ Could not load conditional.proj: {}", e),
         }
     } else {
-        info!("Conditional project not found at {}", conditional_project.display());
+        info!(
+            "Conditional project not found at {}",
+            conditional_project.display()
+        );
     }
 
     // Test 3: Project with imports
@@ -109,12 +111,10 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
     if import_project.exists() {
         let mut evaluator = ProjectEvaluator::new();
         match evaluator.load_project(&import_project) {
-            Ok(()) => {
-                match evaluator.execute_target("Build") {
-                    Ok(()) => info!("✓ Import project executed successfully"),
-                    Err(e) => info!("✗ Failed to execute Build target: {}", e),
-                }
-            }
+            Ok(()) => match evaluator.execute_target("Build") {
+                Ok(()) => info!("✓ Import project executed successfully"),
+                Err(e) => info!("✗ Failed to execute Build target: {}", e),
+            },
             Err(e) => info!("✗ Could not load with_imports.proj: {}", e),
         }
     } else {

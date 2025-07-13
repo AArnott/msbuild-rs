@@ -1,13 +1,13 @@
-use anyhow::{anyhow, Result};
-use quick_xml::events::{Event, BytesStart};
+use anyhow::{Result, anyhow};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-use crate::object_model::{ProjectModel, Item, Target, Task, Import};
 use crate::expression::ExpressionEvaluator;
+use crate::object_model::{Import, Item, ProjectModel, Target, Task};
 
 pub struct ProjectParser {
     model: ProjectModel,
@@ -57,14 +57,17 @@ impl ProjectParser {
                             if self.should_process_conditional(&attributes)? {
                                 in_item_group = true;
                             }
-                        }                        "Target" => {
+                        }
+                        "Target" => {
                             // Always load targets regardless of their conditions
                             // Conditions will be evaluated during execution phase
-                            let target_name = attributes.get("Name")
+                            let target_name = attributes
+                                .get("Name")
                                 .ok_or_else(|| anyhow!("Target missing Name attribute"))?
                                 .clone();
 
-                            let depends_on = attributes.get("DependsOnTargets")
+                            let depends_on = attributes
+                                .get("DependsOnTargets")
                                 .map(|deps| deps.split(';').map(|s| s.trim().to_string()).collect())
                                 .unwrap_or_default();
 
@@ -87,8 +90,10 @@ impl ProjectParser {
                         }
                         "UsingTask" => {
                             if let (Some(task_name), Some(assembly)) =
-                                (attributes.get("TaskName"), attributes.get("AssemblyName")) {
-                                self.model.add_using_task(task_name.clone(), assembly.clone());
+                                (attributes.get("TaskName"), attributes.get("AssemblyName"))
+                            {
+                                self.model
+                                    .add_using_task(task_name.clone(), assembly.clone());
                             }
                         }
                         task_name if current_target.is_some() => {
@@ -162,13 +167,26 @@ impl ProjectParser {
                                 }
                             }
                         }
-                        property_name if in_property_group && current_property_name.as_ref() == Some(&property_name.to_string()) => {
+                        property_name
+                            if in_property_group
+                                && current_property_name.as_ref()
+                                    == Some(&property_name.to_string()) =>
+                        {
                             current_property_name = None;
                         }
-                        item_type if in_item_group && current_item_type.as_ref() == Some(&item_type.to_string()) => {
+                        item_type
+                            if in_item_group
+                                && current_item_type.as_ref() == Some(&item_type.to_string()) =>
+                        {
                             // Process item after we have all properties
-                            if let (Some(item_type), Some(include)) = (&current_item_type, &current_item_include) {
-                                self.process_item(item_type.clone(), include.clone(), current_item_metadata.clone())?;
+                            if let (Some(item_type), Some(include)) =
+                                (&current_item_type, &current_item_include)
+                            {
+                                self.process_item(
+                                    item_type.clone(),
+                                    include.clone(),
+                                    current_item_metadata.clone(),
+                                )?;
                             }
                             current_item_type = None;
                             current_item_include = None;
@@ -195,7 +213,12 @@ impl ProjectParser {
         Ok(std::mem::take(&mut self.model))
     }
 
-    fn process_item(&mut self, item_type: String, include: String, metadata: HashMap<String, String>) -> Result<()> {
+    fn process_item(
+        &mut self,
+        item_type: String,
+        include: String,
+        metadata: HashMap<String, String>,
+    ) -> Result<()> {
         let evaluator = ExpressionEvaluator::new(&self.model);
         let evaluated_include = evaluator.evaluate(&include)?;
 
@@ -267,7 +290,10 @@ mod tests {
         let mut parser = ProjectParser::new();
         let model = parser.parse_file(temp_file.path())?;
 
-        assert_eq!(model.get_property("Configuration"), Some(&"Debug".to_string()));
+        assert_eq!(
+            model.get_property("Configuration"),
+            Some(&"Debug".to_string())
+        );
         assert_eq!(model.get_property("Platform"), Some(&"x64".to_string()));
 
         assert!(model.get_items("Compile").is_some());

@@ -38,7 +38,7 @@ pub struct ProjectModel {
     pub targets: IndexMap<String, Target>,
     pub imports: Vec<Import>,
     pub using_tasks: HashMap<String, String>, // task name -> assembly
-    pub project_file_path: Option<PathBuf>, // Path to the project file
+    pub project_file_path: Option<PathBuf>,   // Path to the project file
 }
 
 impl ProjectModel {
@@ -83,7 +83,8 @@ impl ProjectModel {
 
     pub fn get_all_item_names(&self, item_type: &str) -> String {
         if let Some(items) = self.get_items(item_type) {
-            items.iter()
+            items
+                .iter()
                 .map(|item| &item.name)
                 .cloned()
                 .collect::<Vec<String>>()
@@ -98,6 +99,8 @@ impl ProjectModel {
     }
 
     pub fn get_project_directory(&self) -> Option<PathBuf> {
-        self.project_file_path.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        self.project_file_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
     }
 }

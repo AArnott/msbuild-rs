@@ -1,6 +1,6 @@
 # Use the official Rust image as the base
-# Rust version: 1.75
-FROM rust:1.88
+# Rust version: 1.97.1
+FROM rust:1.97.1
 
 # Set the working directory
 WORKDIR /workspace

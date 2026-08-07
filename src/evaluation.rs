@@ -39,9 +39,10 @@ impl ProjectEvaluator {
         for import in &self.model.imports.clone() {
             let evaluator = ExpressionEvaluator::new(&self.model);
             if let Some(condition) = &import.condition
-                && !evaluator.evaluate_condition(condition)? {
-                    continue;
-                }
+                && !evaluator.evaluate_condition(condition)?
+            {
+                continue;
+            }
 
             let import_path = evaluator.evaluate(&import.project)?;
             info!("Processing import: {import_path}");

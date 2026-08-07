@@ -48,14 +48,12 @@ impl ProjectParser {
                         "Project" => {
                             // Root element, continue parsing
                         }
-                        "PropertyGroup"
-                            if self.should_process_conditional(&attributes)? => {
-                                in_property_group = true;
-                            }
-                        "ItemGroup"
-                            if self.should_process_conditional(&attributes)? => {
-                                in_item_group = true;
-                            }
+                        "PropertyGroup" if self.should_process_conditional(&attributes)? => {
+                            in_property_group = true;
+                        }
+                        "ItemGroup" if self.should_process_conditional(&attributes)? => {
+                            in_item_group = true;
+                        }
                         "Target" => {
                             // Always load targets regardless of their conditions
                             // Conditions will be evaluated during execution phase
@@ -78,12 +76,13 @@ impl ProjectParser {
                         }
                         "Import" => {
                             if self.should_process_conditional(&attributes)?
-                                && let Some(project) = attributes.get("Project") {
-                                    self.model.add_import(Import {
-                                        project: project.clone(),
-                                        condition: attributes.get("Condition").cloned(),
-                                    });
-                                }
+                                && let Some(project) = attributes.get("Project")
+                            {
+                                self.model.add_import(Import {
+                                    project: project.clone(),
+                                    condition: attributes.get("Condition").cloned(),
+                                });
+                            }
                         }
                         "UsingTask" => {
                             if let (Some(task_name), Some(assembly)) =
@@ -101,11 +100,13 @@ impl ProjectParser {
                                 condition: attributes.get("Condition").cloned(),
                             });
                         }
-                        property_name if in_property_group
+                        property_name
+                            if in_property_group
                             // Only set property name if there's no condition or condition is true
-                            && self.should_process_conditional(&attributes)? => {
-                                current_property_name = Some(property_name.to_string());
-                            }
+                            && self.should_process_conditional(&attributes)? =>
+                        {
+                            current_property_name = Some(property_name.to_string());
+                        }
                         item_type if in_item_group => {
                             current_item_type = Some(item_type.to_string());
                             current_item_metadata.clear();
@@ -158,9 +159,10 @@ impl ProjectParser {
                         }
                         _task_name if current_task.is_some() => {
                             if let Some(task) = current_task.take()
-                                && let Some(ref mut target) = current_target {
-                                    target.tasks.push(task);
-                                }
+                                && let Some(ref mut target) = current_target
+                            {
+                                target.tasks.push(task);
+                            }
                         }
                         property_name
                             if in_property_group
@@ -192,10 +194,11 @@ impl ProjectParser {
                 Ok(Event::Text(e)) => {
                     let text = e.decode()?.trim().to_string();
                     if !text.is_empty()
-                        && let Some(ref prop_name) = current_property_name {
-                            // Store the raw property value, don't evaluate yet
-                            self.model.set_property(prop_name.clone(), text);
-                        }
+                        && let Some(ref prop_name) = current_property_name
+                    {
+                        // Store the raw property value, don't evaluate yet
+                        self.model.set_property(prop_name.clone(), text);
+                    }
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(anyhow!("Error parsing XML: {}", e)),

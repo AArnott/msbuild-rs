@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildThisFileName)' == 'selected.props'">
+    <SelectedImport>yes</SelectedImport>
+  </PropertyGroup>
+</Project>

@@ -2,7 +2,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::debug;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,8 +23,10 @@ pub(crate) struct LoadOutput {
 struct EvaluationState {
     model: ProjectModel,
     global_properties: PropertyMap,
-    import_stack: HashSet<PathBuf>,
-    imported_files: HashSet<PathBuf>,
+    active_import_stack: Vec<ActiveImport>,
+    completed_imports: HashSet<PathBuf>,
+    canonical_paths: HashMap<PathBuf, PathBuf>,
+    source_cache: HashMap<PathBuf, String>,
     render_preprocessed: bool,
     sdk_root: Option<PathBuf>,
     // A no-allocation seam for a future opt-in diagnostic sink.
@@ -57,6 +58,19 @@ struct PendingItem {
 struct ImportAttributes {
     project: String,
     condition: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActiveImport {
+    identity: PathBuf,
+    lexical_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct ChooseFrame {
+    parent_active: bool,
+    branch_active: bool,
+    branch_selected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -168,8 +182,10 @@ impl EvaluationState {
         Ok(Self {
             model,
             global_properties,
-            import_stack: HashSet::new(),
-            imported_files: HashSet::new(),
+            active_import_stack: Vec::new(),
+            completed_imports: HashSet::new(),
+            canonical_paths: HashMap::new(),
+            source_cache: HashMap::new(),
             render_preprocessed,
             sdk_root,
             _diagnostics: DiagnosticMode::None,
@@ -179,22 +195,33 @@ impl EvaluationState {
     fn evaluate_file(&mut self, path: &Path, include_project_element: bool) -> Result<String> {
         let lexical_path = lexical_absolute(path)
             .with_context(|| format!("Failed to resolve project {}", path.display()))?;
-        let canonical_identity = canonical_file_identity(&lexical_path)?;
-        if self.import_stack.contains(&canonical_identity) {
-            bail!("Circular import detected at {}", lexical_path.display());
+        let canonical_identity = self.canonical_identity(&lexical_path)?;
+        if let Some(cycle_start) = self
+            .active_import_stack
+            .iter()
+            .position(|import| import.identity == canonical_identity)
+        {
+            let mut chain = self.active_import_stack[cycle_start..]
+                .iter()
+                .map(|import| display_path(&import.lexical_path))
+                .collect::<Vec<_>>();
+            chain.push(display_path(&lexical_path));
+            bail!("MSB4019: Circular import detected: {}", chain.join(" -> "));
         }
-        if !self.imported_files.insert(canonical_identity.clone()) {
+        if self.completed_imports.contains(&canonical_identity) {
             debug!("Skipping duplicate import {}", lexical_path.display());
             return Ok(String::new());
         }
-        self.import_stack.insert(canonical_identity.clone());
+        self.active_import_stack.push(ActiveImport {
+            identity: canonical_identity.clone(),
+            lexical_path: lexical_path.clone(),
+        });
 
-        let raw_source = fs::read_to_string(&lexical_path)
-            .with_context(|| format!("Failed to read project {}", lexical_path.display()))?;
+        let raw_source = self.cached_source(&lexical_path, &canonical_identity)?;
         let source = if self.render_preprocessed {
-            Cow::Owned(normalize_source(&raw_source))
+            normalize_source(&raw_source)
         } else {
-            Cow::Borrowed(raw_source.trim_start_matches('\u{feff}'))
+            raw_source.trim_start_matches('\u{feff}').to_string()
         };
         let (content_start, content_end) =
             project_content_bounds(&source, include_project_element)?;
@@ -229,6 +256,7 @@ impl EvaluationState {
         let mut current_target: Option<Target> = None;
         let mut current_task: Option<Task> = None;
         let mut nonempty_import: Option<(usize, ImportAttributes, bool)> = None;
+        let mut choices = Vec::<ChooseFrame>::new();
 
         loop {
             let event_start = reader.buffer_position() as usize;
@@ -247,22 +275,72 @@ impl EvaluationState {
                     self.evaluate_project_default_targets(&element, &reader, &lexical_path)?;
                 }
                 Event::Start(element)
+                    if element.name().as_ref() == b"Choose" && current_target.is_none() =>
+                {
+                    choices.push(ChooseFrame {
+                        parent_active: Self::choose_content_active(&choices),
+                        branch_active: false,
+                        branch_selected: false,
+                    });
+                }
+                Event::Start(element)
+                    if element.name().as_ref() == b"When" && current_target.is_none() =>
+                {
+                    let (parent_active, branch_selected) = choices
+                        .last()
+                        .map(|choice| (choice.parent_active, choice.branch_selected))
+                        .ok_or_else(|| anyhow!("When element has no enclosing Choose"))?;
+                    let is_selected = parent_active
+                        && !branch_selected
+                        && self.evaluate_optional_condition(&element, &reader, &lexical_path)?;
+                    let choice = choices.last_mut().expect("choice must still be present");
+                    choice.branch_active = is_selected;
+                    choice.branch_selected |= is_selected;
+                }
+                Event::Start(element)
+                    if element.name().as_ref() == b"Otherwise" && current_target.is_none() =>
+                {
+                    let choice = choices
+                        .last_mut()
+                        .ok_or_else(|| anyhow!("Otherwise element has no enclosing Choose"))?;
+                    choice.branch_active = choice.parent_active && !choice.branch_selected;
+                    choice.branch_selected |= choice.branch_active;
+                }
+                Event::Start(element)
                     if element.name().as_ref() == b"PropertyGroup" && current_target.is_none() =>
                 {
-                    property_group =
-                        Some(self.evaluate_optional_condition(&element, &reader, &lexical_path)?);
+                    property_group = Some(
+                        Self::choose_content_active(&choices)
+                            && self.evaluate_optional_condition(
+                                &element,
+                                &reader,
+                                &lexical_path,
+                            )?,
+                    );
                 }
                 Event::Start(element)
                     if element.name().as_ref() == b"ItemGroup" && current_target.is_none() =>
                 {
-                    item_group =
-                        Some(self.evaluate_optional_condition(&element, &reader, &lexical_path)?);
+                    item_group = Some(
+                        Self::choose_content_active(&choices)
+                            && self.evaluate_optional_condition(
+                                &element,
+                                &reader,
+                                &lexical_path,
+                            )?,
+                    );
                 }
                 Event::Start(element)
                     if element.name().as_ref() == b"ImportGroup" && current_target.is_none() =>
                 {
-                    import_group =
-                        Some(self.evaluate_optional_condition(&element, &reader, &lexical_path)?);
+                    import_group = Some(
+                        Self::choose_content_active(&choices)
+                            && self.evaluate_optional_condition(
+                                &element,
+                                &reader,
+                                &lexical_path,
+                            )?,
+                    );
                     if self.render_preprocessed {
                         output.push_str(&source[cursor..event_start]);
                         output.push_str("<!--");
@@ -281,7 +359,11 @@ impl EvaluationState {
                         project: import.project.clone(),
                         condition: import.condition.clone(),
                     });
-                    nonempty_import = Some((event_start, import, import_group.unwrap_or(true)));
+                    nonempty_import = Some((
+                        event_start,
+                        import,
+                        import_group.unwrap_or(true) && Self::choose_content_active(&choices),
+                    ));
                 }
                 Event::Start(element)
                     if element.name().as_ref() == b"Target" && current_target.is_none() =>
@@ -370,7 +452,7 @@ impl EvaluationState {
                         event_start,
                         event_end,
                         import,
-                        import_group.unwrap_or(true),
+                        import_group.unwrap_or(true) && Self::choose_content_active(&choices),
                         import_group_indentation.as_deref(),
                         &lexical_path,
                         &mut cursor,
@@ -388,7 +470,8 @@ impl EvaluationState {
                     }
                 }
                 Event::Empty(element) if property_group.is_some() => {
-                    let eligible = property_group.unwrap_or(false)
+                    let eligible = Self::choose_content_active(&choices)
+                        && property_group.unwrap_or(false)
                         && self.evaluate_optional_condition(&element, &reader, &lexical_path)?;
                     if eligible {
                         self.assign_property(xml_name(&element), "", &lexical_path)?;
@@ -484,6 +567,23 @@ impl EvaluationState {
                     import_group = None;
                     import_group_indentation = None;
                 }
+                Event::End(element)
+                    if (element.name().as_ref() == b"When"
+                        || element.name().as_ref() == b"Otherwise")
+                        && current_target.is_none() =>
+                {
+                    let choice = choices
+                        .last_mut()
+                        .ok_or_else(|| anyhow!("Choice branch end has no enclosing Choose"))?;
+                    choice.branch_active = false;
+                }
+                Event::End(element)
+                    if element.name().as_ref() == b"Choose" && current_target.is_none() =>
+                {
+                    choices
+                        .pop()
+                        .ok_or_else(|| anyhow!("Choose end has no opening Choose"))?;
+                }
                 Event::End(element) if element.name().as_ref() == b"Target" => {
                     if let Some(target) = current_target.take() {
                         self.model.add_target(target);
@@ -542,7 +642,12 @@ impl EvaluationState {
             rendered_sdk_targets.push(self.evaluate_file(targets_path, false)?);
         }
 
-        self.import_stack.remove(&canonical_identity);
+        let completed = self
+            .active_import_stack
+            .pop()
+            .expect("active import stack underflow");
+        debug_assert_eq!(completed.identity, canonical_identity);
+        self.completed_imports.insert(canonical_identity);
 
         if !sdk_imports.is_empty() && self.render_preprocessed {
             let mut props_markers = String::new();
@@ -573,6 +678,33 @@ impl EvaluationState {
         }
 
         Ok(output)
+    }
+
+    fn canonical_identity(&mut self, lexical_path: &Path) -> Result<PathBuf> {
+        if let Some(identity) = self.canonical_paths.get(lexical_path) {
+            return Ok(identity.clone());
+        }
+        let identity = canonical_file_identity(lexical_path)?;
+        self.canonical_paths
+            .insert(lexical_path.to_path_buf(), identity.clone());
+        Ok(identity)
+    }
+
+    fn cached_source(&mut self, lexical_path: &Path, canonical_identity: &Path) -> Result<String> {
+        if let Some(source) = self.source_cache.get(canonical_identity) {
+            return Ok(source.clone());
+        }
+        let source = fs::read_to_string(lexical_path)
+            .with_context(|| format!("Failed to read project {}", lexical_path.display()))?;
+        self.source_cache
+            .insert(canonical_identity.to_path_buf(), source.clone());
+        Ok(source)
+    }
+
+    fn choose_content_active(choices: &[ChooseFrame]) -> bool {
+        choices
+            .iter()
+            .all(|choice| choice.parent_active && choice.branch_active)
     }
 
     fn evaluate_optional_condition(
@@ -707,7 +839,9 @@ impl EvaluationState {
 
         if !group_enabled {
             if self.render_preprocessed {
+                output.push_str("<!--");
                 output.push_str(source_element);
+                output.push_str("-->");
             }
             *cursor = event_end;
             return Ok(());
@@ -723,7 +857,9 @@ impl EvaluationState {
             })?
         {
             if self.render_preprocessed {
+                output.push_str("<!--");
                 output.push_str(source_element);
+                output.push_str("-->");
             }
             *cursor = event_end;
             return Ok(());
@@ -749,6 +885,21 @@ impl EvaluationState {
             importing_path.display(),
             paths.len()
         );
+        let all_completed = paths
+            .iter()
+            .map(|path| self.canonical_identity(path))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .all(|identity| self.completed_imports.contains(identity));
+        if all_completed {
+            if self.render_preprocessed {
+                output.push_str("<!--");
+                output.push_str(source_element);
+                output.push_str("-->");
+            }
+            *cursor = event_end;
+            return Ok(());
+        }
 
         for path in paths {
             let imported = self.evaluate_file(&path, false)?;

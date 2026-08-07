@@ -816,6 +816,185 @@ mod tests {
     }
 
     #[test]
+    fn upstream_imports_only_included_once_uses_canonical_identity() -> Result<()> {
+        // Port of dotnet/msbuild Evaluator_Tests.ImportsOnlyIncludedOnce.
+        let directory = TempDir::new()?;
+        fs::create_dir(directory.path().join("imports"))?;
+        write_project(
+            &directory,
+            "imports/common.props",
+            r#"<Project><PropertyGroup>
+  <ImportCount>$(ImportCount)x</ImportCount>
+  <ImportedCurrentFile Condition="'$(MSBuildThisFile)' == 'common.props'">yes</ImportedCurrentFile>
+</PropertyGroup></Project>"#,
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <Import Project="imports/../imports/common.props" />
+  <Import Project="imports/common.props" />
+  <ImportGroup Condition="'$(MSBuildThisFile)' == 'project.proj'">
+    <Import Project="imports/common.props" Condition="'$(MSBuildThisFile)' == 'project.proj'" />
+  </ImportGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("ImportCount")
+                .map(String::as_str),
+            Some("x")
+        );
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("ImportedCurrentFile")
+                .map(String::as_str),
+            Some("yes")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_reject_circular_imports_reports_the_complete_chain() -> Result<()> {
+        // Closest local port of Evaluator_Tests.RejectCircularImportsWithCircularImports.
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "a.proj",
+            r#"<Project><Import Project="b.props" /></Project>"#,
+        );
+        write_project(
+            &directory,
+            "b.props",
+            r#"<Project><Import Project="c.props" /></Project>"#,
+        );
+        write_project(
+            &directory,
+            "c.props",
+            r#"<Project><Import Project="./a.proj" /></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        let error = evaluator
+            .load_project(directory.path().join("a.proj"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Circular import detected"));
+        assert!(error.contains("a.proj ->"));
+        assert!(error.contains("b.props ->"));
+        assert!(error.contains("c.props ->"));
+        assert!(error.ends_with("a.proj"));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_verify_loading_import_scenarios_handles_conditions_and_sorted_globs() -> Result<()>
+    {
+        // Representative file-based port of Evaluator_Tests.VerifyLoadingImportScenarios.
+        let directory = TempDir::new()?;
+        fs::create_dir(directory.path().join("imports"))?;
+        write_project(
+            &directory,
+            "imports/a.props",
+            "<Project><PropertyGroup><Order>$(Order)a</Order></PropertyGroup></Project>",
+        );
+        write_project(
+            &directory,
+            "imports/b.props",
+            "<Project><PropertyGroup><Order>$(Order)b</Order></PropertyGroup></Project>",
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup><Enabled>true</Enabled></PropertyGroup>
+  <ImportGroup Condition="'$(MSBuildThisFile)' == 'project.proj' And '$(Enabled)' == 'true'">
+    <Import Project="imports/*.props" />
+    <Import Project="missing.props" Condition="false" />
+  </ImportGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("Order")
+                .map(String::as_str),
+            Some("ab")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_all_evaluated_items_choose_selects_only_the_first_true_branch() -> Result<()> {
+        // Representative port of Evaluator_Tests.AllEvaluatedItems Choose coverage.
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "selected.props",
+            "<Project><PropertyGroup><ImportedFromChoose>yes</ImportedFromChoose></PropertyGroup></Project>",
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup><Selection>first</Selection></PropertyGroup>
+  <Choose>
+    <When Condition="'$(Selection)' == 'first'">
+      <PropertyGroup><ChooseValue>first</ChooseValue></PropertyGroup>
+      <ItemGroup><Chosen Include="first-item" /></ItemGroup>
+      <Choose>
+        <When Condition="false"><PropertyGroup><Nested>wrong</Nested></PropertyGroup></When>
+        <Otherwise><PropertyGroup><Nested>otherwise</Nested></PropertyGroup></Otherwise>
+      </Choose>
+    </When>
+    <When Condition="true">
+      <PropertyGroup><ChooseValue>second</ChooseValue></PropertyGroup>
+      <ItemGroup><Chosen Include="second-item" /></ItemGroup>
+    </When>
+    <Otherwise><PropertyGroup><ChooseValue>otherwise</ChooseValue></PropertyGroup></Otherwise>
+  </Choose>
+  <Import Project="selected.props" Condition="'$(ChooseValue)' == 'first'" />
+</Project>"#,
+        );
+        let output_path = directory.path().join("out.xml");
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project_and_write_preprocessed(project, &output_path)?;
+        let model = evaluator.get_model();
+
+        assert_eq!(
+            model.get_property("ChooseValue").map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(
+            model.get_property("Nested").map(String::as_str),
+            Some("otherwise")
+        );
+        assert_eq!(
+            model.get_property("ImportedFromChoose").map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            model
+                .get_items("Chosen")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first-item"]
+        );
+        let output = fs::read_to_string(output_path)?;
+        assert!(output.contains("<ImportedFromChoose>yes</ImportedFromChoose>"));
+        Ok(())
+    }
+
+    #[test]
     fn finalized_project_is_send_sync_and_arc_shared() -> Result<()> {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<EvaluatedProject>();

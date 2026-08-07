@@ -89,10 +89,13 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 - [x] Resolve imports relative to the importing file.
 - [x] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
 - [x] Support deterministic preprocessing of import globs and conditional imports.
-- [x] Honor `ImportGroup` conditions.
-- [ ] Complete duplicate/cyclic import warning and diagnostic parity. Canonical
-  identity detection and duplicate skipping are implemented.
-- [ ] Implement `Choose`, `When`, and `Otherwise`.
+- [x] Honor `ImportGroup` and child `Import` conditions using the importing
+  file's current-file properties and source-position state.
+- [x] Detect duplicates with canonical file identity, evaluate each physical
+  file once, and reject active import cycles with a deterministic import chain.
+- [x] Implement project-level `Choose`, `When`, and `Otherwise`, including
+  nested choices, properties, and items in the selected branch. Imports remain
+  accepted at their conventional project-level locations.
 - [x] Implement ordered implicit `Sdk.props` and `Sdk.targets` imports for
   `Project@Sdk` and top-level `Sdk Name/Version` declarations, with cached
   `dotnet` host discovery that honors `global.json`.
@@ -129,3 +132,8 @@ The upstream-test mapping and fixture status are maintained in
   produce the compatible empty value without recursive reevaluation.
 - Property lookup is indexed and case-insensitive. Broader item and metadata
   case-insensitivity remains a later wave.
+- Import suppression matches the evaluate-once behavior, but does not yet emit
+  MSBuild's `MSB4011` duplicate-import warning or source locations. Cycle
+  diagnostics are actionable chains but not byte-for-byte `MSB4006` parity.
+- `Choose` support is limited to project evaluation structure; target-body
+  `Choose`/task selection and invalid structural placements remain deferred.

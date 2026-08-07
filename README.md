@@ -36,6 +36,9 @@ msbuild-rs --demo
 
 # Load and write an evaluated project without executing targets
 msbuild-rs --project path/to/project.proj --preprocess out.xml
+
+# Query evaluated properties and item identities/metadata without executing targets
+msbuild-rs --project path/to/project.proj --get-property Configuration --get-item Compile
 ```
 
 ### Project File Format
@@ -158,7 +161,18 @@ cargo run -- --demo
 # Compare preprocessing startup and evaluation performance
 cargo build --release
 ./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
+
+# Also retain raw and normalized preprocess output and report the first mismatch
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -CompareOutput
+
+# Compare a semantic evaluation fixture with dotnet msbuild without running targets
+cargo build
+./scripts/compare-evaluation.ps1 -Fixture ./fixtures/evaluation/basic/fixture.json
 ```
+
+`global.json` pins the .NET SDK used by the comparison scripts and CI. The
+semantic runner writes raw tool output and deterministic, path-normalized JSON
+to `benchmark-results/evaluation`.
 
 ## Sample Projects
 

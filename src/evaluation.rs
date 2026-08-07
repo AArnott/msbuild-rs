@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use log::{debug, info, warn};
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::expression::ExpressionEvaluator;
@@ -12,6 +13,20 @@ use crate::tasks::TaskRegistry;
 pub struct ProjectEvaluator {
     model: ProjectModel,
     task_registry: TaskRegistry,
+}
+
+/// A deterministic, target-free projection of an evaluated project.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct EvaluationQueryResult {
+    pub properties: BTreeMap<String, String>,
+    pub items: BTreeMap<String, Vec<EvaluationQueryItem>>,
+}
+
+/// An item selected by an evaluation query.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct EvaluationQueryItem {
+    pub identity: String,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl ProjectEvaluator {
@@ -38,7 +53,13 @@ impl ProjectEvaluator {
 
         // Process imports (simplified - would need to handle relative paths properly in real implementation)
         for import in &self.model.imports.clone() {
-            let evaluator = ExpressionEvaluator::new(&self.model);
+            let project_directory = self.model.get_project_directory();
+            let evaluator = ExpressionEvaluator::with_base_directory(
+                &self.model,
+                project_directory
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("")),
+            );
             if let Some(condition) = &import.condition
                 && !evaluator.evaluate_condition(condition)?
             {
@@ -49,14 +70,23 @@ impl ProjectEvaluator {
             info!("Processing import: {import_path}");
 
             // In a real implementation, this would resolve relative paths and handle SDK imports
-            if Path::new(&import_path).exists() {
+            let import_path = Path::new(&import_path);
+            let import_path = if import_path.is_absolute() {
+                import_path.to_path_buf()
+            } else {
+                project_directory
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(import_path)
+            };
+            if import_path.exists() {
                 let mut import_parser = ProjectParser::new();
-                let import_model = import_parser.parse_file(&import_path)?;
+                let import_model = import_parser.parse_file(import_path)?;
 
                 // Merge the imported model into the current model
                 self.merge_model(import_model)?;
             } else {
-                warn!("Import file not found: {import_path}");
+                warn!("Import file not found: {}", import_path.display());
             }
         }
 
@@ -72,6 +102,52 @@ impl ProjectEvaluator {
 
     pub fn write_preprocessed_project<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         ProjectPreprocessor::new(&self.model).write(path)
+    }
+
+    /// Select evaluated properties and items without executing targets.
+    pub fn query_evaluation(
+        &self,
+        property_names: &[String],
+        item_types: &[String],
+    ) -> Result<EvaluationQueryResult> {
+        let base_directory = self.model.get_project_directory().unwrap_or_default();
+        let expression_evaluator =
+            ExpressionEvaluator::with_base_directory(&self.model, &base_directory);
+        let mut properties = BTreeMap::new();
+        let mut items = BTreeMap::new();
+
+        for name in property_names {
+            let value = self
+                .model
+                .get_property(name)
+                .map(|value| expression_evaluator.evaluate(value))
+                .transpose()?
+                .unwrap_or_default();
+            properties.insert(name.clone(), value);
+        }
+
+        for item_type in item_types {
+            let queried_items = self
+                .model
+                .get_items(item_type)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| EvaluationQueryItem {
+                            identity: item.name.clone(),
+                            metadata: item
+                                .metadata
+                                .iter()
+                                .map(|(name, value)| (name.clone(), value.clone()))
+                                .collect(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.insert(item_type.clone(), queried_items);
+        }
+
+        Ok(EvaluationQueryResult { properties, items })
     }
 
     fn execute_target_recursive(
@@ -191,6 +267,39 @@ mod tests {
         evaluator.load_project(temp_file.path())?;
         evaluator.execute_target("Build")?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn query_evaluation_does_not_execute_targets_and_expands_selected_values() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let import_path = directory.path().join("values.props");
+        std::fs::write(
+            &import_path,
+            r#"<Project><PropertyGroup><Imported>from-import</Imported></PropertyGroup></Project>"#,
+        )?;
+        let project_path = directory.path().join("project.proj");
+        std::fs::write(
+            &project_path,
+            r#"<Project>
+  <PropertyGroup><Base>base</Base><Derived>$(Base)-value</Derived></PropertyGroup>
+  <Import Project="values.props" />
+  <ItemGroup><Compile Include="Program.cs"><Kind>source</Kind></Compile></ItemGroup>
+  <Target Name="Build"><Error Text="Targets must not run during a query" /></Target>
+</Project>"#,
+        )?;
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(&project_path)?;
+        let result = evaluator.query_evaluation(
+            &["Derived".to_string(), "Imported".to_string()],
+            &["Compile".to_string()],
+        )?;
+
+        assert_eq!(result.properties["Derived"], "base-value");
+        assert_eq!(result.properties["Imported"], "from-import");
+        assert_eq!(result.items["Compile"][0].identity, "Program.cs");
+        assert_eq!(result.items["Compile"][0].metadata["Kind"], "source");
         Ok(())
     }
 }

@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <Configuration>Debug</Configuration>
+    <Base>base</Base>
+    <Derived>$(Base)-$(Configuration)</Derived>
+    <ConditionalValue Condition="'$(Configuration)' == 'Debug'">selected</ConditionalValue>
+  </PropertyGroup>
+  <Import Project="values.props" />
+  <ItemGroup>
+    <Compile Include="one.cs;two.cs">
+      <Kind>source</Kind>
+    </Compile>
+    <Content Include="content.txt" />
+  </ItemGroup>
+</Project>

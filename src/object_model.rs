@@ -67,7 +67,12 @@ impl ProjectModel {
     }
 
     pub fn get_items(&self, item_type: &str) -> Option<&Vec<Item>> {
-        self.items.get(item_type)
+        self.items.get(item_type).or_else(|| {
+            self.items
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(item_type))
+                .map(|(_, items)| items)
+        })
     }
 
     pub fn add_target(&mut self, target: Target) {

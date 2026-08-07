@@ -1,0 +1,24 @@
+{
+  "name": "basic-properties-items-conditions-imports",
+  "project": "project.proj",
+  "properties": [
+    "Configuration",
+    "Base",
+    "Derived",
+    "ConditionalValue",
+    "ImportedValue",
+    "ImportedDerived"
+  ],
+  "items": [
+    {
+      "type": "Compile",
+      "metadata": [
+        "Kind"
+      ]
+    },
+    {
+      "type": "Content",
+      "metadata": []
+    }
+  ]
+}

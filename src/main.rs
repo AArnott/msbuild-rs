@@ -10,6 +10,7 @@ mod tests;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
+use std::io;
 use std::path::PathBuf;
 
 use crate::evaluation::ProjectEvaluator;
@@ -30,6 +31,14 @@ struct Args {
     /// Write the evaluated project without executing targets
     #[arg(long, value_name = "PATH")]
     preprocess: Option<PathBuf>,
+
+    /// Print selected evaluated property values as JSON without executing targets
+    #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+    get_property: Vec<String>,
+
+    /// Print selected evaluated item identities and metadata as JSON without executing targets
+    #[arg(long, value_name = "ITEM_TYPE", action = clap::ArgAction::Append)]
+    get_item: Vec<String>,
 
     /// Verbose logging
     #[arg(short, long)]
@@ -60,6 +69,12 @@ fn main() -> Result<()> {
 
     let mut evaluator = ProjectEvaluator::new();
     evaluator.load_project(&project_path)?;
+    if !args.get_property.is_empty() || !args.get_item.is_empty() {
+        let result = evaluator.query_evaluation(&args.get_property, &args.get_item)?;
+        serde_json::to_writer_pretty(io::stdout(), &result)?;
+        println!();
+        return Ok(());
+    }
     if let Some(output_path) = args.preprocess {
         evaluator.write_preprocessed_project(output_path)?;
         return Ok(());

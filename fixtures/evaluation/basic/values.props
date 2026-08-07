@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <ImportedValue>from-import</ImportedValue>
+    <ImportedDerived>$(ImportedValue)-value</ImportedDerived>
+  </PropertyGroup>
+</Project>

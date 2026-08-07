@@ -22,6 +22,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Set up pinned .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Log .NET SDK and MSBuild SDK path
+        shell: pwsh
+        run: |
+          dotnet --info
+          $sdkPath = (dotnet msbuild sample_projects/simple.proj -nologo -getProperty:MSBuildSDKsPath).Trim()
+          Write-Host "MSBuildSDKsPath=$sdkPath"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,6 +56,12 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Compare evaluation compatibility fixture
+        shell: pwsh
+        run: |
+          $executable = if ($IsWindows) { "target/debug/msbuild-rs.exe" } else { "target/debug/msbuild-rs" }
+          ./scripts/compare-evaluation.ps1 -Fixture fixtures/evaluation/basic/fixture.json -RustExecutable $executable
 
       - name: Run demo mode
         run: cargo run -- --demo

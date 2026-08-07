@@ -6,10 +6,11 @@ This worklist tracks the behavior needed before preprocessing performance can be
 
 - [x] Measure fresh process startup, project loading, and preprocessed output creation.
 - [x] Support configurable warmups and iterations and retain raw CSV samples.
-- [ ] Add a parity runner that compares normalized preprocessed output for compatibility fixtures.
-- [ ] Pin the .NET SDK used for repeatable baseline results.
+- [x] Add a parity runner that compares normalized preprocessed output for compatibility fixtures.
+- [x] Pin the .NET SDK used for repeatable baseline results.
 - [ ] Add larger generated fixtures for properties, items, conditions, and import graphs.
-- [ ] Report wall-clock distribution and peak working set.
+- [x] Report wall-clock distribution.
+- [ ] Report peak working set.
 
 Run the current baseline after `cargo build --release`:
 
@@ -64,7 +65,7 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 - [x] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
 - [ ] Support relational operators and numeric/version comparisons.
 - [x] Support boolean coercion, case-insensitive comparisons, and quoted literals.
-- [ ] Implement intrinsic condition functions: `Exists`, `HasTrailingSlash`, and `IsOsPlatform`.
+- [ ] Implement the remaining intrinsic condition function: `IsOsPlatform`.
 - [x] Implement `Exists`, `HasTrailingSlash`, SDK version comparisons, feature-wave checks, and common string predicates.
 - [x] Produce errors for malformed conditions instead of treating arbitrary text as true.
 
@@ -100,7 +101,11 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 ## Parity Fixtures
 
 - [ ] Each completed feature has a minimal standalone project fixture.
-- [ ] Capture queried properties and items from conventional MSBuild for semantic comparison.
-- [ ] Normalize machine-specific paths before comparing outputs.
+- [x] Capture queried properties and items from conventional MSBuild for semantic comparison.
+- [x] Normalize machine-specific paths before comparing outputs.
 - [ ] Cover Windows and a non-Windows platform in CI.
-- [ ] Keep execution/task performance separate from evaluation/preprocessing performance.
+- [x] Cover Windows and a non-Windows platform in CI.
+- [x] Keep execution/task performance separate from evaluation/preprocessing performance.
+
+The upstream-test mapping and fixture status are maintained in
+[the evaluation compatibility matrix](evaluation-compatibility-matrix.md).

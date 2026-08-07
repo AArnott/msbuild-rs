@@ -5,18 +5,93 @@ param(
     [int]$Iterations = 20,
     [ValidateRange(0, 1000)]
     [int]$Warmup = 3,
-    [string]$RustExecutable = (Join-Path $PSScriptRoot "..\target\release\msbuild-rs.exe"),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\benchmark-results")
+    [string]$RustExecutable,
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\benchmark-results"),
+    [switch]$CompareOutput,
+    [switch]$FailOnMismatch
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($RustExecutable)) {
+    $executableName = if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [System.Runtime.InteropServices.OSPlatform]::Windows)) {
+        "msbuild-rs.exe"
+    } else {
+        "msbuild-rs"
+    }
+    $RustExecutable = Join-Path $PSScriptRoot "..\target\release\$executableName"
+}
 $projectPath = (Resolve-Path $Project).Path
 $rustPath = (Resolve-Path $RustExecutable -ErrorAction Stop).Path
 $outputPath = [System.IO.Path]::GetFullPath($OutputDirectory)
 [System.IO.Directory]::CreateDirectory($outputPath) | Out-Null
+$dotnetSdkVersion = (& dotnet --version).Trim()
+$sdkPath = (& dotnet msbuild $projectPath -nologo -getProperty:MSBuildSDKsPath).Trim()
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not query MSBuildSDKsPath (exit code $LASTEXITCODE)"
+}
+Write-Host ".NET SDK: $dotnetSdkVersion"
+Write-Host "MSBuildSDKsPath: $sdkPath"
 
 $dotnetOutput = Join-Path $outputPath "dotnet-preprocessed.xml"
 $rustOutput = Join-Path $outputPath "rust-preprocessed.xml"
+
+function Normalize-PreprocessedOutput {
+    param(
+        [string]$InputPath,
+        [string]$NormalizedPath,
+        [string]$ProjectDirectory,
+        [string]$SdkPath
+    )
+
+    $content = [System.IO.File]::ReadAllText($InputPath)
+    $content = $content.TrimStart([char]0xFEFF).Replace("`r`n", "`n").Replace("`r", "`n")
+    foreach ($replacement in @(
+            @{ Path = $ProjectDirectory; Token = "<PROJECT_DIRECTORY>" },
+            @{ Path = $SdkPath; Token = "<MSBUILD_SDKS_PATH>" }
+        )) {
+        if (-not [string]::IsNullOrWhiteSpace($replacement.Path)) {
+            $content = [regex]::Replace(
+                $content,
+                [regex]::Escape($replacement.Path),
+                $replacement.Token,
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+    [System.IO.File]::WriteAllText($NormalizedPath, $content.Replace("`n", [Environment]::NewLine))
+    return $content
+}
+
+function Write-PreprocessMismatchDiagnostic {
+    param(
+        [string]$Expected,
+        [string]$Actual,
+        [string]$Path
+    )
+
+    $expectedLines = $Expected -split "`n"
+    $actualLines = $Actual -split "`n"
+    $lineCount = [Math]::Max($expectedLines.Count, $actualLines.Count)
+    $firstDifference = 0
+    for ($index = 0; $index -lt $lineCount; $index++) {
+        $expectedLine = if ($index -lt $expectedLines.Count) { $expectedLines[$index] } else { "<end of file>" }
+        $actualLine = if ($index -lt $actualLines.Count) { $actualLines[$index] } else { "<end of file>" }
+        if ($expectedLine -cne $actualLine) {
+            $firstDifference = $index
+            break
+        }
+    }
+
+    $start = [Math]::Max(0, $firstDifference - 2)
+    $end = [Math]::Min($lineCount - 1, $firstDifference + 2)
+    $diagnostic = for ($index = $start; $index -le $end; $index++) {
+        $expectedLine = if ($index -lt $expectedLines.Count) { $expectedLines[$index] } else { "<end of file>" }
+        $actualLine = if ($index -lt $actualLines.Count) { $actualLines[$index] } else { "<end of file>" }
+        "line $($index + 1):`n  dotnet: $expectedLine`n  rust:   $actualLine"
+    }
+    $diagnostic | Set-Content -Path $Path -Encoding utf8
+    return "Preprocessed output differs at line $($firstDifference + 1). See $Path"
+}
 
 function Invoke-TimedCommand {
     param(
@@ -108,3 +183,24 @@ $summary = @(
 $summary | Format-Table -AutoSize
 Write-Host ("Median speed ratio (dotnet / rust): {0:N2}x" -f ($dotnetSummary.MedianMs / $rustSummary.MedianMs))
 Write-Host "Raw samples: $samplesPath"
+
+if ($CompareOutput) {
+    $projectDirectory = Split-Path -Parent $projectPath
+    $dotnetNormalizedPath = Join-Path $outputPath "dotnet-preprocessed.normalized.xml"
+    $rustNormalizedPath = Join-Path $outputPath "rust-preprocessed.normalized.xml"
+    $dotnetNormalized = Normalize-PreprocessedOutput $dotnetOutput $dotnetNormalizedPath $projectDirectory $sdkPath
+    $rustNormalized = Normalize-PreprocessedOutput $rustOutput $rustNormalizedPath $projectDirectory $sdkPath
+
+    if ($dotnetNormalized -ceq $rustNormalized) {
+        Write-Host "Normalized preprocess parity passed."
+    } else {
+        $diagnosticPath = Join-Path $outputPath "preprocess-mismatch.txt"
+        $message = Write-PreprocessMismatchDiagnostic $dotnetNormalized $rustNormalized $diagnosticPath
+        Write-Warning $message
+        if ($FailOnMismatch) {
+            throw $message
+        }
+    }
+    Write-Host "Raw outputs: $dotnetOutput, $rustOutput"
+    Write-Host "Normalized outputs: $dotnetNormalizedPath, $rustNormalizedPath"
+}

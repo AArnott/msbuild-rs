@@ -7,56 +7,11 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use crate::expression::ExpressionEvaluator;
 use crate::object_model::ProjectModel;
 
 const BOUNDARY: &str = "============================================================================================================================================";
-
-static EXISTS_FUNCTION: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r#"(?i)Exists\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap());
-static HAS_TRAILING_SLASH_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"(?i)HasTrailingSlash\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap()
-});
-static FEATURES_ENABLED_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"(?i)\$\(\[MSBuild\]::AreFeaturesEnabled\(\s*['\"][^'\"]+['\"]\s*\)\)"#)
-        .unwrap()
-});
-static VERSION_COMPARISON_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(?i)\$\(\[MSBuild\]::Version(GreaterThanOrEquals|GreaterThan|Equals)\(\s*([^,]*),\s*([^)]*)\)\)"#,
-    )
-    .unwrap()
-});
-static STRING_PREDICATE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\.(Contains|StartsWith|EndsWith)\(\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap()
-});
-static ANY_HAVE_METADATA_VALUE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"@\(([A-Za-z_][A-Za-z0-9_.-]*)->AnyHaveMetadataValue\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap()
-});
-static DIRECTORY_ABOVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"\$\(\[MSBuild\]::GetDirectoryNameOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#)
-        .unwrap()
-});
-static PATH_ABOVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"\$\(\[MSBuild\]::GetPathOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#).unwrap()
-});
-static PATH_COMBINE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"\$\(\[System\.IO\.Path\]::Combine\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap()
-});
-static MAKE_RELATIVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"\$\(\[MSBuild\]::MakeRelative\(\s*([^,]+),\s*([^)]*)\)\)"#).unwrap()
-});
 
 pub struct ProjectPreprocessor<'a> {
     model: &'a ProjectModel,
@@ -149,11 +104,11 @@ impl<'a> ProjectPreprocessor<'a> {
                     in_property_group = match condition {
                         Some(condition) => {
                             let model = self.evaluation_model(&canonical_path);
-                            evaluate_import_condition(
-                                &condition,
-                                canonical_path.parent().unwrap_or_else(|| Path::new("")),
+                            ExpressionEvaluator::with_base_directory(
                                 &model,
+                                canonical_path.parent().unwrap_or_else(|| Path::new("")),
                             )
+                            .evaluate_condition(&condition)
                             .with_context(|| {
                                 format!(
                                     "Failed to evaluate property group condition '{condition}' in {}",
@@ -169,11 +124,11 @@ impl<'a> ProjectPreprocessor<'a> {
                     let should_set = match condition {
                         Some(condition) => {
                             let model = self.evaluation_model(&canonical_path);
-                            evaluate_import_condition(
-                                &condition,
-                                canonical_path.parent().unwrap_or_else(|| Path::new("")),
+                            ExpressionEvaluator::with_base_directory(
                                 &model,
+                                canonical_path.parent().unwrap_or_else(|| Path::new("")),
                             )
+                            .evaluate_condition(&condition)
                             .with_context(|| {
                                 format!(
                                     "Failed to evaluate property condition '{condition}' in {}",
@@ -227,7 +182,11 @@ impl<'a> ProjectPreprocessor<'a> {
                     let name = current_property.take().unwrap();
                     let raw_value = current_property_value.trim();
                     let model = self.evaluation_model(&canonical_path);
-                    let value = evaluate_property_value(raw_value, &model)?;
+                    let value = ExpressionEvaluator::with_base_directory(
+                        &model,
+                        canonical_path.parent().unwrap_or_else(|| Path::new("")),
+                    )
+                    .evaluate(raw_value)?;
                     self.evaluation_state.borrow_mut().set_property(name, value);
                     current_property_value.clear();
                 }
@@ -322,7 +281,11 @@ impl<'a> ProjectPreprocessor<'a> {
         output: &mut String,
     ) -> Result<()> {
         let evaluation_model = self.evaluation_model(importing_path);
-        let evaluated_project = evaluate_property_value(&import.project, &evaluation_model)?;
+        let evaluator = ExpressionEvaluator::with_base_directory(
+            &evaluation_model,
+            importing_path.parent().unwrap_or_else(|| Path::new("")),
+        );
+        let evaluated_project = evaluator.evaluate(&import.project)?;
         if evaluated_project.contains("$(") || evaluated_project.contains("@(") {
             bail!(
                 "Unsupported property function in import path '{evaluated_project}' from {}",
@@ -341,12 +304,7 @@ impl<'a> ProjectPreprocessor<'a> {
         );
 
         if let Some(condition) = import.condition
-            && !evaluate_import_condition(
-                &condition,
-                importing_path.parent().unwrap_or_else(|| Path::new("")),
-                &evaluation_model,
-            )
-            .with_context(|| {
+            && !evaluator.evaluate_condition(&condition).with_context(|| {
                 format!(
                     "Failed to evaluate import condition '{condition}' in {}",
                     importing_path.display()
@@ -537,150 +495,6 @@ fn attribute_value(
         }
     }
     Ok(None)
-}
-
-fn evaluate_import_condition(
-    condition: &str,
-    base_directory: &Path,
-    model: &ProjectModel,
-) -> Result<bool> {
-    let evaluator = ExpressionEvaluator::new(model);
-    let evaluated = evaluate_property_value(condition, model)?;
-    let with_exists = EXISTS_FUNCTION.replace_all(&evaluated, |captures: &regex::Captures<'_>| {
-        let path = Path::new(&captures[1]);
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            base_directory.join(path)
-        };
-        path.exists().to_string()
-    });
-    let with_intrinsics = HAS_TRAILING_SLASH_FUNCTION
-        .replace_all(&with_exists, |captures: &regex::Captures<'_>| {
-            captures[1].ends_with(['/', '\\']).to_string()
-        })
-        .into_owned();
-    let with_intrinsics = FEATURES_ENABLED_FUNCTION
-        .replace_all(&with_intrinsics, "true")
-        .into_owned();
-    let with_intrinsics = VERSION_COMPARISON_FUNCTION
-        .replace_all(&with_intrinsics, |captures: &regex::Captures<'_>| {
-            let ordering = compare_versions(captures[2].trim(), captures[3].trim());
-            if captures[1].eq_ignore_ascii_case("GreaterThan") {
-                ordering.is_gt().to_string()
-            } else if captures[1].eq_ignore_ascii_case("GreaterThanOrEquals") {
-                (!ordering.is_lt()).to_string()
-            } else {
-                ordering.is_eq().to_string()
-            }
-        })
-        .into_owned();
-    let with_intrinsics = STRING_PREDICATE_FUNCTION
-        .replace_all(&with_intrinsics, |captures: &regex::Captures<'_>| {
-            model
-                .get_property(&captures[1])
-                .is_some_and(|value| {
-                    if captures[2].eq_ignore_ascii_case("Contains") {
-                        value.contains(&captures[3])
-                    } else if captures[2].eq_ignore_ascii_case("StartsWith") {
-                        value.starts_with(&captures[3])
-                    } else {
-                        value.ends_with(&captures[3])
-                    }
-                })
-                .to_string()
-        })
-        .into_owned();
-    let with_intrinsics = ANY_HAVE_METADATA_VALUE_FUNCTION.replace_all(
-        &with_intrinsics,
-        |captures: &regex::Captures<'_>| {
-            model
-                .get_items(&captures[1])
-                .is_some_and(|items| {
-                    items.iter().any(|item| {
-                        item.metadata.iter().any(|(name, value)| {
-                            name.eq_ignore_ascii_case(&captures[2])
-                                && value.eq_ignore_ascii_case(&captures[3])
-                        })
-                    })
-                })
-                .to_string()
-        },
-    );
-    evaluator.evaluate_condition(&with_intrinsics)
-}
-
-fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let parse = |value: &str| {
-        value
-            .trim_matches(['\'', '"', ' '])
-            .split(['.', '-'])
-            .take_while(|part| part.chars().all(|character| character.is_ascii_digit()))
-            .map(|part| part.parse::<u32>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    let mut left = parse(left);
-    let mut right = parse(right);
-    let length = left.len().max(right.len());
-    left.resize(length, 0);
-    right.resize(length, 0);
-    left.cmp(&right)
-}
-
-fn evaluate_property_value(value: &str, model: &ProjectModel) -> Result<String> {
-    let evaluator = ExpressionEvaluator::new(model);
-    let evaluated = evaluator.evaluate(value)?;
-    let evaluated = DIRECTORY_ABOVE_FUNCTION
-        .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
-            find_file_above(
-                captures[1].trim_matches(['\'', '"', ' ']),
-                captures[2].trim_matches(['\'', '"', ' ']),
-            )
-            .and_then(|path| path.parent().map(display_path))
-            .unwrap_or_default()
-        })
-        .into_owned();
-    let evaluated = PATH_ABOVE_FUNCTION
-        .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
-            let file_name = Path::new(captures[1].trim_matches(['\'', '"', ' ']))
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            find_file_above(captures[2].trim_matches(['\'', '"', ' ']), &file_name)
-                .map(|path| display_path(&path))
-                .unwrap_or_default()
-        })
-        .into_owned();
-    let evaluated = PATH_COMBINE_FUNCTION
-        .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
-            display_path(&Path::new(&captures[1]).join(&captures[2]))
-        })
-        .into_owned();
-    Ok(MAKE_RELATIVE_FUNCTION
-        .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
-            let base = PathBuf::from(captures[1].trim_matches(['\'', '"', ' ']));
-            let path = PathBuf::from(captures[2].trim_matches(['\'', '"', ' ']));
-            path.strip_prefix(&base)
-                .map(display_path)
-                .unwrap_or_else(|_| display_path(&path))
-        })
-        .into_owned())
-}
-
-fn find_file_above(start: &str, file_name: &str) -> Option<PathBuf> {
-    let mut directory = PathBuf::from(start.replace('/', std::path::MAIN_SEPARATOR_STR));
-    if directory.is_file() {
-        directory.pop();
-    }
-    loop {
-        let candidate = directory.join(file_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !directory.pop() {
-            return None;
-        }
-    }
 }
 
 fn display_path(path: &Path) -> String {
@@ -910,126 +724,6 @@ mod tests {
         assert!(nested < project);
         assert!(project < targets);
         assert!(output.contains("This import was added implicitly"));
-        Ok(())
-    }
-
-    #[test]
-    fn evaluates_directory_build_props_path_functions() -> Result<()> {
-        let directory = TempDir::new()?;
-        let nested = directory.path().join("src").join("project");
-        fs::create_dir_all(&nested)?;
-        fs::write(
-            directory.path().join("Directory.Build.props"),
-            "<Project />",
-        )?;
-        let mut model = ProjectModel::new();
-        model.set_property("ProjectDirectory".to_string(), display_path(&nested));
-        model.set_property("PropsFile".to_string(), "Directory.Build.props".to_string());
-
-        let base = evaluate_property_value(
-            "$([MSBuild]::GetDirectoryNameOfFileAbove($(ProjectDirectory), '$(PropsFile)'))",
-            &model,
-        )?;
-        model.set_property("PropsBase".to_string(), base);
-        let path = evaluate_property_value(
-            "$([System.IO.Path]::Combine('$(PropsBase)', '$(PropsFile)'))",
-            &model,
-        )?;
-
-        assert_eq!(
-            PathBuf::from(path).canonicalize()?,
-            directory
-                .path()
-                .join("Directory.Build.props")
-                .canonicalize()?
-        );
-
-        let props_directory = directory.path().join("src");
-        let child_props = props_directory.join("Directory.Build.props");
-        fs::write(&child_props, "<Project />")?;
-        model.set_property("MSBuildThisFile".to_string(), display_path(&child_props));
-        model.set_property(
-            "MSBuildThisFileDirectory".to_string(),
-            format!(
-                "{}{}",
-                display_path(&props_directory),
-                std::path::MAIN_SEPARATOR
-            ),
-        );
-        let parent_path = evaluate_property_value(
-            "$([MSBuild]::GetPathOfFileAbove($(MSBuildThisFile), $(MSBuildThisFileDirectory)..))",
-            &model,
-        )?;
-        assert_eq!(
-            PathBuf::from(parent_path).canonicalize()?,
-            directory
-                .path()
-                .join("Directory.Build.props")
-                .canonicalize()?
-        );
-        let relative = evaluate_property_value(
-            "$([MSBuild]::MakeRelative('C:\\repo\\', 'C:\\repo\\src\\project'))",
-            &model,
-        )?;
-        assert_eq!(relative, r"src\project");
-        Ok(())
-    }
-
-    #[test]
-    fn evaluates_has_trailing_slash_condition() -> Result<()> {
-        let model = ProjectModel::new();
-        assert!(evaluate_import_condition(
-            "HasTrailingSlash('obj\\') And HasTrailingSlash('obj/')",
-            Path::new("."),
-            &model,
-        )?);
-        assert!(!evaluate_import_condition(
-            "HasTrailingSlash('obj')",
-            Path::new("."),
-            &model,
-        )?);
-        Ok(())
-    }
-
-    #[test]
-    fn evaluates_feature_wave_condition() -> Result<()> {
-        let mut model = ProjectModel::new();
-        model.set_property("Restore".to_string(), "true".to_string());
-        assert!(evaluate_import_condition(
-            "$([MSBuild]::AreFeaturesEnabled('17.10')) And '$(Restore)' == 'true'",
-            Path::new("."),
-            &model,
-        )?);
-        Ok(())
-    }
-
-    #[test]
-    fn evaluates_version_and_contains_conditions() -> Result<()> {
-        let mut model = ProjectModel::new();
-        model.set_property(
-            "NETCoreSdkVersion".to_string(),
-            "10.0.400-preview.1".to_string(),
-        );
-        assert!(evaluate_import_condition(
-            "$([MSBuild]::VersionGreaterThan($(NETCoreSdkVersion), 7.0.100)) And $(NETCoreSdkVersion.Contains('-preview'))",
-            Path::new("."),
-            &model,
-        )?);
-        assert!(evaluate_import_condition(
-            "$([MSBuild]::VersionEquals(7.0.100, 7.0.100))",
-            Path::new("."),
-            &model,
-        )?);
-        assert!(evaluate_import_condition(
-            "$(NETCoreSdkVersion.StartsWith('10.'))",
-            Path::new("."),
-            &model,
-        )?);
-        assert!(evaluate_import_condition(
-            "$([MSBuild]::VersionGreaterThanOrEquals(8.0, 8.0))",
-            Path::new("."),
-            &model,
-        )?);
         Ok(())
     }
 }

@@ -202,4 +202,18 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn task_conditions_use_shared_expression_evaluator() -> Result<()> {
+        let registry = TaskRegistry::new();
+        let mut model = ProjectModel::new();
+        model.set_property("SdkVersion".to_string(), "10.0".to_string());
+        let task = Task {
+            name: "Error".to_string(),
+            attributes: HashMap::from([("Text".to_string(), "must be skipped".to_string())]),
+            condition: Some("$([MSBuild]::VersionLessThan($(SdkVersion), 8.0))".to_string()),
+        };
+
+        registry.execute_task(&task, &model)
+    }
 }

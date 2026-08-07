@@ -111,7 +111,7 @@ pub struct TaskExecutionContext {
 - `clap = { version = "4.4", features = ["derive"] }` - CLI argument parsing
 - `anyhow = "1.0"` - Error handling
 - `log = "0.4"` + `env_logger = "0.10"` - Configurable logging
-- `regex = "1.10"` - Expression pattern matching
+- Custom expression parser - Balanced property, item, function, and condition parsing
 - `indexmap = "2.0"` - Ordered hash maps for properties
 - `serde = { version = "1.0", features = ["derive"] }` - Serialization support
 

@@ -21,6 +21,8 @@ impl ProjectParser {
     }
 
     pub fn parse_file<P: AsRef<Path>>(&mut self, path: P) -> Result<ProjectModel> {
+        self.model
+            .set_project_file_path(path.as_ref().to_path_buf());
         let file = File::open(&path)?;
         let buf_reader = BufReader::new(file);
         let mut reader = Reader::from_reader(buf_reader);
@@ -309,6 +311,28 @@ mod tests {
 
         assert!(model.get_target("Build").is_some());
 
+        Ok(())
+    }
+
+    #[test]
+    fn evaluates_shared_condition_functions_relative_to_project() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        std::fs::write(directory.path().join("present.props"), "<Project />")?;
+        let project_path = directory.path().join("main.proj");
+        std::fs::write(
+            &project_path,
+            r#"<Project>
+  <PropertyGroup Condition="Exists('present.props') And HasTrailingSlash('dir/')">
+    <WasEvaluated>true</WasEvaluated>
+  </PropertyGroup>
+</Project>"#,
+        )?;
+
+        let model = ProjectParser::new().parse_file(&project_path)?;
+        assert_eq!(
+            model.get_property("WasEvaluated").map(String::as_str),
+            Some("true")
+        );
         Ok(())
     }
 }

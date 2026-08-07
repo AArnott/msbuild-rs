@@ -21,6 +21,8 @@ Both implementations now preserve aggregated project source, including unevaluat
 
 ## Evaluation Semantics
 
+- [x] Use one balanced expression parser for preprocessing, project evaluation, and task execution.
+
 ### Properties
 
 - [x] Basic `$(Property)` expansion.

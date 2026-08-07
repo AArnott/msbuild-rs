@@ -258,21 +258,28 @@ fn normalize_source(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ProjectParser;
     use quick_xml::Reader;
     use tempfile::TempDir;
 
     #[test]
-    fn preserves_source_and_inlines_relative_imports() -> Result<()> {
+    fn preserves_source_and_inlines_property_evaluated_imports() -> Result<()> {
         let directory = TempDir::new()?;
         let project_path = directory.path().join("main.proj");
-        let import_path = directory.path().join("common.props");
+        let import_directory = directory.path().join("imports");
+        let import_path = import_directory.join("common.props");
         let output_path = directory.path().join("out.xml");
+        fs::create_dir(&import_directory)?;
         fs::write(
             &project_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build">
   <!-- Keep this comment. -->
-  <Import Project="common.props" Condition="Exists('common.props')" />
+    <PropertyGroup>
+        <ImportDirectory>imports</ImportDirectory>
+        <ImportFile>common.props</ImportFile>
+    </PropertyGroup>
+    <Import Project="$(ImportDirectory)/$(ImportFile)" Condition="Exists('$(ImportDirectory)/$(ImportFile)')" />
   <Target Name="Build"><Message Text="$(Greeting): @(Compile)" /></Target>
 </Project>"#,
         )?;
@@ -284,13 +291,15 @@ mod tests {
 </Project>"#,
         )?;
 
-        let mut model = ProjectModel::new();
+        let mut parser = ProjectParser::new();
+        let mut model = parser.parse_file(&project_path)?;
         model.set_project_file_path(project_path.clone());
         ProjectPreprocessor::new(&model).write(&output_path)?;
 
         let output = fs::read_to_string(output_path)?;
         assert!(output.contains("<!-- Keep this comment. -->"));
-        assert!(output.contains("Condition=\"Exists('common.props')\""));
+        assert!(output.contains("Project=\"$(ImportDirectory)/$(ImportFile)\""));
+        assert!(output.contains("Condition=\"Exists('$(ImportDirectory)/$(ImportFile)')\""));
         assert!(output.contains("<Greeting>A &amp; B</Greeting>"));
         assert!(output.contains("Text=\"$(Greeting): @(Compile)\""));
         assert!(!output.contains("<Project>\n  <PropertyGroup>"));

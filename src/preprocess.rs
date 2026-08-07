@@ -7,11 +7,56 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::expression::ExpressionEvaluator;
 use crate::object_model::ProjectModel;
 
 const BOUNDARY: &str = "============================================================================================================================================";
+
+static EXISTS_FUNCTION: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"(?i)Exists\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap());
+static HAS_TRAILING_SLASH_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)HasTrailingSlash\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap()
+});
+static FEATURES_ENABLED_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)\$\(\[MSBuild\]::AreFeaturesEnabled\(\s*['\"][^'\"]+['\"]\s*\)\)"#)
+        .unwrap()
+});
+static VERSION_COMPARISON_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)\$\(\[MSBuild\]::Version(GreaterThanOrEquals|GreaterThan|Equals)\(\s*([^,]*),\s*([^)]*)\)\)"#,
+    )
+    .unwrap()
+});
+static STRING_PREDICATE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\.(Contains|StartsWith|EndsWith)\(\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
+    )
+    .unwrap()
+});
+static ANY_HAVE_METADATA_VALUE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"@\(([A-Za-z_][A-Za-z0-9_.-]*)->AnyHaveMetadataValue\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
+    )
+    .unwrap()
+});
+static DIRECTORY_ABOVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"\$\(\[MSBuild\]::GetDirectoryNameOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#)
+        .unwrap()
+});
+static PATH_ABOVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"\$\(\[MSBuild\]::GetPathOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#).unwrap()
+});
+static PATH_COMBINE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"\$\(\[System\.IO\.Path\]::Combine\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
+    )
+    .unwrap()
+});
+static MAKE_RELATIVE_FUNCTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"\$\(\[MSBuild\]::MakeRelative\(\s*([^,]+),\s*([^)]*)\)\)"#).unwrap()
+});
 
 pub struct ProjectPreprocessor<'a> {
     model: &'a ProjectModel,
@@ -501,8 +546,7 @@ fn evaluate_import_condition(
 ) -> Result<bool> {
     let evaluator = ExpressionEvaluator::new(model);
     let evaluated = evaluate_property_value(condition, model)?;
-    let exists = regex::Regex::new(r#"(?i)Exists\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap();
-    let with_exists = exists.replace_all(&evaluated, |captures: &regex::Captures<'_>| {
+    let with_exists = EXISTS_FUNCTION.replace_all(&evaluated, |captures: &regex::Captures<'_>| {
         let path = Path::new(&captures[1]);
         let path = if path.is_absolute() {
             path.to_path_buf()
@@ -511,25 +555,15 @@ fn evaluate_import_condition(
         };
         path.exists().to_string()
     });
-    let trailing_slash =
-        regex::Regex::new(r#"(?i)HasTrailingSlash\(\s*['\"]([^'\"]*)['\"]\s*\)"#).unwrap();
-    let with_intrinsics = trailing_slash
+    let with_intrinsics = HAS_TRAILING_SLASH_FUNCTION
         .replace_all(&with_exists, |captures: &regex::Captures<'_>| {
             captures[1].ends_with(['/', '\\']).to_string()
         })
         .into_owned();
-    let features_enabled = regex::Regex::new(
-        r#"(?i)\$\(\[MSBuild\]::AreFeaturesEnabled\(\s*['\"][^'\"]+['\"]\s*\)\)"#,
-    )
-    .unwrap();
-    let with_intrinsics = features_enabled
+    let with_intrinsics = FEATURES_ENABLED_FUNCTION
         .replace_all(&with_intrinsics, "true")
         .into_owned();
-    let version_comparison = regex::Regex::new(
-        r#"(?i)\$\(\[MSBuild\]::Version(GreaterThanOrEquals|GreaterThan|Equals)\(\s*([^,]*),\s*([^)]*)\)\)"#,
-    )
-    .unwrap();
-    let with_intrinsics = version_comparison
+    let with_intrinsics = VERSION_COMPARISON_FUNCTION
         .replace_all(&with_intrinsics, |captures: &regex::Captures<'_>| {
             let ordering = compare_versions(captures[2].trim(), captures[3].trim());
             if captures[1].eq_ignore_ascii_case("GreaterThan") {
@@ -541,11 +575,7 @@ fn evaluate_import_condition(
             }
         })
         .into_owned();
-    let contains = regex::Regex::new(
-        r#"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\.(Contains|StartsWith|EndsWith)\(\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap();
-    let with_intrinsics = contains
+    let with_intrinsics = STRING_PREDICATE_FUNCTION
         .replace_all(&with_intrinsics, |captures: &regex::Captures<'_>| {
             model
                 .get_property(&captures[1])
@@ -561,12 +591,9 @@ fn evaluate_import_condition(
                 .to_string()
         })
         .into_owned();
-    let any_metadata = regex::Regex::new(
-        r#"@\(([A-Za-z_][A-Za-z0-9_.-]*)->AnyHaveMetadataValue\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap();
-    let with_intrinsics =
-        any_metadata.replace_all(&with_intrinsics, |captures: &regex::Captures<'_>| {
+    let with_intrinsics = ANY_HAVE_METADATA_VALUE_FUNCTION.replace_all(
+        &with_intrinsics,
+        |captures: &regex::Captures<'_>| {
             model
                 .get_items(&captures[1])
                 .is_some_and(|items| {
@@ -578,7 +605,8 @@ fn evaluate_import_condition(
                     })
                 })
                 .to_string()
-        });
+        },
+    );
     evaluator.evaluate_condition(&with_intrinsics)
 }
 
@@ -602,21 +630,7 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
 fn evaluate_property_value(value: &str, model: &ProjectModel) -> Result<String> {
     let evaluator = ExpressionEvaluator::new(model);
     let evaluated = evaluator.evaluate(value)?;
-    let directory_above = regex::Regex::new(
-        r#"\$\(\[MSBuild\]::GetDirectoryNameOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#,
-    )
-    .unwrap();
-    let path_above =
-        regex::Regex::new(r#"\$\(\[MSBuild\]::GetPathOfFileAbove\(([^,]*),\s*([^)]*)\)\)"#)
-            .unwrap();
-    let path_combine = regex::Regex::new(
-        r#"\$\(\[System\.IO\.Path\]::Combine\(\s*['\"]([^'\"]*)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*\)\)"#,
-    )
-    .unwrap();
-    let make_relative =
-        regex::Regex::new(r#"\$\(\[MSBuild\]::MakeRelative\(\s*([^,]+),\s*([^)]*)\)\)"#).unwrap();
-
-    let evaluated = directory_above
+    let evaluated = DIRECTORY_ABOVE_FUNCTION
         .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
             find_file_above(
                 captures[1].trim_matches(['\'', '"', ' ']),
@@ -626,7 +640,7 @@ fn evaluate_property_value(value: &str, model: &ProjectModel) -> Result<String> 
             .unwrap_or_default()
         })
         .into_owned();
-    let evaluated = path_above
+    let evaluated = PATH_ABOVE_FUNCTION
         .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
             let file_name = Path::new(captures[1].trim_matches(['\'', '"', ' ']))
                 .file_name()
@@ -637,12 +651,12 @@ fn evaluate_property_value(value: &str, model: &ProjectModel) -> Result<String> 
                 .unwrap_or_default()
         })
         .into_owned();
-    let evaluated = path_combine
+    let evaluated = PATH_COMBINE_FUNCTION
         .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
             display_path(&Path::new(&captures[1]).join(&captures[2]))
         })
         .into_owned();
-    Ok(make_relative
+    Ok(MAKE_RELATIVE_FUNCTION
         .replace_all(&evaluated, |captures: &regex::Captures<'_>| {
             let base = PathBuf::from(captures[1].trim_matches(['\'', '"', ' ']));
             let path = PathBuf::from(captures[2].trim_matches(['\'', '"', ' ']));

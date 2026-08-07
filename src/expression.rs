@@ -1,7 +1,13 @@
 use anyhow::{Result, anyhow, bail};
 use regex::Regex;
+use std::sync::LazyLock;
 
 use crate::object_model::ProjectModel;
+
+static PROPERTY_REFERENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap());
+static ITEM_REFERENCE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap());
 
 pub struct ExpressionEvaluator<'a> {
     model: &'a ProjectModel,
@@ -209,8 +215,7 @@ impl<'a> ExpressionEvaluator<'a> {
         let mut result = input.to_string();
 
         // Replace property references $(PropertyName)
-        let prop_regex = Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap();
-        while let Some(captures) = prop_regex.captures(&result) {
+        while let Some(captures) = PROPERTY_REFERENCE.captures(&result) {
             let full_match = &captures[0];
             let prop_name = &captures[1];
 
@@ -224,8 +229,7 @@ impl<'a> ExpressionEvaluator<'a> {
         }
 
         // Replace item references @(ItemType)
-        let item_regex = Regex::new(r"@\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap();
-        while let Some(captures) = item_regex.captures(&result) {
+        while let Some(captures) = ITEM_REFERENCE.captures(&result) {
             let full_match = &captures[0];
             let item_type = &captures[1];
 

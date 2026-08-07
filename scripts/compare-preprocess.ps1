@@ -43,11 +43,23 @@ for ($index = 0; $index -lt $Warmup; $index++) {
     Invoke-TimedCommand "msbuild-rs" $rustCommand | Out-Null
 }
 
-$samples = for ($index = 1; $index -le $Iterations; $index++) {
+$dotnetSamples = for ($index = 1; $index -le $Iterations; $index++) {
     [pscustomobject]@{
         Iteration = $index
         DotnetMs = Invoke-TimedCommand "dotnet build" $dotnetCommand
+    }
+}
+$rustSamples = for ($index = 1; $index -le $Iterations; $index++) {
+    [pscustomobject]@{
+        Iteration = $index
         RustMs = Invoke-TimedCommand "msbuild-rs" $rustCommand
+    }
+}
+$samples = for ($index = 0; $index -lt $Iterations; $index++) {
+    [pscustomobject]@{
+        Iteration = $index + 1
+        DotnetMs = $dotnetSamples[$index].DotnetMs
+        RustMs = $rustSamples[$index].RustMs
     }
 }
 
@@ -64,21 +76,33 @@ function Get-Summary {
     } else {
         $sorted[$middle]
     }
+    $p95Index = [Math]::Min($sorted.Count - 1, [int][Math]::Ceiling($sorted.Count * 0.95) - 1)
+    $deviations = @($Values | ForEach-Object { [Math]::Abs($_ - $median) } | Sort-Object)
+    $deviationMiddle = [int][Math]::Floor($deviations.Count / 2)
+    $medianAbsoluteDeviation = if ($deviations.Count % 2 -eq 0) {
+        ($deviations[$deviationMiddle - 1] + $deviations[$deviationMiddle]) / 2
+    } else {
+        $deviations[$deviationMiddle]
+    }
+    $outlierThreshold = $median + [Math]::Max(1, 6 * $medianAbsoluteDeviation)
 
     return [pscustomobject]@{
         MeanMs = [Math]::Round(($Values | Measure-Object -Average).Average, 3)
         MedianMs = [Math]::Round($median, 3)
+        P95Ms = [Math]::Round($sorted[$p95Index], 3)
         MinMs = [Math]::Round(($Values | Measure-Object -Minimum).Minimum, 3)
         MaxMs = [Math]::Round(($Values | Measure-Object -Maximum).Maximum, 3)
+        HighOutliers = @($Values | Where-Object { $_ -gt $outlierThreshold }).Count
     }
 }
 
 $dotnetSummary = Get-Summary @($samples.DotnetMs)
 $rustSummary = Get-Summary @($samples.RustMs)
 $summary = @(
-    [pscustomobject]@{ Implementation = "dotnet build /pp"; MeanMs = $dotnetSummary.MeanMs; MedianMs = $dotnetSummary.MedianMs; MinMs = $dotnetSummary.MinMs; MaxMs = $dotnetSummary.MaxMs }
-    [pscustomobject]@{ Implementation = "msbuild-rs --preprocess"; MeanMs = $rustSummary.MeanMs; MedianMs = $rustSummary.MedianMs; MinMs = $rustSummary.MinMs; MaxMs = $rustSummary.MaxMs }
+    [pscustomobject]@{ Implementation = "dotnet build /pp"; MeanMs = $dotnetSummary.MeanMs; MedianMs = $dotnetSummary.MedianMs; P95Ms = $dotnetSummary.P95Ms; MinMs = $dotnetSummary.MinMs; MaxMs = $dotnetSummary.MaxMs; HighOutliers = $dotnetSummary.HighOutliers }
+    [pscustomobject]@{ Implementation = "msbuild-rs --preprocess"; MeanMs = $rustSummary.MeanMs; MedianMs = $rustSummary.MedianMs; P95Ms = $rustSummary.P95Ms; MinMs = $rustSummary.MinMs; MaxMs = $rustSummary.MaxMs; HighOutliers = $rustSummary.HighOutliers }
 )
 
 $summary | Format-Table -AutoSize
+Write-Host ("Median speed ratio (dotnet / rust): {0:N2}x" -f ($dotnetSummary.MedianMs / $rustSummary.MedianMs))
 Write-Host "Raw samples: $samplesPath"

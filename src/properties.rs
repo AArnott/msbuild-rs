@@ -15,6 +15,28 @@ const RESERVED_PROPERTIES: &[&str] = &[
     "MSBuildThisFileExtension",
     "MSBuildThisFileFullPath",
     "MSBuildThisFileName",
+    "MSBuildBinPath",
+    "MSBuildProjectDefaultTargets",
+    "MSBuildToolsPath",
+    "MSBuildToolsVersion",
+    "MSBuildRuntimeType",
+    "MSBuildStartupDirectory",
+    "MSBuildNodeCount",
+    "MSBuildLastTaskResult",
+    "MSBuildProgramFiles32",
+    "MSBuildAssemblyVersion",
+    "MSBuildVersion",
+    "MSBuildInteractive",
+    "MSBuildDisableFeaturesFromVersion",
+];
+
+const THIS_FILE_PROPERTIES: &[&str] = &[
+    "MSBuildThisFile",
+    "MSBuildThisFileDirectory",
+    "MSBuildThisFileDirectoryNoRoot",
+    "MSBuildThisFileExtension",
+    "MSBuildThisFileFullPath",
+    "MSBuildThisFileName",
 ];
 
 pub(crate) fn is_reserved_property(name: &str) -> bool {
@@ -53,19 +75,15 @@ pub(crate) fn set_reserved_project_properties(model: &mut ProjectModel, path: &P
             .to_string_lossy()
             .into_owned(),
     );
-
-    set_reserved_this_file_properties(model, &full_path);
-}
-
-pub(crate) fn set_reserved_this_file_properties(model: &mut ProjectModel, path: &Path) {
-    for &name in &RESERVED_PROPERTIES[6..] {
-        if let Some(value) = this_file_property(name, path) {
-            set(model, name, value);
-        }
-    }
 }
 
 pub(crate) fn this_file_property(name: &str, path: &Path) -> Option<String> {
+    if !THIS_FILE_PROPERTIES
+        .iter()
+        .any(|property| property.eq_ignore_ascii_case(name))
+    {
+        return None;
+    }
     let full_path = absolute_path(path);
     let directory = full_path.parent().unwrap_or_else(|| Path::new(""));
     if name.eq_ignore_ascii_case("MSBuildThisFile") {
@@ -109,18 +127,32 @@ pub(crate) fn display_path(path: &Path) -> String {
     }
 }
 
+pub(crate) fn lexical_absolute(path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
 fn set(model: &mut ProjectModel, name: &str, value: String) {
     model.set_property(name.to_string(), value);
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|directory| directory.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    }
+    lexical_absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn extension(path: &Path) -> String {
@@ -181,5 +213,41 @@ mod tests {
                 .map(String::as_str),
             Some(".csproj")
         );
+    }
+
+    #[test]
+    fn reserved_property_set_matches_upstream_built_in_only_names() {
+        for name in [
+            "MSBuildProjectDirectory",
+            "MSBuildProjectDirectoryNoRoot",
+            "MSBuildProjectFile",
+            "MSBuildProjectExtension",
+            "MSBuildProjectFullPath",
+            "MSBuildProjectName",
+            "MSBuildThisFileDirectory",
+            "MSBuildThisFileDirectoryNoRoot",
+            "MSBuildThisFile",
+            "MSBuildThisFileExtension",
+            "MSBuildThisFileFullPath",
+            "MSBuildThisFileName",
+            "MSBuildBinPath",
+            "MSBuildProjectDefaultTargets",
+            "MSBuildToolsPath",
+            "MSBuildToolsVersion",
+            "MSBuildRuntimeType",
+            "MSBuildStartupDirectory",
+            "MSBuildNodeCount",
+            "MSBuildLastTaskResult",
+            "MSBuildProgramFiles32",
+            "MSBuildAssemblyVersion",
+            "MSBuildVersion",
+            "MSBuildInteractive",
+            "MSBuildDisableFeaturesFromVersion",
+        ] {
+            assert!(is_reserved_property(name), "{name}");
+        }
+
+        assert!(!is_reserved_property("MSBuildSDKsPath"));
+        assert!(!is_reserved_property("MSBuildExtensionsPath"));
     }
 }

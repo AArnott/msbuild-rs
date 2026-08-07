@@ -1,11 +1,12 @@
 use anyhow::{Result, anyhow};
 use log::{debug, info};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::expression::ExpressionEvaluator;
 use crate::loader::load_project;
@@ -17,8 +18,28 @@ use crate::tasks::TaskRegistry;
 pub struct EvaluationContext {
     environment: PropertyMap,
     global_properties: PropertyMap,
-    sdk_root: Option<PathBuf>,
+    sdk_root_override: Option<PathBuf>,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveToolset {
+    pub sdk_root: PathBuf,
+    pub tools_path: PathBuf,
+    pub msbuild_version: String,
+    pub msbuild_semantic_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HostResolutionKey {
+    global_json_path: Option<PathBuf>,
+    global_json_contents: Option<String>,
+    dotnet_host_path: Option<String>,
+    dotnet_root: Option<String>,
+    path: Option<String>,
+}
+
+static HOST_RESOLUTIONS: OnceLock<Mutex<HashMap<HostResolutionKey, Option<ActiveToolset>>>> =
+    OnceLock::new();
 
 impl EvaluationContext {
     pub fn from_process_environment() -> Self {
@@ -43,7 +64,8 @@ impl EvaluationContext {
         for (name, value) in global_properties {
             context.global_properties.insert(name.into(), value.into());
         }
-        context.sdk_root = discover_sdk_root(&context.environment, &context.global_properties);
+        context.sdk_root_override =
+            explicit_sdk_root(&context.environment, &context.global_properties);
         context
     }
 
@@ -67,11 +89,11 @@ impl EvaluationContext {
         for (name, value) in global_properties {
             global_map.insert(name.into(), value.into());
         }
-        let sdk_root = discover_sdk_root(&environment_map, &global_map);
+        let sdk_root_override = explicit_sdk_root(&environment_map, &global_map);
         Self {
             environment: environment_map,
             global_properties: global_map,
-            sdk_root,
+            sdk_root_override,
         }
     }
 
@@ -83,8 +105,12 @@ impl EvaluationContext {
         &self.global_properties
     }
 
-    pub(crate) fn sdk_root(&self) -> Option<&Path> {
-        self.sdk_root.as_deref()
+    pub(crate) fn sdk_root_override(&self) -> Option<&Path> {
+        self.sdk_root_override.as_deref()
+    }
+
+    pub(crate) fn resolve_toolset(&self, project_path: &Path) -> Option<ActiveToolset> {
+        resolve_dotnet_toolset(&self.environment, project_path)
     }
 }
 
@@ -326,53 +352,100 @@ impl Default for ProjectEvaluator {
     }
 }
 
-fn discover_sdk_root(
+fn explicit_sdk_root(
     environment: &PropertyMap,
     global_properties: &PropertyMap,
 ) -> Option<PathBuf> {
-    if let Some(path) = global_properties
+    global_properties
         .get("MSBuildSDKsPath")
         .or_else(|| environment.get("MSBuildSDKsPath"))
-    {
-        let path = PathBuf::from(path);
-        if path.is_dir() {
-            return Some(path);
-        }
-    }
-
-    let dotnet_root = environment
-        .get("DOTNET_ROOT")
         .map(PathBuf::from)
-        .or_else(|| default_dotnet_root(environment))?;
-    let mut versions = fs::read_dir(dotnet_root.join("sdk"))
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().join("Sdks").is_dir())
-        .collect::<Vec<_>>();
-    versions.sort_by_key(|entry| version_key(&entry.file_name().to_string_lossy()));
-    versions.last().map(|entry| entry.path().join("Sdks"))
 }
 
-fn default_dotnet_root(environment: &PropertyMap) -> Option<PathBuf> {
-    if cfg!(windows) {
-        environment
-            .get("ProgramFiles")
-            .map(|path| PathBuf::from(path).join("dotnet"))
-    } else {
-        [
-            PathBuf::from("/usr/share/dotnet"),
-            PathBuf::from("/usr/local/share/dotnet"),
-        ]
-        .into_iter()
-        .find(|path| path.is_dir())
+fn resolve_dotnet_toolset(environment: &PropertyMap, project_path: &Path) -> Option<ActiveToolset> {
+    let project_directory = project_path.parent().unwrap_or_else(|| Path::new(""));
+    let (global_json_path, global_json_contents) = nearest_global_json(project_directory)
+        .map(|path| {
+            let contents = fs::read_to_string(&path).ok();
+            (Some(path), contents)
+        })
+        .unwrap_or((None, None));
+    let key = HostResolutionKey {
+        global_json_path,
+        global_json_contents,
+        dotnet_host_path: environment.get("DOTNET_HOST_PATH").cloned(),
+        dotnet_root: environment.get("DOTNET_ROOT").cloned(),
+        path: environment.get("PATH").cloned(),
+    };
+    let cache = HOST_RESOLUTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(resolution) = cache.lock().ok()?.get(&key).cloned() {
+        return resolution;
     }
+
+    let resolution = invoke_dotnet_host(environment, project_directory);
+    cache.lock().ok()?.insert(key, resolution.clone());
+    resolution
 }
 
-fn version_key(version: &str) -> Vec<u32> {
-    version
-        .split(['.', '-'])
-        .map(|part| part.parse().unwrap_or(0))
-        .collect()
+fn nearest_global_json(directory: &Path) -> Option<PathBuf> {
+    directory
+        .ancestors()
+        .map(|ancestor| ancestor.join("global.json"))
+        .find(|candidate| candidate.is_file())
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+}
+
+fn invoke_dotnet_host(
+    environment: &PropertyMap,
+    project_directory: &Path,
+) -> Option<ActiveToolset> {
+    let executable = environment
+        .get("DOTNET_HOST_PATH")
+        .map(String::as_str)
+        .unwrap_or("dotnet");
+    let mut command = Command::new(executable);
+    command
+        .arg("--info")
+        .current_dir(project_directory)
+        .envs(environment.iter())
+        .env("DOTNET_CLI_UI_LANGUAGE", "en-US")
+        .env("DOTNET_NOLOGO", "1")
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_dotnet_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_dotnet_info(output: &str) -> Option<ActiveToolset> {
+    let base_path = output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Base Path:")
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+    })?;
+    let tools_path = PathBuf::from(base_path.trim_end_matches(['/', '\\']));
+    let sdk_root = tools_path.join("Sdks");
+    if !sdk_root.is_dir() {
+        return None;
+    }
+    let msbuild_semantic_version = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("MSBuild version:").map(str::trim))
+        .unwrap_or_default()
+        .to_string();
+    let msbuild_version = msbuild_semantic_version
+        .split(['+', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    Some(ActiveToolset {
+        sdk_root,
+        tools_path,
+        msbuild_version,
+        msbuild_semantic_version,
+    })
 }
 
 #[cfg(test)]
@@ -515,12 +588,22 @@ mod tests {
         let project = write_project(
             &directory,
             "sample.csproj",
-            r#"<Project><Import Project="imports/current.props" /></Project>"#,
+            r#"<Project>
+  <Import Project="imports/current.props" />
+  <PropertyGroup>
+    <CapturedRootThisFile>$(MSBuildThisFile)</CapturedRootThisFile>
+    <CapturedRootThisFullPath>$(MSBuildThisFileFullPath)</CapturedRootThisFullPath>
+  </PropertyGroup>
+</Project>"#,
         );
-        let mut evaluator = ProjectEvaluator::new();
+        let context = EvaluationContext::with_environment_and_global_properties(
+            [("MSBuildThisFile", "environment-must-not-leak")],
+            Vec::<(String, String)>::new(),
+        );
+        let mut evaluator = ProjectEvaluator::with_context(context);
         evaluator.load_project(&project)?;
         let model = evaluator.get_model();
-        let full_path = project.canonicalize()?;
+        let full_path = crate::properties::lexical_absolute(&project)?;
 
         assert_eq!(
             model.get_property("MSBuildProjectFullPath").unwrap(),
@@ -546,9 +629,15 @@ mod tests {
                 .ends_with(std::path::MAIN_SEPARATOR)
         );
         assert_eq!(
-            model.get_property("MSBuildThisFile").unwrap(),
+            model.get_property("CapturedRootThisFile").unwrap(),
             "sample.csproj"
         );
+        assert_eq!(
+            model.get_property("CapturedRootThisFullPath").unwrap(),
+            &crate::properties::display_path(&full_path)
+        );
+        assert!(model.get_property("MSBuildThisFile").is_none());
+        assert!(model.get_property("MSBuildThisFileFullPath").is_none());
         Ok(())
     }
 
@@ -561,23 +650,71 @@ mod tests {
             "<Project><PropertyGroup><MSBuildProjectName>other</MSBuildProjectName></PropertyGroup></Project>",
         );
         let mut evaluator = ProjectEvaluator::new();
-        assert!(
-            evaluator
-                .load_project(&project)
-                .unwrap_err()
-                .to_string()
-                .contains("reserved")
-        );
+        let error = evaluator.load_project(&project).unwrap_err().to_string();
+        assert!(error.contains("MSB4004"));
+        assert!(error.contains("reserved"));
 
         fs::write(&project, "<Project />")?;
         let mut evaluator =
-            ProjectEvaluator::with_global_properties([("MSBuildProjectName", "other")]);
-        assert!(
+            ProjectEvaluator::with_global_properties([("MSBuildToolsPath", "other")]);
+        let error = evaluator.load_project(project).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "MSB4177: Invalid property. The \"MSBuildToolsPath\" property name is reserved."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_project_is_valid() -> Result<()> {
+        let directory = TempDir::new()?;
+        let project = write_project(&directory, "empty.proj", "<Project />");
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(
             evaluator
-                .load_project(project)
-                .unwrap_err()
-                .to_string()
-                .contains("reserved")
+                .get_model()
+                .get_property("MSBuildProjectName")
+                .map(String::as_str),
+            Some("empty")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn host_resolved_sdk_and_toolset_match_the_repo_global_json() -> Result<()> {
+        let manifest_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let project = manifest_directory.join("fixtures/evaluation/basic/project.proj");
+        let global_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manifest_directory.join("global.json"))?)?;
+        let pinned_version = global_json["sdk"]["version"]
+            .as_str()
+            .ok_or_else(|| anyhow!("global.json has no SDK version"))?;
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let sdk_root = Path::new(model.get_property("MSBuildSDKsPath").unwrap());
+        let selected_version = sdk_root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+
+        assert_eq!(selected_version, pinned_version);
+        assert!(!selected_version.contains('-'));
+        assert_eq!(
+            model.get_property("MSBuildToolsPath"),
+            model.get_property("MSBuildBinPath")
+        );
+        assert_eq!(
+            model.get_property("MSBuildRuntimeType").map(String::as_str),
+            Some("Core")
+        );
+        assert!(
+            model
+                .get_property("MSBuildVersion")
+                .is_some_and(|version| !version.is_empty())
         );
         Ok(())
     }
@@ -623,6 +760,58 @@ mod tests {
         );
         assert_eq!(model.get_property("OrderedValue").unwrap(), "after-import");
         evaluator.execute_target("ImportedTarget")?;
+        Ok(())
+    }
+
+    #[test]
+    fn observable_paths_preserve_lexical_spelling_while_imports_resolve_relatively() -> Result<()> {
+        let directory = TempDir::new()?;
+        fs::create_dir(directory.path().join("imports"))?;
+        write_project(
+            &directory,
+            "imports/CHILD.props",
+            r#"<Project><PropertyGroup>
+  <ImportedFullPath>$(MSBuildThisFileFullPath)</ImportedFullPath>
+  <ImportedCount>$(ImportedCount)x</ImportedCount>
+</PropertyGroup></Project>"#,
+        );
+        let project = write_project(
+            &directory,
+            "sample.proj",
+            r#"<Project>
+  <Import Project="imports/../imports/CHILD.props" />
+  <Import Project="imports/CHILD.props" />
+  <PropertyGroup><RootFullPath>$(MSBuildThisFileFullPath)</RootFullPath></PropertyGroup>
+</Project>"#,
+        );
+        let lexical_input = if cfg!(windows) {
+            directory.path().join("SAMPLE.proj")
+        } else {
+            project
+        };
+        let expected_root = crate::properties::lexical_absolute(&lexical_input)?;
+        let expected_import =
+            crate::properties::lexical_absolute(&directory.path().join("imports/CHILD.props"))?;
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(&lexical_input)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model.get_property("MSBuildProjectFullPath").unwrap(),
+            &crate::properties::display_path(&expected_root)
+        );
+        assert_eq!(
+            model.get_property("RootFullPath").unwrap(),
+            &crate::properties::display_path(&expected_root)
+        );
+        assert_eq!(
+            model.get_property("ImportedFullPath").unwrap(),
+            &crate::properties::display_path(&expected_import)
+        );
+        assert_eq!(
+            model.get_property("ImportedCount").map(String::as_str),
+            Some("x")
+        );
         Ok(())
     }
 
@@ -760,6 +949,98 @@ mod tests {
             .unwrap();
         assert!(props < project_body && project_body < targets);
         assert!(output.contains("This import was added implicitly"));
+        let custom_toolset_candidate = sdk_root
+            .parent()
+            .map(crate::properties::display_path)
+            .unwrap_or_default();
+        assert_ne!(
+            evaluator
+                .get_model()
+                .get_property("MSBuildToolsPath")
+                .map(String::as_str),
+            Some(custom_toolset_candidate.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn top_level_sdk_elements_import_all_props_and_targets_in_declaration_order() -> Result<()> {
+        let directory = TempDir::new()?;
+        let sdk_root = directory.path().join("Sdks");
+        for sdk in ["Top.One", "Top.Two"] {
+            fs::create_dir_all(sdk_root.join(sdk).join("Sdk"))?;
+        }
+        fs::write(
+            sdk_root.join("Top.One/Sdk/Sdk.props"),
+            "<Project><PropertyGroup><Order>one-props</Order></PropertyGroup></Project>",
+        )?;
+        fs::write(
+            sdk_root.join("Top.Two/Sdk/Sdk.props"),
+            "<Project><PropertyGroup><TwoSaw>$(Order)</TwoSaw><Order>two-props</Order></PropertyGroup></Project>",
+        )?;
+        fs::write(
+            sdk_root.join("Top.One/Sdk/Sdk.targets"),
+            "<Project><PropertyGroup><Final>$(Order)</Final><Order>one-targets</Order></PropertyGroup></Project>",
+        )?;
+        fs::write(
+            sdk_root.join("Top.Two/Sdk/Sdk.targets"),
+            "<Project><PropertyGroup><TwoTargetSaw>$(Order)</TwoTargetSaw><Order>two-targets</Order></PropertyGroup></Project>",
+        )?;
+        let project = write_project(
+            &directory,
+            "top-level.proj",
+            r#"<Project>
+  <Sdk Name="Top.One" />
+  <PropertyGroup><BodySaw>$(Order)</BodySaw><Order>body</Order></PropertyGroup>
+  <Sdk Name="Top.Two" Version="1.2.3" />
+</Project>"#,
+        );
+        let context = EvaluationContext::with_environment_and_global_properties(
+            Vec::<(String, String)>::new(),
+            [(
+                "MSBuildSDKsPath".to_string(),
+                crate::properties::display_path(&sdk_root),
+            )],
+        );
+        let output_path = directory.path().join("out.xml");
+        let mut evaluator = ProjectEvaluator::with_context(context);
+        evaluator.load_project_and_write_preprocessed(project, &output_path)?;
+        let model = evaluator.get_model();
+
+        assert_eq!(
+            model.get_property("TwoSaw").map(String::as_str),
+            Some("one-props")
+        );
+        assert_eq!(
+            model.get_property("BodySaw").map(String::as_str),
+            Some("two-props")
+        );
+        assert_eq!(
+            model.get_property("Final").map(String::as_str),
+            Some("body")
+        );
+        assert_eq!(
+            model.get_property("TwoTargetSaw").map(String::as_str),
+            Some("one-targets")
+        );
+        assert_eq!(
+            model.get_property("Order").map(String::as_str),
+            Some("two-targets")
+        );
+
+        let output = fs::read_to_string(output_path)?;
+        let one_props = output.find("<Order>one-props</Order>").unwrap();
+        let two_props = output.find("<TwoSaw>$(Order)</TwoSaw>").unwrap();
+        let body = output.find("<BodySaw>$(Order)</BodySaw>").unwrap();
+        let one_targets = output.find("<Final>$(Order)</Final>").unwrap();
+        let two_targets = output
+            .find("<TwoTargetSaw>$(Order)</TwoTargetSaw>")
+            .unwrap();
+        assert!(one_props < two_props);
+        assert!(two_props < body);
+        assert!(body < one_targets);
+        assert!(one_targets < two_targets);
+        assert!(output.contains("Sdk=\"Top.Two/1.2.3\""));
         Ok(())
     }
 }

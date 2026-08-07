@@ -29,7 +29,16 @@
     "MSBuildProjectFullPath",
     "MSBuildProjectName",
     "RootThisFile",
-    "ImportedThisFile"
+    "RootThisFileFullPath",
+    "ImportedThisFile",
+    "ImportedThisFileFullPath",
+    "MSBuildThisFile",
+    "MSBuildThisFileFullPath",
+    "MSBuildSDKsPath",
+    "MSBuildToolsPath",
+    "MSBuildBinPath",
+    "MSBuildVersion",
+    "MSBuildRuntimeType"
   ],
   "items": [
     {

@@ -14,6 +14,8 @@ A MSBuild project reader and executor written in Rust.
 - **Conditional Evaluation**: Supports `Condition` attributes on elements for conditional processing
 - **Target Dependencies**: Executes targets in dependency order using `DependsOnTargets`
 - **Import Support**: Processes `<Import>` elements to include other project files
+- **SDK Imports**: Resolves the active .NET SDK through the `dotnet` host and
+  supports `Project@Sdk` plus top-level `<Sdk Name="..." Version="..." />`
 - **Built-in Tasks**:
   - `<Message>` - Logs messages to output
   - `<Copy>` - Copies files from source to destination
@@ -204,7 +206,8 @@ The project is organized into several modules:
 This is a simplified MSBuild implementation focused on core functionality:
 
 - Limited condition expression support (basic equality only)
-- No SDK-style projects or automatic imports
+- SDK evaluation is limited to the implemented expression/item surface; versioned
+  third-party SDK acquisition through NuGet is not yet supported
 - No advanced MSBuild features like item transformations
 - Limited task ecosystem (only Message, Copy, Error built-in)
 - No parallel target execution
@@ -214,7 +217,7 @@ This is a simplified MSBuild implementation focused on core functionality:
 
 - More sophisticated condition parsing
 - Additional built-in tasks (Csc, Exec, etc.)
-- SDK-style project support
+- Broader SDK-style project evaluation
 - Item transformation syntax
 - Parallel execution
 - Incremental builds

@@ -21,6 +21,7 @@
     <ValueSeenAfterImport>$(ImportOrder)</ValueSeenAfterImport>
     <ImportOrder>after-import</ImportOrder>
     <RootThisFile>$(MSBuildThisFile)</RootThisFile>
+    <RootThisFileFullPath>$(MSBuildThisFileFullPath)</RootThisFileFullPath>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="one.cs;two.cs">

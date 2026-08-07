@@ -235,7 +235,6 @@ impl<'a> ExpressionEvaluator<'a> {
         if depth > MAX_EXPRESSION_NESTING {
             bail!("Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}");
         }
-        ensure_bounded_nesting(input)?;
         self.expand(input, depth)
     }
 
@@ -564,37 +563,8 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 }
 
-fn ensure_bounded_nesting(input: &str) -> Result<()> {
-    let mut depth = 0usize;
-    let mut maximum = 0usize;
-    let mut quote = None;
-    for character in input.chars() {
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match character {
-            '\'' | '"' => quote = Some(character),
-            '(' => {
-                depth += 1;
-                maximum = maximum.max(depth);
-                if maximum > MAX_EXPRESSION_NESTING {
-                    bail!(
-                        "Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}"
-                    );
-                }
-            }
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
-    let mut depth = 0;
+    let mut depth = 0usize;
     let mut quote = None;
     for (offset, character) in input[opening..].char_indices() {
         let position = opening + offset;
@@ -606,7 +576,14 @@ fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
         }
         match character {
             '\'' | '"' => quote = Some(character),
-            '(' => depth += 1,
+            '(' => {
+                depth += 1;
+                if depth > MAX_EXPRESSION_NESTING {
+                    bail!(
+                        "Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}"
+                    );
+                }
+            }
             ')' => {
                 depth -= 1;
                 if depth == 0 {
@@ -643,7 +620,14 @@ fn split_arguments(input: &str) -> Result<Vec<String>> {
         }
         match character {
             '\'' | '"' => quote = Some(character),
-            '(' => depth += 1,
+            '(' => {
+                depth += 1;
+                if depth > MAX_EXPRESSION_NESTING {
+                    bail!(
+                        "Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}"
+                    );
+                }
+            }
             ')' => depth -= 1,
             ',' if depth == 0 => {
                 arguments.push(unquote(input[start..position].trim()));
@@ -832,17 +816,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_excessive_syntactic_nesting() {
+    fn literal_parentheses_are_opaque_to_expression_depth_guard() {
         let model = ProjectModel::new();
         let input = format!(
             "{}value{}",
-            "(".repeat(MAX_EXPRESSION_NESTING + 1),
-            ")".repeat(MAX_EXPRESSION_NESTING + 1)
+            "(".repeat(MAX_EXPRESSION_NESTING * 4),
+            ")".repeat(MAX_EXPRESSION_NESTING * 4)
         );
-        let error = ExpressionEvaluator::new(&model)
-            .evaluate(&input)
-            .unwrap_err();
-        assert!(error.to_string().contains("nesting"));
+        assert_eq!(
+            ExpressionEvaluator::new(&model).evaluate(&input).unwrap(),
+            input
+        );
     }
 
     #[test]

@@ -29,11 +29,13 @@ Both implementations now preserve aggregated project source, including unevaluat
 - [x] Basic `$(Property)` expansion.
 - [x] Evaluate properties in document order with last eligible assignment winning.
 - [x] Expand each assignment once against the preceding state, including self,
-  before-set, and mutual references; bound syntactically nested expressions.
+  before-set, and mutual references; bound actual expression/function nesting
+  without interpreting parentheses in literal text.
 - [x] Implement global properties and `--property Name=Value` command-line precedence.
-- [x] Snapshot environment properties and provide the conventional project and
-  current-file reserved properties.
-- [x] Provide core project/current-file paths and active .NET SDK properties during preprocessing.
+- [x] Snapshot environment properties, protect the conventional reserved-name
+  set, and synthesize current-file properties only from active evaluation context.
+- [x] Preserve lexical project/current-file paths and provide host-resolved
+  active .NET SDK and toolset properties during preprocessing.
 - [ ] Implement property functions with an explicit allowlist matching MSBuild.
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
 - [ ] Implement registry properties where supported.
@@ -88,9 +90,12 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 - [x] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
 - [x] Support deterministic preprocessing of import globs and conditional imports.
 - [x] Honor `ImportGroup` conditions.
-- [ ] Detect duplicate and cyclic imports with compatible diagnostics.
+- [ ] Complete duplicate/cyclic import warning and diagnostic parity. Canonical
+  identity detection and duplicate skipping are implemented.
 - [ ] Implement `Choose`, `When`, and `Otherwise`.
-- [x] Implement implicit `Sdk.props` and `Sdk.targets` imports for installed .NET SDKs.
+- [x] Implement ordered implicit `Sdk.props` and `Sdk.targets` imports for
+  `Project@Sdk` and top-level `Sdk Name/Version` declarations, with cached
+  `dotnet` host discovery that honors `global.json`.
 - [x] Preserve an aggregated source representation equivalent to `/pp`.
 
 ### Escaping and Parsing
@@ -115,8 +120,11 @@ The upstream-test mapping and fixture status are maintained in
 
 - `TreatAsLocalProperty` is not implemented. Global properties are therefore
   always immutable during project/import evaluation.
-- Root and ordinary local path semantics are covered. Edge UNC normalization
-  remains deferred.
+- Lexical absolute local paths, including Windows spelling, are covered. Edge
+  UNC normalization remains deferred.
+- Version syntax on top-level SDK declarations is retained for installed/custom
+  SDK lookup. NuGet acquisition for versioned third-party MSBuild SDKs remains
+  deferred.
 - Uninitialized-property warning emission is deferred; before-set reads already
   produce the compatible empty value without recursive reevaluation.
 - Property lookup is indexed and case-insensitive. Broader item and metadata

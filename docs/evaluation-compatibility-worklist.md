@@ -67,11 +67,19 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 
 - [x] Basic `==` and `!=` comparisons.
 - [x] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
-- [ ] Support relational operators and numeric/version comparisons.
+- [x] Support `<`, `>`, `<=`, and `>=` with exact decimal/hex comparison and
+  two-to-four-part version ordering.
 - [x] Support boolean coercion, case-insensitive comparisons, and quoted literals.
-- [ ] Implement the remaining intrinsic condition function: `IsOsPlatform`.
+- [x] Implement `$([MSBuild]::IsOSPlatform(...))` for case-insensitive
+  `Windows`, `Linux`, and `OSX` platform names.
 - [x] Implement `Exists`, `HasTrailingSlash`, SDK version comparisons, feature-wave checks, and common string predicates.
 - [x] Produce errors for malformed conditions instead of treating arbitrary text as true.
+
+The relational and `IsOSPlatform` ports deliberately cover the focused cases
+listed in the compatibility matrix, rather than every upstream parser and
+coercion permutation. Remaining condition backlog includes legacy
+`MSBuildToolsVersion` comparison shims, condition syntax/escaping permutations,
+and nonstandard runtime platform identifiers.
 
 ### Items and Metadata
 

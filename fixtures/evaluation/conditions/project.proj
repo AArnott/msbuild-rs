@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <XmlEscapedLess Condition="'1234' &lt; '1235'">true</XmlEscapedLess>
+    <XmlEscapedGreaterOrEqual Condition="'1235' &gt;= '1235'">true</XmlEscapedGreaterOrEqual>
+    <HexDecimalEquality Condition="0x1 == 1.0">true</HexDecimalEquality>
+    <VersionRelational Condition="'1.2.3' &lt;= '1.2.3.0'">true</VersionRelational>
+    <NumericVersionRelational Condition="6 &lt;= 6.0.0.1">true</NumericVersionRelational>
+    <BooleanAlias Condition="false==no">true</BooleanAlias>
+    <BooleanNotAlias Condition="true==!false">true</BooleanNotAlias>
+
+    <IsWindows Condition="$([MSBuild]::IsOSPlatform('wInDoWs'))">true</IsWindows>
+    <IsWindows Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</IsWindows>
+    <IsLinux Condition="$([MSBuild]::IsOSPlatform('LINUX'))">true</IsLinux>
+    <IsLinux Condition="!$([MSBuild]::IsOSPlatform('Linux'))">false</IsLinux>
+    <IsOSX Condition="$([MSBuild]::IsOSPlatform('oSx'))">true</IsOSX>
+    <IsOSX Condition="!$([MSBuild]::IsOSPlatform('OSX'))">false</IsOSX>
+    <UnknownPlatform Condition="$([MSBuild]::IsOSPlatform('unknown'))">true</UnknownPlatform>
+    <UnknownPlatform Condition="!$([MSBuild]::IsOSPlatform('unknown'))">false</UnknownPlatform>
+  </PropertyGroup>
+</Project>

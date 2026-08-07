@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use num_bigint::BigInt;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,10 @@ enum ConditionToken {
     Value(String),
     Equal,
     NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
     And,
     Or,
     Not,
@@ -44,51 +49,63 @@ impl ConditionParser {
             return Ok(false);
         }
 
-        let result = self.parse_or()?;
+        let result = self.parse_or(true)?;
         if let Some(token) = self.peek() {
             bail!("Unexpected token in condition: {token:?}");
         }
         Ok(result)
     }
 
-    fn parse_or(&mut self) -> Result<bool> {
-        let mut result = self.parse_and()?;
+    fn parse_or(&mut self, evaluate: bool) -> Result<bool> {
+        let mut result = self.parse_and(evaluate)?;
         while self.consume(&ConditionToken::Or) {
-            let right = self.parse_and()?;
-            result = result || right;
+            let right = self.parse_and(evaluate && !result)?;
+            if evaluate {
+                result = result || right;
+            }
         }
         Ok(result)
     }
 
-    fn parse_and(&mut self) -> Result<bool> {
-        let mut result = self.parse_unary()?;
+    fn parse_and(&mut self, evaluate: bool) -> Result<bool> {
+        let mut result = self.parse_unary(evaluate)?;
         while self.consume(&ConditionToken::And) {
-            let right = self.parse_unary()?;
-            result = result && right;
+            let right = self.parse_unary(evaluate && result)?;
+            if evaluate {
+                result = result && right;
+            }
         }
         Ok(result)
     }
 
-    fn parse_unary(&mut self) -> Result<bool> {
+    fn parse_unary(&mut self, evaluate: bool) -> Result<bool> {
         if self.consume(&ConditionToken::Not) {
-            return Ok(!self.parse_unary()?);
+            let result = self.parse_unary(evaluate)?;
+            return Ok(evaluate && !result);
         }
 
         if self.consume(&ConditionToken::LeftParen) {
-            let result = self.parse_or()?;
+            let result = self.parse_or(evaluate)?;
             if !self.consume(&ConditionToken::RightParen) {
                 bail!("Missing closing parenthesis in condition");
             }
             return Ok(result);
         }
 
-        self.parse_comparison()
+        self.parse_comparison(evaluate)
     }
 
-    fn parse_comparison(&mut self) -> Result<bool> {
+    fn parse_comparison(&mut self, evaluate: bool) -> Result<bool> {
         let left = if matches!(
             self.peek(),
-            Some(ConditionToken::Equal | ConditionToken::NotEqual)
+            Some(
+                ConditionToken::Equal
+                    | ConditionToken::NotEqual
+                    | ConditionToken::Less
+                    | ConditionToken::LessOrEqual
+                    | ConditionToken::Greater
+                    | ConditionToken::GreaterOrEqual
+            )
         ) {
             String::new()
         } else {
@@ -96,21 +113,58 @@ impl ConditionParser {
         };
         if self.consume(&ConditionToken::Equal) {
             let right = self.take_value()?;
-            return Ok(left.eq_ignore_ascii_case(&right));
+            return if evaluate {
+                compare_equality(&left, &right)
+            } else {
+                Ok(false)
+            };
         }
         if self.consume(&ConditionToken::NotEqual) {
             let right = self.take_value()?;
-            return Ok(!left.eq_ignore_ascii_case(&right));
+            return if evaluate {
+                compare_equality(&left, &right).map(|result| !result)
+            } else {
+                Ok(false)
+            };
         }
 
-        match left.trim().to_ascii_lowercase().as_str() {
-            "" | "false" => Ok(false),
-            "true" => Ok(true),
-            _ => bail!("Expected a boolean value or comparison, found '{left}'"),
+        let operator = [
+            ConditionToken::Less,
+            ConditionToken::LessOrEqual,
+            ConditionToken::Greater,
+            ConditionToken::GreaterOrEqual,
+        ]
+        .into_iter()
+        .find(|operator| self.consume(operator));
+        if let Some(operator) = operator {
+            let right = self.take_value()?;
+            if !evaluate {
+                return Ok(false);
+            }
+            let ordering = compare_relational(&left, &right)?;
+            return Ok(match operator {
+                ConditionToken::Less => ordering.is_lt(),
+                ConditionToken::LessOrEqual => !ordering.is_gt(),
+                ConditionToken::Greater => ordering.is_gt(),
+                ConditionToken::GreaterOrEqual => !ordering.is_lt(),
+                _ => unreachable!(),
+            });
         }
+
+        if !evaluate {
+            return Ok(false);
+        }
+        parse_condition_bool(&left)
+            .ok_or_else(|| anyhow!("Expected a boolean value or comparison, found '{left}'"))
     }
 
     fn take_value(&mut self) -> Result<String> {
+        if self.consume(&ConditionToken::Not) {
+            let value = self.take_value()?;
+            let value = parse_condition_bool(&value)
+                .ok_or_else(|| anyhow!("Expected a boolean value after '!', found '{value}'"))?;
+            return Ok((!value).to_string());
+        }
         match self.tokens.get(self.position).cloned() {
             Some(ConditionToken::Value(value)) => {
                 self.position += 1;
@@ -159,6 +213,22 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
                 tokens.push(ConditionToken::NotEqual);
                 position += 2;
             }
+            '<' if chars.get(position + 1) == Some(&'=') => {
+                tokens.push(ConditionToken::LessOrEqual);
+                position += 2;
+            }
+            '>' if chars.get(position + 1) == Some(&'=') => {
+                tokens.push(ConditionToken::GreaterOrEqual);
+                position += 2;
+            }
+            '<' => {
+                tokens.push(ConditionToken::Less);
+                position += 1;
+            }
+            '>' => {
+                tokens.push(ConditionToken::Greater);
+                position += 1;
+            }
             '!' => {
                 tokens.push(ConditionToken::Not);
                 position += 1;
@@ -181,7 +251,7 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
                 let start = position;
                 while position < chars.len()
                     && !chars[position].is_whitespace()
-                    && !matches!(chars[position], '(' | ')' | '=' | '!')
+                    && !matches!(chars[position], '(' | ')' | '=' | '!' | '<' | '>')
                 {
                     position += 1;
                 }
@@ -204,6 +274,193 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
     }
 
     Ok(tokens)
+}
+
+// MSBuild falls back to string equality when its numeric coercion overflows.
+const MAX_MSBUILD_NUMERIC_DIGITS: usize = 309;
+
+#[derive(Debug)]
+struct NumericValue {
+    coefficient: BigInt,
+    scale: usize,
+}
+
+#[derive(Debug)]
+struct VersionValue {
+    parts: [i32; 4],
+}
+
+fn compare_equality(left: &str, right: &str) -> Result<bool> {
+    if let (Some(left), Some(right)) = (parse_numeric(left), parse_numeric(right)) {
+        return Ok(compare_numeric(&left, &right).is_eq());
+    }
+    if let (Some(left), Some(right)) = (parse_condition_bool(left), parse_condition_bool(right)) {
+        return Ok(left == right);
+    }
+    Ok(left.eq_ignore_ascii_case(right))
+}
+
+fn compare_relational(left: &str, right: &str) -> Result<Ordering> {
+    let left_numeric = parse_numeric(left);
+    let right_numeric = parse_numeric(right);
+    let left_version = parse_version(left);
+    let right_version = parse_version(right);
+
+    match (left_numeric, left_version, right_numeric, right_version) {
+        (Some(left), _, Some(right), _) => Ok(compare_numeric(&left, &right)),
+        (_, Some(left), _, Some(right)) => Ok(compare_versions_exact(&left, &right)),
+        (Some(left), _, _, Some(right)) => Ok(compare_number_and_version(&left, &right)),
+        (_, Some(left), Some(right), _) => Ok(compare_number_and_version(&right, &left).reverse()),
+        _ => bail!(
+            "Relational comparison requires decimal, hexadecimal, or version operands: '{left}' and '{right}'"
+        ),
+    }
+}
+
+fn parse_condition_bool(value: &str) -> Option<bool> {
+    if value.trim().eq_ignore_ascii_case("true")
+        || value.trim().eq_ignore_ascii_case("on")
+        || value.trim().eq_ignore_ascii_case("yes")
+    {
+        Some(true)
+    } else if value.trim().is_empty()
+        || value.trim().eq_ignore_ascii_case("false")
+        || value.trim().eq_ignore_ascii_case("off")
+        || value.trim().eq_ignore_ascii_case("no")
+    {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn parse_numeric(value: &str) -> Option<NumericValue> {
+    let value = value.trim();
+    let (negative, value) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        if hex.is_empty()
+            || hex.len() > MAX_MSBUILD_NUMERIC_DIGITS
+            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        let coefficient = BigInt::parse_bytes(hex.as_bytes(), 16)?;
+        return Some(NumericValue {
+            coefficient: if negative { -coefficient } else { coefficient },
+            scale: 0,
+        });
+    }
+
+    let mut decimal_seen = false;
+    let mut fractional_digits = 0usize;
+    let mut digits = 0usize;
+    let mut last_nonzero = None;
+    let mut scale_at_last_nonzero = 0usize;
+    for (index, byte) in value.bytes().enumerate() {
+        if byte == b'.' && !decimal_seen {
+            decimal_seen = true;
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        digits += 1;
+        if digits > MAX_MSBUILD_NUMERIC_DIGITS {
+            return None;
+        }
+        if decimal_seen {
+            fractional_digits += 1;
+        }
+        if byte != b'0' {
+            last_nonzero = Some(index);
+            scale_at_last_nonzero = fractional_digits;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    let Some(last_nonzero) = last_nonzero else {
+        return Some(NumericValue {
+            coefficient: BigInt::from(0u8),
+            scale: 0,
+        });
+    };
+
+    let mut coefficient = BigInt::from(0u8);
+    for byte in value[..=last_nonzero].bytes() {
+        if byte.is_ascii_digit() {
+            coefficient = coefficient * 10u8 + BigInt::from(byte - b'0');
+        }
+    }
+    Some(NumericValue {
+        coefficient: if negative { -coefficient } else { coefficient },
+        scale: scale_at_last_nonzero,
+    })
+}
+
+fn parse_version(value: &str) -> Option<VersionValue> {
+    let value = value.trim();
+    let mut parts = [-1; 4];
+    let mut count = 0usize;
+    for part in value.split('.') {
+        if count == parts.len()
+            || part.is_empty()
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        parts[count] = part.parse().ok()?;
+        count += 1;
+    }
+    (2..=4).contains(&count).then_some(VersionValue { parts })
+}
+
+fn compare_numeric(left: &NumericValue, right: &NumericValue) -> Ordering {
+    if left.scale == right.scale {
+        return left.coefficient.cmp(&right.coefficient);
+    }
+    if left.scale < right.scale {
+        scale_coefficient(&left.coefficient, right.scale - left.scale).cmp(&right.coefficient)
+    } else {
+        left.coefficient.cmp(&scale_coefficient(
+            &right.coefficient,
+            left.scale - right.scale,
+        ))
+    }
+}
+
+fn scale_coefficient(value: &BigInt, scale: usize) -> BigInt {
+    let mut result = value.clone();
+    for _ in 0..scale {
+        result *= 10u8;
+    }
+    result
+}
+
+fn compare_versions_exact(left: &VersionValue, right: &VersionValue) -> Ordering {
+    left.parts.cmp(&right.parts)
+}
+
+fn compare_number_and_version(number: &NumericValue, version: &VersionValue) -> Ordering {
+    let major = NumericValue {
+        coefficient: BigInt::from(version.parts[0]),
+        scale: 0,
+    };
+    match compare_numeric(number, &major) {
+        Ordering::Equal => Ordering::Less,
+        ordering => ordering,
+    }
 }
 
 impl<'a> ExpressionEvaluator<'a> {
@@ -349,6 +606,10 @@ impl<'a> ExpressionEvaluator<'a> {
                 "isrunningfromvisualstudio" => {
                     require_arguments(method, &arguments, 0)?;
                     Ok("false".to_string())
+                }
+                "isosplatform" => {
+                    require_arguments(method, &arguments, 1)?;
+                    Ok(is_os_platform(&arguments[0]).to_string())
                 }
                 "versiongreaterthan"
                 | "versiongreaterthanorequals"
@@ -561,6 +822,16 @@ impl<'a> ExpressionEvaluator<'a> {
             .get_property(name)
             .map(|value| Cow::Borrowed(value.as_str()))
     }
+}
+
+fn is_os_platform(platform: &str) -> bool {
+    let current_platform = match std::env::consts::OS {
+        "windows" => "Windows",
+        "linux" => "Linux",
+        "macos" => "OSX",
+        _ => return false,
+    };
+    platform.eq_ignore_ascii_case(current_platform)
 }
 
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
@@ -924,6 +1195,116 @@ mod tests {
         assert!(evaluator.evaluate_condition("(true Or false").is_err());
         assert!(evaluator.evaluate_condition("arbitrary text").is_err());
         assert!(evaluator.evaluate_condition("'unterminated").is_err());
+    }
+
+    #[test]
+    fn upstream_relational_and_condition_expression_subset() {
+        let mut model = ProjectModel::new();
+        model.set_property("a".to_string(), "no".to_string());
+        model.set_property("b".to_string(), "true".to_string());
+        model.set_property("c".to_string(), "1".to_string());
+        model.set_property("d".to_string(), "xxx".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        // ExpressionTree_Tests.RelationalTests.
+        for expression in [
+            "1234 < 1235",
+            "1234 <= 1235",
+            "1234 <= 1234",
+            "1235 > 1234",
+            "1235 >= 1235",
+            "1235 >= 1234",
+            "0.0==0",
+        ] {
+            assert!(
+                evaluator.evaluate_condition(expression).unwrap(),
+                "expected true: {expression}"
+            );
+        }
+        for expression in ["1235 < 1235", "1235 <= 1234"] {
+            assert!(
+                !evaluator.evaluate_condition(expression).unwrap(),
+                "expected false: {expression}"
+            );
+        }
+
+        // Selected ExpressionTreeExpression_Tests true/false cases.
+        for expression in [
+            "0x1==1.0",
+            "0<0.1",
+            "+4>-4",
+            "false==no",
+            "true==yes",
+            "true==!false",
+            "$(c)>0",
+            "1.2.3<=1.2.3.0",
+            "0.8.0.0<8.0.0",
+            "8.0.0>=8",
+            "6<=6.0.0.1",
+            "true or (SHOULDNOTEVALTHIS)",
+            "false or true And true",
+        ] {
+            assert!(
+                evaluator.evaluate_condition(expression).unwrap(),
+                "expected true: {expression}"
+            );
+        }
+        for expression in [
+            "1.3.5.8>1.3.6.8",
+            "0.8.0.0>=1.0",
+            "8.0.0<=8.0",
+            "1.2.0==1.2",
+        ] {
+            assert!(
+                !evaluator.evaluate_condition(expression).unwrap(),
+                "expected false: {expression}"
+            );
+        }
+        let too_large_for_msbuild_numeric_coercion = format!("1{}", "0".repeat(500));
+        assert!(
+            evaluator
+                .evaluate_condition(&format!(
+                    "{too_large_for_msbuild_numeric_coercion}=={too_large_for_msbuild_numeric_coercion}"
+                ))
+                .unwrap()
+        );
+        assert!(
+            !evaluator
+                .evaluate_condition(&format!(
+                    "{too_large_for_msbuild_numeric_coercion}==0{too_large_for_msbuild_numeric_coercion}"
+                ))
+                .unwrap()
+        );
+
+        // Selected ExpressionTreeExpression_Tests error cases.
+        for expression in ["1 > 'x'", "x1<=1", "1<=x", "1<=1<=1", "1>=$(b)"] {
+            assert!(
+                evaluator.evaluate_condition(expression).is_err(),
+                "expected error: {expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_os_platform_matches_msbuild_platform_names_case_insensitively() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert_eq!(
+            evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('wInDoWs'))")?,
+            cfg!(target_os = "windows")
+        );
+        assert_eq!(
+            evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('LINUX'))")?,
+            cfg!(target_os = "linux")
+        );
+        assert_eq!(
+            evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('oSx'))")?,
+            cfg!(target_os = "macos")
+        );
+        assert!(!evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('MacOS'))")?);
+        assert!(!evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('unknown'))")?);
+        Ok(())
     }
 
     #[test]

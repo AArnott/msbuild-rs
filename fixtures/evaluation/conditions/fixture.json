@@ -1,0 +1,18 @@
+{
+  "name": "conditions-relational-and-os-platform",
+  "project": "project.proj",
+  "properties": [
+    "XmlEscapedLess",
+    "XmlEscapedGreaterOrEqual",
+    "HexDecimalEquality",
+    "VersionRelational",
+    "NumericVersionRelational",
+    "BooleanAlias",
+    "BooleanNotAlias",
+    "IsWindows",
+    "IsLinux",
+    "IsOSX",
+    "UnknownPlatform"
+  ],
+  "items": []
+}

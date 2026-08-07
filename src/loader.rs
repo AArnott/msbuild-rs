@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use log::debug;
+use log::{debug, warn};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::{HashMap, HashSet};
@@ -25,18 +25,8 @@ struct EvaluationState {
     global_properties: PropertyMap,
     active_import_stack: Vec<ActiveImport>,
     completed_imports: HashSet<PathBuf>,
-    canonical_paths: HashMap<PathBuf, PathBuf>,
-    source_cache: HashMap<PathBuf, String>,
     render_preprocessed: bool,
     sdk_root: Option<PathBuf>,
-    // A no-allocation seam for a future opt-in diagnostic sink.
-    _diagnostics: DiagnosticMode,
-}
-
-#[derive(Default)]
-enum DiagnosticMode {
-    #[default]
-    None,
 }
 
 #[derive(Debug)]
@@ -71,6 +61,18 @@ struct ChooseFrame {
     parent_active: bool,
     branch_active: bool,
     branch_selected: bool,
+}
+
+#[derive(Debug)]
+struct StructuralFrame {
+    name: String,
+    choose: Option<ChooseStructure>,
+}
+
+#[derive(Debug, Default)]
+struct ChooseStructure {
+    when_count: usize,
+    otherwise_seen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,45 +186,49 @@ impl EvaluationState {
             global_properties,
             active_import_stack: Vec::new(),
             completed_imports: HashSet::new(),
-            canonical_paths: HashMap::new(),
-            source_cache: HashMap::new(),
             render_preprocessed,
             sdk_root,
-            _diagnostics: DiagnosticMode::None,
         })
     }
 
     fn evaluate_file(&mut self, path: &Path, include_project_element: bool) -> Result<String> {
         let lexical_path = lexical_absolute(path)
             .with_context(|| format!("Failed to resolve project {}", path.display()))?;
-        let canonical_identity = self.canonical_identity(&lexical_path)?;
+        let import_identity = normalized_lexical_file_identity(&lexical_path)?;
         if let Some(cycle_start) = self
             .active_import_stack
             .iter()
-            .position(|import| import.identity == canonical_identity)
+            .position(|import| import.identity == import_identity)
         {
             let mut chain = self.active_import_stack[cycle_start..]
                 .iter()
                 .map(|import| display_path(&import.lexical_path))
                 .collect::<Vec<_>>();
             chain.push(display_path(&lexical_path));
-            bail!("MSB4019: Circular import detected: {}", chain.join(" -> "));
+            warn!(
+                "MSB4210: \"{}\" is attempting to import itself, directly or indirectly. The import will be ignored. Import chain: {}",
+                lexical_path.display(),
+                chain.join(" -> ")
+            );
+            return Ok(String::new());
         }
-        if self.completed_imports.contains(&canonical_identity) {
+        if self.completed_imports.contains(&import_identity) {
             debug!("Skipping duplicate import {}", lexical_path.display());
             return Ok(String::new());
         }
         self.active_import_stack.push(ActiveImport {
-            identity: canonical_identity.clone(),
+            identity: import_identity.clone(),
             lexical_path: lexical_path.clone(),
         });
 
-        let raw_source = self.cached_source(&lexical_path, &canonical_identity)?;
+        let raw_source = fs::read_to_string(&lexical_path)
+            .with_context(|| format!("Failed to read project {}", lexical_path.display()))?;
         let source = if self.render_preprocessed {
             normalize_source(&raw_source)
         } else {
             raw_source.trim_start_matches('\u{feff}').to_string()
         };
+        validate_project_structure(&source, &lexical_path)?;
         let (content_start, content_end) =
             project_content_bounds(&source, include_project_element)?;
         let sdk_references = project_sdks(&source)?;
@@ -273,6 +279,29 @@ impl EvaluationState {
                     if include_project_element && element.name().as_ref() == b"Project" =>
                 {
                     self.evaluate_project_default_targets(&element, &reader, &lexical_path)?;
+                }
+                Event::Empty(element)
+                    if element.name().as_ref() == b"When" && current_target.is_none() =>
+                {
+                    let (parent_active, branch_selected) = choices
+                        .last()
+                        .map(|choice| (choice.parent_active, choice.branch_selected))
+                        .ok_or_else(|| anyhow!("When element has no enclosing Choose"))?;
+                    let is_selected = parent_active
+                        && !branch_selected
+                        && self.evaluate_optional_condition(&element, &reader, &lexical_path)?;
+                    let choice = choices.last_mut().expect("choice must still be present");
+                    choice.branch_active = is_selected;
+                    choice.branch_selected |= is_selected;
+                }
+                Event::Empty(element)
+                    if element.name().as_ref() == b"Otherwise" && current_target.is_none() =>
+                {
+                    let choice = choices
+                        .last_mut()
+                        .ok_or_else(|| anyhow!("Otherwise element has no enclosing Choose"))?;
+                    choice.branch_active = choice.parent_active && !choice.branch_selected;
+                    choice.branch_selected |= choice.branch_active;
                 }
                 Event::Start(element)
                     if element.name().as_ref() == b"Choose" && current_target.is_none() =>
@@ -646,8 +675,8 @@ impl EvaluationState {
             .active_import_stack
             .pop()
             .expect("active import stack underflow");
-        debug_assert_eq!(completed.identity, canonical_identity);
-        self.completed_imports.insert(canonical_identity);
+        debug_assert_eq!(completed.identity, import_identity);
+        self.completed_imports.insert(import_identity);
 
         if !sdk_imports.is_empty() && self.render_preprocessed {
             let mut props_markers = String::new();
@@ -678,27 +707,6 @@ impl EvaluationState {
         }
 
         Ok(output)
-    }
-
-    fn canonical_identity(&mut self, lexical_path: &Path) -> Result<PathBuf> {
-        if let Some(identity) = self.canonical_paths.get(lexical_path) {
-            return Ok(identity.clone());
-        }
-        let identity = canonical_file_identity(lexical_path)?;
-        self.canonical_paths
-            .insert(lexical_path.to_path_buf(), identity.clone());
-        Ok(identity)
-    }
-
-    fn cached_source(&mut self, lexical_path: &Path, canonical_identity: &Path) -> Result<String> {
-        if let Some(source) = self.source_cache.get(canonical_identity) {
-            return Ok(source.clone());
-        }
-        let source = fs::read_to_string(lexical_path)
-            .with_context(|| format!("Failed to read project {}", lexical_path.display()))?;
-        self.source_cache
-            .insert(canonical_identity.to_path_buf(), source.clone());
-        Ok(source)
     }
 
     fn choose_content_active(choices: &[ChooseFrame]) -> bool {
@@ -887,7 +895,7 @@ impl EvaluationState {
         );
         let all_completed = paths
             .iter()
-            .map(|path| self.canonical_identity(path))
+            .map(|path| normalized_lexical_file_identity(path))
             .collect::<Result<Vec<_>>>()?
             .iter()
             .all(|identity| self.completed_imports.contains(identity));
@@ -1064,6 +1072,194 @@ fn line_indentation(source: &str, position: usize) -> &str {
     &source[line_start..position]
 }
 
+fn validate_project_structure(source: &str, path: &Path) -> Result<()> {
+    let mut reader = Reader::from_str(source);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<StructuralFrame>::new();
+    let mut root_seen = false;
+
+    loop {
+        match reader.read_event()? {
+            Event::Start(element) => {
+                let frame =
+                    validate_structural_element(&element, &reader, path, &mut stack, root_seen)?;
+                root_seen = true;
+                stack.push(frame);
+            }
+            Event::Empty(element) => {
+                let frame =
+                    validate_structural_element(&element, &reader, path, &mut stack, root_seen)?;
+                root_seen = true;
+                finish_structural_element(frame, path)?;
+            }
+            Event::End(element) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let frame = stack.pop().ok_or_else(|| {
+                    anyhow!(
+                        "Unexpected closing element <{name}> while validating {}",
+                        path.display()
+                    )
+                })?;
+                if frame.name != name {
+                    bail!(
+                        "Closing element <{name}> does not match <{}> in {}",
+                        frame.name,
+                        path.display()
+                    );
+                }
+                finish_structural_element(frame, path)?;
+            }
+            Event::Text(text)
+                if stack
+                    .last()
+                    .is_some_and(|frame| is_choice_structure_element(&frame.name))
+                    && !text.decode()?.trim().is_empty() =>
+            {
+                bail!(
+                    "Text content is not allowed directly beneath <{}> in {}",
+                    stack.last().expect("checked above").name,
+                    path.display()
+                );
+            }
+            Event::CData(data)
+                if stack
+                    .last()
+                    .is_some_and(|frame| is_choice_structure_element(&frame.name))
+                    && !data.decode()?.trim().is_empty() =>
+            {
+                bail!(
+                    "Text content is not allowed directly beneath <{}> in {}",
+                    stack.last().expect("checked above").name,
+                    path.display()
+                );
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    if !stack.is_empty() {
+        bail!(
+            "Project XML ended before all elements were closed in {}",
+            path.display()
+        );
+    }
+    if !root_seen {
+        bail!("Project root element was not found in {}", path.display());
+    }
+    Ok(())
+}
+
+fn validate_structural_element(
+    element: &BytesStart<'_>,
+    reader: &Reader<&[u8]>,
+    path: &Path,
+    stack: &mut [StructuralFrame],
+    root_seen: bool,
+) -> Result<StructuralFrame> {
+    let name = xml_name(element);
+    let mut choose = None;
+    if stack.is_empty() {
+        if root_seen || name != "Project" {
+            bail!(
+                "MSB4067: The root element <{name}> is invalid in {}. Expected <Project>.",
+                path.display()
+            );
+        }
+    } else {
+        let parent = stack.last_mut().expect("checked above");
+        if parent.name == "Project" {
+            if !matches!(
+                name.as_str(),
+                "PropertyGroup"
+                    | "ItemGroup"
+                    | "ItemDefinitionGroup"
+                    | "Import"
+                    | "ImportGroup"
+                    | "Choose"
+                    | "Target"
+                    | "UsingTask"
+                    | "ProjectExtensions"
+                    | "Sdk"
+            ) {
+                return illegal_child(&name, &parent.name, path);
+            }
+            if name == "Choose" {
+                choose = Some(ChooseStructure::default());
+            }
+        } else if let Some(choice) = parent.choose.as_mut() {
+            match name.as_str() {
+                "When" => {
+                    if choice.otherwise_seen {
+                        bail!(
+                            "MSB4084: A <When> element may not follow an <Otherwise> element in a <Choose> in {}.",
+                            path.display()
+                        );
+                    }
+                    let condition = attribute_value(element, reader, b"Condition")?;
+                    if condition.is_none_or(|condition| condition.trim().is_empty()) {
+                        bail!(
+                            "MSB4035: The required attribute \"Condition\" is empty or missing from the element <When> in {}.",
+                            path.display()
+                        );
+                    }
+                    choice.when_count += 1;
+                }
+                "Otherwise" => {
+                    if choice.otherwise_seen {
+                        bail!(
+                            "MSB4082: Choose has more than one <Otherwise> element in {}.",
+                            path.display()
+                        );
+                    }
+                    if attribute_value(element, reader, b"Condition")?.is_some() {
+                        bail!(
+                            "MSB4066: The attribute \"Condition\" in element <Otherwise> is unrecognized in {}.",
+                            path.display()
+                        );
+                    }
+                    choice.otherwise_seen = true;
+                }
+                _ => return illegal_child(&name, &parent.name, path),
+            }
+        } else if is_choice_structure_element(&parent.name) {
+            if !matches!(
+                name.as_str(),
+                "PropertyGroup" | "ItemGroup" | "ItemDefinitionGroup" | "Choose"
+            ) {
+                return illegal_child(&name, &parent.name, path);
+            }
+            if name == "Choose" {
+                choose = Some(ChooseStructure::default());
+            }
+        }
+    }
+    Ok(StructuralFrame { name, choose })
+}
+
+fn finish_structural_element(frame: StructuralFrame, path: &Path) -> Result<()> {
+    if let Some(choice) = frame.choose
+        && choice.when_count == 0
+    {
+        bail!(
+            "MSB4085: A <Choose> must contain at least one <When> in {}.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn is_choice_structure_element(name: &str) -> bool {
+    matches!(name, "When" | "Otherwise")
+}
+
+fn illegal_child<T>(name: &str, parent: &str, path: &Path) -> Result<T> {
+    bail!(
+        "MSB4067: The element <{name}> beneath element <{parent}> is unrecognized in {}.",
+        path.display()
+    )
+}
+
 fn resolve_import_paths(import_path: &Path, importing_path: &Path) -> Result<Vec<PathBuf>> {
     let pattern = import_path.to_string_lossy();
     if pattern.contains(['*', '?', '[']) {
@@ -1076,7 +1272,7 @@ fn resolve_import_paths(import_path: &Path, importing_path: &Path) -> Result<Vec
         paths.sort();
         let mut identities = HashSet::new();
         paths.retain(|path| {
-            canonical_file_identity(path)
+            normalized_lexical_file_identity(path)
                 .map(|identity| identities.insert(identity))
                 .unwrap_or(false)
         });
@@ -1093,9 +1289,17 @@ fn resolve_import_paths(import_path: &Path, importing_path: &Path) -> Result<Vec
     Ok(vec![lexical_absolute(import_path)?])
 }
 
-fn canonical_file_identity(path: &Path) -> Result<PathBuf> {
-    path.canonicalize()
-        .with_context(|| format!("Failed to resolve project {}", path.display()))
+fn normalized_lexical_file_identity(path: &Path) -> Result<PathBuf> {
+    let path = lexical_absolute(path)
+        .with_context(|| format!("Failed to resolve project {}", path.display()))?;
+    #[cfg(windows)]
+    {
+        Ok(PathBuf::from(path.to_string_lossy().to_lowercase()))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(path)
+    }
 }
 
 fn project_content_bounds(source: &str, include_project_element: bool) -> Result<(usize, usize)> {

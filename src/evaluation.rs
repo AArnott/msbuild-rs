@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn upstream_imports_only_included_once_uses_canonical_identity() -> Result<()> {
+    fn upstream_imports_only_included_once_uses_normalized_lexical_identity() -> Result<()> {
         // Port of dotnet/msbuild Evaluator_Tests.ImportsOnlyIncludedOnce.
         let directory = TempDir::new()?;
         fs::create_dir(directory.path().join("imports"))?;
@@ -860,8 +860,8 @@ mod tests {
     }
 
     #[test]
-    fn upstream_reject_circular_imports_reports_the_complete_chain() -> Result<()> {
-        // Closest local port of Evaluator_Tests.RejectCircularImportsWithCircularImports.
+    fn circular_imports_are_diagnosed_and_skipped_by_default() -> Result<()> {
+        // MSBuild only rejects these when ProjectLoadSettings.RejectCircularImports is set.
         let directory = TempDir::new()?;
         write_project(
             &directory,
@@ -871,24 +871,18 @@ mod tests {
         write_project(
             &directory,
             "b.props",
-            r#"<Project><Import Project="c.props" /></Project>"#,
-        );
-        write_project(
-            &directory,
-            "c.props",
-            r#"<Project><Import Project="./a.proj" /></Project>"#,
+            r#"<Project><PropertyGroup><ImportedBeforeCycle>yes</ImportedBeforeCycle></PropertyGroup><Import Project="./a.proj" /></Project>"#,
         );
 
         let mut evaluator = ProjectEvaluator::new();
-        let error = evaluator
-            .load_project(directory.path().join("a.proj"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Circular import detected"));
-        assert!(error.contains("a.proj ->"));
-        assert!(error.contains("b.props ->"));
-        assert!(error.contains("c.props ->"));
-        assert!(error.ends_with("a.proj"));
+        evaluator.load_project(directory.path().join("a.proj"))?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("ImportedBeforeCycle")
+                .map(String::as_str),
+            Some("yes")
+        );
         Ok(())
     }
 
@@ -991,6 +985,119 @@ mod tests {
         );
         let output = fs::read_to_string(output_path)?;
         assert!(output.contains("<ImportedFromChoose>yes</ImportedFromChoose>"));
+        Ok(())
+    }
+
+    #[test]
+    fn self_closing_when_selects_its_empty_branch() -> Result<()> {
+        let directory = TempDir::new()?;
+        let selected = write_project(
+            &directory,
+            "selected.proj",
+            r#"<Project><Choose>
+  <When Condition="true" />
+  <Otherwise><PropertyGroup><Branch>otherwise</Branch></PropertyGroup></Otherwise>
+</Choose></Project>"#,
+        );
+        let unselected = write_project(
+            &directory,
+            "unselected.proj",
+            r#"<Project><Choose>
+  <When Condition="false" />
+  <Otherwise><PropertyGroup><Branch>otherwise</Branch></PropertyGroup></Otherwise>
+</Choose></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(selected)?;
+        assert_eq!(evaluator.get_model().get_property("Branch"), None);
+
+        evaluator.load_project(unselected)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("Branch")
+                .map(String::as_str),
+            Some("otherwise")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn choose_structure_is_validated_even_in_inactive_branches() -> Result<()> {
+        let directory = TempDir::new()?;
+        let inactive_unknown = write_project(
+            &directory,
+            "inactive-unknown.proj",
+            r#"<Project><Choose><When Condition="false"><Bogus /></When><Otherwise /></Choose></Project>"#,
+        );
+        let error = ProjectEvaluator::new()
+            .load_project(inactive_unknown)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4067"));
+        assert!(error.contains("<Bogus>"));
+        assert!(error.contains("<When>"));
+
+        let invalid_order = write_project(
+            &directory,
+            "invalid-order.proj",
+            r#"<Project><Choose><When Condition="false" /><Otherwise /><When Condition="true" /></Choose></Project>"#,
+        );
+        let error = ProjectEvaluator::new()
+            .load_project(invalid_order)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4084"));
+
+        let missing_when = write_project(
+            &directory,
+            "missing-when.proj",
+            r#"<Project><Choose><Otherwise /></Choose></Project>"#,
+        );
+        let error = ProjectEvaluator::new()
+            .load_project(missing_when)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4085"));
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn import_identity_is_lexical_and_does_not_resolve_symlinks() -> Result<()> {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = TempDir::new()?;
+        let imported = write_project(
+            &directory,
+            "real.props",
+            "<Project><PropertyGroup><ImportCount>$(ImportCount)x</ImportCount></PropertyGroup></Project>",
+        );
+        let link = directory.path().join("linked.props");
+        if let Err(error) = symlink_file(&imported, &link) {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314)
+            {
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><Import Project="real.props" /><Import Project="linked.props" /></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("ImportCount")
+                .map(String::as_str),
+            Some("xx")
+        );
         Ok(())
     }
 

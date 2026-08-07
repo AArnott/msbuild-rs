@@ -211,6 +211,9 @@ if ($dotnetJson -cne $rustJson) {
 Write-Host "Evaluation parity passed: $($fixtureDefinition.name)"
 Write-Host "Raw outputs: $dotnetRawPath, $rustRawPath"
 Write-Host "Normalized output: $dotnetJsonPath"
+if ((Get-Item $dotnetErrorPath).Length -gt 0 -or (Get-Item $rustErrorPath).Length -gt 0) {
+    Write-Host "Successful diagnostic output was captured separately and is excluded from evaluated-state comparison: $dotnetErrorPath, $rustErrorPath"
+}
 }
 finally {
     foreach ($name in $environmentBackups.Keys) {

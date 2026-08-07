@@ -91,11 +91,14 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 - [x] Support deterministic preprocessing of import globs and conditional imports.
 - [x] Honor `ImportGroup` and child `Import` conditions using the importing
   file's current-file properties and source-position state.
-- [x] Detect duplicates with canonical file identity, evaluate each physical
-  file once, and reject active import cycles with a deterministic import chain.
-- [x] Implement project-level `Choose`, `When`, and `Otherwise`, including
-  nested choices, properties, and items in the selected branch. Imports remain
-  accepted at their conventional project-level locations.
+- [x] Detect duplicate imports with normalized lexical full-path identity,
+  without resolving symlinks; evaluate each lexical import once.
+- [x] Diagnose and skip circular imports by default, matching MSBuild's
+  non-`RejectCircularImports` load mode.
+- [x] Implement and structurally validate project-level `Choose`, `When`, and
+  `Otherwise`, including empty `When` branches, nested choices, properties,
+  and items in the selected branch. Every branch is validated even when it is
+  not selected.
 - [x] Implement ordered implicit `Sdk.props` and `Sdk.targets` imports for
   `Project@Sdk` and top-level `Sdk Name/Version` declarations, with cached
   `dotnet` host discovery that honors `global.json`.
@@ -132,8 +135,11 @@ The upstream-test mapping and fixture status are maintained in
   produce the compatible empty value without recursive reevaluation.
 - Property lookup is indexed and case-insensitive. Broader item and metadata
   case-insensitivity remains a later wave.
-- Import suppression matches the evaluate-once behavior, but does not yet emit
-  MSBuild's `MSB4011` duplicate-import warning or source locations. Cycle
-  diagnostics are actionable chains but not byte-for-byte `MSB4006` parity.
+- Import suppression uses normalized lexical full paths (case-insensitive on
+  Windows and case-sensitive elsewhere) and deliberately does not resolve
+  symlinks. A Windows symlink test is skipped when the process lacks the
+  `SeCreateSymbolicLinkPrivilege` privilege. Duplicate-import warning source
+  locations and a public strict equivalent to
+  `ProjectLoadSettings.RejectCircularImports` remain deferred.
 - `Choose` support is limited to project evaluation structure; target-body
-  `Choose`/task selection and invalid structural placements remain deferred.
+  `Choose`/task selection remains deferred.

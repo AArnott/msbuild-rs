@@ -1430,10 +1430,7 @@ mod tests {
                 .iter()
                 .all(|item| item.spec_kind == crate::escaping::ItemSpecKind::Literal)
         );
-        assert_eq!(
-            model.get_items("ActualGlob").unwrap()[0].spec_kind,
-            crate::escaping::ItemSpecKind::Glob
-        );
+        assert!(model.get_items("ActualGlob").is_none());
         assert_eq!(
             model.get_items("Pattern").unwrap()[1].escaped_name,
             "a%3Bb/%3F.cs"
@@ -1604,13 +1601,19 @@ mod tests {
         let mut evaluator = ProjectEvaluator::new();
         evaluator.load_project(project)?;
         let model = evaluator.get_model();
+        let full_directory = directory
+            .path()
+            .join("firstdirectory")
+            .join("seconddirectory");
+        let root = full_directory.ancestors().last().unwrap();
+        let expected_directory = format!(
+            "{}{}",
+            display_path(full_directory.strip_prefix(root)?),
+            std::path::MAIN_SEPARATOR
+        );
         assert_eq!(
             model.get_items("DirectoryResult").unwrap()[0].name,
-            format!(
-                "firstdirectory{}seconddirectory{}",
-                std::path::MAIN_SEPARATOR,
-                std::path::MAIN_SEPARATOR
-            )
+            expected_directory
         );
         assert_eq!(model.get_items("FilenameResult").unwrap()[0].name, "file0");
         assert_eq!(model.get_items("ExtensionResult").unwrap()[0].name, ".ext");
@@ -1816,6 +1819,693 @@ mod tests {
             assert!(error.contains(metadata), "{error}");
             assert!(error.contains("reserved item metadata"), "{error}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_include_and_exclude_observe_intermediary_state() -> Result<()> {
+        // Exact project-data ports of ItemEvaluation_Tests.
+        // IncludeShouldPreserveIntermediaryReferences and ExcludeSeesIntermediaryState.
+        let directory = TempDir::new()?;
+        let include_project = write_project(
+            &directory,
+            "include.proj",
+            r#"<Project><ItemGroup>
+  <i2 Include="a;b;c"><m1>m1_contents</m1><m2>m2_contents</m2></i2>
+  <i Include="@(i2)" />
+  <i2 Include="d;e;f;@(i2)"><m1>m1_updated</m1><m2>m2_updated</m2></i2>
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(include_project)?;
+        let model = evaluator.get_model();
+        let copied = model.get_items("i").unwrap();
+        assert_eq!(
+            copied
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(copied.iter().all(|item| item.get_metadata("m1").as_deref()
+            == Some("m1_contents")
+            && item.get_metadata("m2").as_deref() == Some("m2_contents")));
+        let source = model.get_items("i2").unwrap();
+        assert_eq!(
+            source
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c", "d", "e", "f", "a", "b", "c"]
+        );
+        assert!(
+            source[..3]
+                .iter()
+                .all(|item| item.get_metadata("m1").as_deref() == Some("m1_contents"))
+        );
+        assert!(
+            source[3..]
+                .iter()
+                .all(|item| item.get_metadata("m1").as_deref() == Some("m1_updated"))
+        );
+
+        let exclude_project = write_project(
+            &directory,
+            "exclude.proj",
+            r#"<Project><ItemGroup>
+  <a Include="1" />
+  <i Include="1;2" Exclude="@(a)" />
+  <a Include="2" />
+  <a Condition="'@(a)' == '1;2'" Include="3" />
+</ItemGroup></Project>"#,
+        );
+        evaluator.load_project(exclude_project)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_items("i")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["2"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_remove_and_update_preserve_intermediary_references() -> Result<()> {
+        // Exact project-data ports of ItemEvaluation_Tests.
+        // RemoveShouldPreserveIntermediaryReferences and
+        // UpdateShouldPreserveIntermediaryReferences.
+        let directory = TempDir::new()?;
+        for (name, remove) in [("literal.proj", "a;b;c"), ("glob.proj", "*")] {
+            let project = write_project(
+                &directory,
+                name,
+                &format!(
+                    r#"<Project><ItemGroup>
+  <i2 Include="a;b;c"><m1>m1_contents</m1><m2>m2_contents</m2></i2>
+  <i Include="@(i2)" />
+  <i2 Remove="{remove}" />
+</ItemGroup></Project>"#
+                ),
+            );
+            let mut evaluator = ProjectEvaluator::new();
+            evaluator.load_project(project)?;
+            let model = evaluator.get_model();
+            assert!(model.get_items("i2").unwrap().is_empty());
+            let copied = model.get_items("i").unwrap();
+            assert_eq!(copied.len(), 3);
+            assert!(copied.iter().all(|item| item.get_metadata("m1").as_deref()
+                == Some("m1_contents")
+                && item.get_metadata("m2").as_deref() == Some("m2_contents")));
+        }
+
+        let update_project = write_project(
+            &directory,
+            "update.proj",
+            r#"<Project><ItemGroup>
+  <i2 Include="a;b;c"><m1>m1_contents</m1><m2>%(Identity)</m2></i2>
+  <i Include="@(i2)">
+    <m3>@(i2 -> '%(m2)')</m3>
+    <m4 Condition="'@(i2 -> &apos;%(m2)&apos;)' == 'a;b;c'">m4_contents</m4>
+  </i>
+  <i2 Update="a;b;c">
+    <m1>m1_updated</m1><m2>m2_updated</m2>
+    <m3>m3_updated</m3><m4>m4_updated</m4>
+  </i2>
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(update_project)?;
+        let model = evaluator.get_model();
+        let copied = model.get_items("i").unwrap();
+        for (index, identity) in ["a", "b", "c"].iter().enumerate() {
+            assert_eq!(
+                copied[index].get_metadata("m1").as_deref(),
+                Some("m1_contents")
+            );
+            assert_eq!(copied[index].get_metadata("m2").as_deref(), Some(*identity));
+            assert_eq!(copied[index].get_metadata("m3").as_deref(), Some("a;b;c"));
+            assert_eq!(
+                copied[index].get_metadata("m4").as_deref(),
+                Some("m4_contents")
+            );
+        }
+        assert!(model.get_items("i2").unwrap().iter().all(|item| {
+            ["m1", "m2", "m3", "m4"].iter().all(|name| {
+                item.get_metadata(name).as_deref() == Some(format!("{name}_updated").as_str())
+            })
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_remove_and_update_respect_item_transforms() -> Result<()> {
+        // Exact project-data ports of ItemEvaluation_Tests.RemoveRespectsItemTransform
+        // and UpdateRespectsItemTransform.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <i Include="a;b;c" />
+  <i Remove="@(i->WithMetadataValue('Identity', 'b'))" />
+  <i Remove="@(i->'%(Extension)')" />
+  <i Update="@(i->WithMetadataValue('Identity', 'c'))"><m1>m1_updated</m1></i>
+  <i Update="@(i->'%(Extension)')"><m2>m2_updated</m2></i>
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let items = evaluator.get_model().get_items("i").unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert!(items[0].get_metadata("m1").is_none());
+        assert_eq!(items[1].get_metadata("m1").as_deref(), Some("m1_updated"));
+        assert!(items.iter().all(|item| item.get_metadata("m2").is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_multiple_inter_item_dependencies_on_same_operation() -> Result<()> {
+        // Exact project-data port of ItemEvaluation_Tests.
+        // MultipleInterItemDependenciesOnSameItemOperation.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <i1 Include="i1_1;i1_2;i1_3;i1_4;i1_5" />
+  <i1 Update="*"><m>i1</m></i1>
+  <i1 Remove="*i1_5" />
+  <i_cond Condition="@(i1->Count()) == 4" Include="i1 has 4 items" />
+  <i2 Include="@(i1);i2_4" />
+  <i2 Remove="i?_4" />
+  <i2 Update="i?_1"><m>i2</m></i2>
+  <i3 Include="@(i1);i3_3" />
+  <i3 Remove="*i?_3" />
+  <i1 Remove="*i1_2" />
+  <i1 Include="i1_6" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model
+                .get_items("i1")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["i1_1", "i1_3", "i1_4", "i1_6"]
+        );
+        assert_eq!(
+            model
+                .get_items("i2")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["i1_1", "i1_2", "i1_3"]
+        );
+        assert_eq!(
+            model
+                .get_items("i3")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["i1_1", "i1_2", "i1_4"]
+        );
+        assert_eq!(
+            model.get_items("i2").unwrap()[0]
+                .get_metadata("m")
+                .as_deref(),
+            Some("i2")
+        );
+        assert_eq!(model.get_items("i_cond").unwrap()[0].name, "i1 has 4 items");
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_item_expression_grammar_and_function_chaining() -> Result<()> {
+        // Ports Expander_Tests.ItemIncludeContainsMultipleItemReferences,
+        // ItemFunctionChainingWithWhitespaceBeforeArrow,
+        // ExpandItemVectorFunctionsChained1, BuiltIn1, and BuiltIn3.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <ItemGroup>
+    <CFiles Include="foo.c;bar.c" />
+    <ObjFiles Include="@(CFiles->'%(filename).obj')" />
+    <CleanFiles Include="@(ObjFiles);@(Missing)" />
+    <I Include="A"><M>F</M><Path>first/second/file.ext</Path></I>
+    <I Include="B"><M>T</M><Path>first/second/file.ext</Path></I>
+    <I Include="C"><M>T</M><Path>first/second/file.ext</Path></I>
+    <BuiltIn1 Include="foo;bar" />
+    <BuiltIn3 Include="foo;bar;foo;bar;foo" />
+    <WhitespaceChain Include="@(I -> WithMetadataValue('M', 'T') -> WithMetadataValue('M', 'T'))" />
+    <ChainedTransform Include="@(I->'%(Path)'->'%(Directory)'->Distinct())" />
+    <FullPathBuiltIn Include="@(BuiltIn1->FullPath())" />
+    <FullPathDistinct Include="@(BuiltIn3->FullPath()->Distinct())" />
+    <LiteralTemplate Include="@(I->'out/%(Identity).txt')" />
+  </ItemGroup>
+  <PropertyGroup>
+    <Joined>@(I, '|')</Joined>
+    <TransformJoined>@(I->'%(Identity).obj', ' + ')</TransformJoined>
+  </PropertyGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model
+                .get_items("CleanFiles")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["foo.obj", "bar.obj"]
+        );
+        assert_eq!(
+            model
+                .get_items("WhitespaceChain")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["B", "C"]
+        );
+        assert_eq!(model.get_items("ChainedTransform").unwrap().len(), 1);
+        assert!(
+            model.get_items("ChainedTransform").unwrap()[0]
+                .name
+                .ends_with(&format!(
+                    "first{}second{}",
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR
+                ))
+        );
+        assert_eq!(model.get_items("FullPathBuiltIn").unwrap().len(), 2);
+        assert!(
+            model
+                .get_items("FullPathBuiltIn")
+                .unwrap()
+                .iter()
+                .all(|item| Path::new(&item.name).is_absolute())
+        );
+        assert_eq!(model.get_items("FullPathDistinct").unwrap().len(), 2);
+        assert!(
+            model
+                .get_items("FullPathDistinct")
+                .unwrap()
+                .iter()
+                .all(|item| Path::new(&item.name).is_absolute())
+        );
+        assert_eq!(
+            model
+                .get_items("LiteralTemplate")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["out/A.txt", "out/B.txt", "out/C.txt"]
+        );
+        assert_eq!(
+            model.get_property("Joined").map(String::as_str),
+            Some("A|B|C")
+        );
+        assert_eq!(
+            model.get_property("TransformJoined").map(String::as_str),
+            Some("A.obj + B.obj + C.obj")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_common_item_functions_and_empty_results() -> Result<()> {
+        // Ports Expander_Tests Count/empty Count, AnyHaveMetadataValue,
+        // HasMetadata, WithoutMetadataValue, Metadata, ClearMetadata, Exists,
+        // DirectoryName, Combine, Reverse, and item-spec modifier coverage.
+        let directory = TempDir::new()?;
+        fs::create_dir(directory.path().join("alpha"))?;
+        fs::write(directory.path().join("alpha").join("one.cs"), "")?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <ItemDefinitionGroup><Cleared><DestinationDefault>D</DestinationDefault></Cleared></ItemDefinitionGroup>
+  <ItemGroup>
+    <I Include="One"><A>true</A><Path>alpha/one.cs</Path></I>
+    <I Include="Two"><A>false</A><Path>alpha/missing.cs</Path></I>
+    <I Include="Three"><A></A></I>
+    <I Include="Four"><B></B></I>
+    <Case Include="A;a;B;A" />
+    <CountResult Include="@(I->Count());@(Missing->Count());@(I->Metadata('Missing')->Count())" />
+    <AnyResult Include="@(I->AnyHaveMetadataValue('A','TRUE'));@(Missing->AnyHaveMetadataValue('A','x'))" />
+    <HasResult Include="@(I->HasMetadata('a'))" />
+    <WithResult Include="@(I->WithMetadataValue('A','true'))" />
+    <WithoutResult Include="@(I->WithoutMetadataValue('A','true'))" />
+    <MetadataResult Include="@(I->Metadata('Path'))" />
+    <DistinctResult Include="@(Case->Distinct())" />
+    <DistinctCaseResult Include="@(Case->DistinctWithCase())" />
+    <ReverseResult Include="@(I->Reverse())" />
+    <Cleared Include="@(I->ClearMetadata())" />
+    <Potential Include="alpha/one.cs;alpha/missing.cs" />
+    <ExistsResult Include="@(Potential->Exists())" />
+    <DirectoryNameResult Include="@(Potential->DirectoryName()->Distinct())" />
+    <CombineResult Include="@(I->Combine('.squiggle'))" />
+    <FullPathResult Include="@(Potential->FullPath())" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model
+                .get_items("CountResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["4", "0", "0"]
+        );
+        assert_eq!(
+            model
+                .get_items("AnyResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["true", "false"]
+        );
+        assert_eq!(
+            model
+                .get_items("HasResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["One", "Two"]
+        );
+        assert_eq!(model.get_items("WithResult").unwrap()[0].name, "One");
+        assert_eq!(
+            model
+                .get_items("WithoutResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Two", "Three", "Four"]
+        );
+        assert_eq!(
+            model
+                .get_items("MetadataResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha/one.cs", "alpha/missing.cs"]
+        );
+        assert_eq!(
+            model
+                .get_items("DistinctResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(
+            model
+                .get_items("DistinctCaseResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "a", "B"]
+        );
+        assert_eq!(
+            model
+                .get_items("ReverseResult")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Four", "Three", "Two", "One"]
+        );
+        assert!(model.get_items("Cleared").unwrap().iter().all(|item| {
+            item.get_metadata("A").is_none()
+                && item.get_metadata("DestinationDefault").as_deref() == Some("D")
+        }));
+        assert_eq!(model.get_items("ExistsResult").unwrap().len(), 1);
+        assert_eq!(
+            model.get_items("ExistsResult").unwrap()[0].name,
+            "alpha/one.cs"
+        );
+        assert_eq!(model.get_items("DirectoryNameResult").unwrap().len(), 1);
+        assert_eq!(
+            model.get_items("DirectoryNameResult").unwrap()[0].name,
+            display_path(&directory.path().join("alpha"))
+        );
+        assert!(
+            model
+                .get_items("CombineResult")
+                .unwrap()
+                .iter()
+                .all(|item| item.get_metadata("A").is_none())
+        );
+        assert!(
+            model
+                .get_items("FullPathResult")
+                .unwrap()
+                .iter()
+                .all(|item| Path::new(&item.name).is_absolute())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_different_excludes_and_recursive_glob_metadata() -> Result<()> {
+        // Exact project-data port of ItemEvaluation_Tests.
+        // DifferentExcludesOnSameWildcardProduceDifferentResults, extended with
+        // recursive metadata, ?, escaped wildcards, and literal brackets.
+        let directory = TempDir::new()?;
+        for name in ["a.cs", "b.cs", "c.cs"] {
+            fs::write(directory.path().join(name), "")?;
+        }
+        fs::create_dir_all(directory.path().join("tree").join("sub").join("deep"))?;
+        fs::write(directory.path().join("tree").join("root.txt"), "")?;
+        fs::write(directory.path().join("tree").join("sub").join("a.txt"), "")?;
+        fs::write(
+            directory
+                .path()
+                .join("tree")
+                .join("sub")
+                .join("deep")
+                .join("b.txt"),
+            "",
+        )?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <i Include="**/*.cs" />
+  <i Include="**/*.cs" Exclude="*a.cs" />
+  <i Include="**/*.cs" Exclude="a.cs;c.cs" />
+  <Recursive Include="tree/**/*.txt" Exclude="tree/sub/a.txt" />
+  <Question Include="tree/sub/?.txt" />
+  <EscapedWildcard Include="tree/%2A.txt" />
+  <Bracket Include="tree/literal[1].txt" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model
+                .get_items("i")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a.cs", "b.cs", "c.cs", "b.cs", "c.cs", "b.cs"]
+        );
+        let recursive = model.get_items("Recursive").unwrap();
+        assert_eq!(
+            recursive
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                format!("tree{}root.txt", std::path::MAIN_SEPARATOR),
+                format!(
+                    "tree{}sub{}deep{}b.txt",
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR
+                )
+            ]
+        );
+        assert_eq!(
+            recursive[0].get_metadata("RecursiveDir").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            recursive[1].get_metadata("RecursiveDir").as_deref(),
+            Some(
+                format!(
+                    "sub{}deep{}",
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            model.get_items("Question").unwrap()[0].name,
+            format!(
+                "tree{}sub{}a.txt",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            )
+        );
+        assert_eq!(
+            model.get_items("EscapedWildcard").unwrap()[0].name,
+            "tree/*.txt"
+        );
+        assert_eq!(
+            model.get_items("Bracket").unwrap()[0].name,
+            "tree/literal[1].txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_item_transform_containing_semicolon() -> Result<()> {
+        // Exact evaluation-time port of
+        // EscapingInProjects_Tests.ItemTransformContainingSemicolon.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <ItemGroup>
+    <TextFile Include="X.txt;Y.txt;Z.txt" />
+    <Result Include="@(TextFile->'%(FileName);%(FileName)%253b%(FileName)%(Extension)','    ')" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(
+            evaluator.get_model().get_items("Result").unwrap()[0].name,
+            "X;X%3bX.txt    Y;Y%3bY.txt    Z;Z%3bZ.txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_long_include_chain_handles_ten_thousand_items_iteratively() -> Result<()> {
+        // Exact scale of ItemEvaluation_Tests.LongIncludeChain.
+        let directory = TempDir::new()?;
+        let mut content = String::from("<Project><ItemGroup>");
+        for index in 0..10_000 {
+            write!(content, "<i Include=\"ItemValue{index}\" />")?;
+        }
+        content.push_str("</ItemGroup></Project>");
+        let project = write_project(&directory, "long.proj", &content);
+        let started = std::time::Instant::now();
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(evaluator.get_model().get_items("i").unwrap().len(), 10_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "10,000 includes took {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_scale_remove_and_update_use_indexed_exact_matching() -> Result<()> {
+        let directory = TempDir::new()?;
+        let mut all = String::new();
+        let mut even = String::new();
+        let mut odd = String::new();
+        for index in 0..10_000 {
+            if index != 0 {
+                all.push(';');
+            }
+            write!(all, "i{index}")?;
+            let selected = if index % 2 == 0 { &mut even } else { &mut odd };
+            if !selected.is_empty() {
+                selected.push(';');
+            }
+            write!(selected, "i{index}")?;
+        }
+        let content = format!(
+            r#"<Project><ItemGroup>
+  <Scale Include="{all}" />
+  <Scale Update="{even}"><Updated>true</Updated></Scale>
+  <Scale Remove="{odd}" />
+</ItemGroup></Project>"#
+        );
+        let project = write_project(&directory, "scale.proj", &content);
+        let started = std::time::Instant::now();
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let items = evaluator.get_model().get_items("Scale").unwrap();
+        assert_eq!(items.len(), 5_000);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.get_metadata("Updated").as_deref() == Some("true"))
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "10,000-item remove/update took {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_lazy_wildcard_case_is_tracked_as_an_eager_deviation() -> Result<()> {
+        // ItemEvaluation_Tests.LazyWildcardExpansionDoesNotEvaluateWildCardsIfNotReferenced
+        // is intentionally tracked rather than claimed as a parity port: this
+        // evaluator eagerly expands every project-evaluation item wildcard.
+        let directory = TempDir::new()?;
+        fs::create_dir_all(directory.path().join("foo"))?;
+        fs::write(directory.path().join("foo").join("a.cs"), "")?;
+        fs::write(directory.path().join("foo").join("b.cs"), "")?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <i Include="**/foo/**/*.cs" />
+  <ItemReference Include="@(i)" />
+  <RecursiveDir Include="@(i->'%(RecursiveDir)')" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(model.get_items("i").unwrap().len(), 2);
+        assert_eq!(model.get_items("ItemReference").unwrap().len(), 2);
+        assert_eq!(model.get_items("RecursiveDir").unwrap().len(), 2);
         Ok(())
     }
 

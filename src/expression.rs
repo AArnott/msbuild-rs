@@ -15,11 +15,15 @@ pub struct ExpressionEvaluator<'a> {
     current_file: Option<&'a Path>,
     current_item: Option<&'a Item>,
     current_item_type: Option<&'a str>,
+    current_item_identity: Option<Cow<'a, str>>,
+    current_item_metadata_cleared: bool,
 }
 
 pub(crate) struct EvaluatedItemExpression<'a> {
-    pub source: &'a Item,
+    pub source: Option<&'a Item>,
     pub escaped_identity: String,
+    pub preserve_metadata: bool,
+    pub preserve_recursive_dir: bool,
 }
 
 enum ItemExpressionEvaluation<'a> {
@@ -28,7 +32,11 @@ enum ItemExpressionEvaluation<'a> {
         separator: String,
         preserves_items: bool,
     },
-    Scalar(String),
+    Scalar {
+        escaped_value: String,
+        source: Option<&'a Item>,
+        preserve_metadata: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +569,8 @@ impl<'a> ExpressionEvaluator<'a> {
             current_file: None,
             current_item: None,
             current_item_type: None,
+            current_item_identity: None,
+            current_item_metadata_cleared: false,
         }
     }
 
@@ -571,6 +581,8 @@ impl<'a> ExpressionEvaluator<'a> {
             current_file: Some(path),
             current_item: None,
             current_item_type: None,
+            current_item_identity: None,
+            current_item_metadata_cleared: false,
         }
     }
 
@@ -581,6 +593,26 @@ impl<'a> ExpressionEvaluator<'a> {
             current_file: Some(path),
             current_item: Some(item),
             current_item_type: Some(&item.item_type),
+            current_item_identity: Some(Cow::Borrowed(&item.escaped_name)),
+            current_item_metadata_cleared: false,
+        }
+    }
+
+    fn with_item_expression(
+        model: &'a ProjectModel,
+        path: &'a Path,
+        item: &'a Item,
+        escaped_identity: &str,
+        metadata_cleared: bool,
+    ) -> Self {
+        Self {
+            model,
+            base_directory: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            current_file: Some(path),
+            current_item: Some(item),
+            current_item_type: Some(&item.item_type),
+            current_item_identity: Some(Cow::Owned(escaped_identity.to_string())),
+            current_item_metadata_cleared: metadata_cleared,
         }
     }
 
@@ -595,6 +627,8 @@ impl<'a> ExpressionEvaluator<'a> {
             current_file: Some(path),
             current_item: None,
             current_item_type: Some(item_type),
+            current_item_identity: None,
+            current_item_metadata_cleared: false,
         }
     }
 
@@ -732,8 +766,16 @@ impl<'a> ExpressionEvaluator<'a> {
             return String::new();
         }
         if let Some(item) = self.current_item {
+            let escaped_identity = self
+                .current_item_identity
+                .as_deref()
+                .unwrap_or(item.escaped_name.as_str());
             return item
-                .get_metadata_escaped(name)
+                .get_metadata_for_identity_escaped(
+                    name,
+                    escaped_identity,
+                    self.current_item_metadata_cleared,
+                )
                 .map(Cow::into_owned)
                 .unwrap_or_default();
         }
@@ -924,7 +966,38 @@ impl<'a> ExpressionEvaluator<'a> {
                 preserves_items: true,
                 ..
             } => Ok(Some(values)),
-            _ => Ok(None),
+            ItemExpressionEvaluation::Scalar {
+                escaped_value,
+                source,
+                preserve_metadata,
+            } => Ok(Some(vec![EvaluatedItemExpression {
+                source,
+                escaped_identity: escaped_value,
+                preserve_metadata,
+                preserve_recursive_dir: false,
+            }])),
+            ItemExpressionEvaluation::Items {
+                values,
+                separator,
+                preserves_items: false,
+            } => {
+                let scalar = values
+                    .into_iter()
+                    .map(|value| value.escaped_identity)
+                    .collect::<Vec<_>>()
+                    .join(&separator);
+                Ok(Some(
+                    crate::escaping::tokenize_list(&scalar)?
+                        .into_iter()
+                        .map(|identity| EvaluatedItemExpression {
+                            source: None,
+                            escaped_identity: identity.to_string(),
+                            preserve_metadata: false,
+                            preserve_recursive_dir: false,
+                        })
+                        .collect(),
+                ))
+            }
         }
     }
 
@@ -937,7 +1010,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 .map(|value| value.escaped_identity)
                 .collect::<Vec<_>>()
                 .join(&separator)),
-            ItemExpressionEvaluation::Scalar(value) => Ok(value),
+            ItemExpressionEvaluation::Scalar { escaped_value, .. } => Ok(escaped_value),
         }
     }
 
@@ -955,73 +1028,189 @@ impl<'a> ExpressionEvaluator<'a> {
             .transpose()?
             .unwrap_or_else(|| ";".to_string());
 
-        let items = self.model.get_items(item_type);
-        if stages.len() == 2
-            && let Some((method, arguments)) = parse_invocation(stages[1].trim())
-        {
-            let arguments = split_arguments(arguments)?;
-            if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
-                require_arguments(method, &arguments, 2)?;
-                return Ok(ItemExpressionEvaluation::Scalar(dotnet_bool(
-                    items.is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item.get_metadata(&arguments[0])
-                                .is_some_and(|value| value.eq_ignore_ascii_case(&arguments[1]))
-                        })
-                    }),
-                )));
-            }
-        }
-
-        let mut values = items
+        let mut values = self
+            .model
+            .get_items(item_type)
             .into_iter()
             .flatten()
             .map(|item| EvaluatedItemExpression {
-                source: item,
+                source: Some(item),
                 escaped_identity: item.escaped_name.clone(),
+                preserve_metadata: true,
+                preserve_recursive_dir: true,
             })
             .collect::<Vec<_>>();
-        for stage in &stages[1..] {
+        for (stage_index, stage) in stages[1..].iter().enumerate() {
             let stage = stage.trim();
             if (stage.starts_with('\'') && stage.ends_with('\''))
                 || (stage.starts_with('"') && stage.ends_with('"'))
             {
                 let template = unquote(stage);
                 for value in &mut values {
-                    let evaluated =
-                        Self::with_item(self.model, self.current_file_path(), value.source)
-                            .evaluate(&template)?;
+                    let source = value
+                        .source
+                        .expect("item pipelines retain source provenance");
+                    let evaluated = Self::with_item_expression(
+                        self.model,
+                        self.current_file_path(),
+                        source,
+                        &value.escaped_identity,
+                        !value.preserve_metadata,
+                    )
+                    .evaluate(&template)?;
                     value.escaped_identity = EscapedString::new(evaluated)
                         .decode()
                         .into_escaped()
                         .into_string();
+                    value.preserve_recursive_dir = false;
                 }
+                values.retain(|value| !value.escaped_identity.is_empty());
                 continue;
             }
 
             let (method, arguments) = parse_invocation(stage)
                 .ok_or_else(|| anyhow!("Malformed item function: {stage}"))?;
-            let arguments = split_arguments(arguments)?;
+            let arguments = split_arguments(arguments)?
+                .into_iter()
+                .map(|argument| self.evaluate(&argument).map(|value| unescape_once(&value)))
+                .collect::<Result<Vec<_>>>()?;
+            let is_last_stage = stage_index + 1 == stages.len() - 1;
             if method.eq_ignore_ascii_case("Metadata") {
                 require_arguments(method, &arguments, 1)?;
-                for value in &mut values {
-                    value.escaped_identity = value
+                let mut transformed = Vec::new();
+                for value in values {
+                    let source = value
                         .source
-                        .get_metadata_escaped(&arguments[0])
+                        .expect("item pipelines retain source provenance");
+                    let metadata = source
+                        .get_metadata_for_identity_escaped(
+                            &arguments[0],
+                            &value.escaped_identity,
+                            !value.preserve_metadata,
+                        )
                         .map(Cow::into_owned)
                         .unwrap_or_default();
+                    for identity in crate::escaping::tokenize_list(&metadata)? {
+                        transformed.push(EvaluatedItemExpression {
+                            source: value.source,
+                            escaped_identity: identity.to_string(),
+                            preserve_metadata: value.preserve_metadata,
+                            preserve_recursive_dir: false,
+                        });
+                    }
                 }
-            } else if matches_ignore_ascii_case(method, &["Directory", "Filename", "Extension"]) {
+                values = transformed;
+            } else if matches_ignore_ascii_case(method, ITEM_SPEC_MODIFIERS) {
                 require_arguments(method, &arguments, 0)?;
                 for value in &mut values {
-                    value.escaped_identity = item_spec_modifier(&value.escaped_identity, method);
+                    let source = value
+                        .source
+                        .expect("item pipelines retain source provenance");
+                    value.escaped_identity = source
+                        .get_metadata_for_identity_escaped(
+                            method,
+                            &value.escaped_identity,
+                            !value.preserve_metadata,
+                        )
+                        .map(Cow::into_owned)
+                        .unwrap_or_default();
+                    value.preserve_recursive_dir = false;
                 }
+                values.retain(|value| !value.escaped_identity.is_empty());
             } else if method.eq_ignore_ascii_case("Distinct") {
                 require_arguments(method, &arguments, 0)?;
                 let mut seen = std::collections::HashSet::new();
                 values.retain(|value| {
-                    seen.insert(unescape_once(&value.escaped_identity).to_ascii_lowercase())
+                    seen.insert(unescape_once(&value.escaped_identity).to_lowercase())
                 });
+            } else if method.eq_ignore_ascii_case("DistinctWithCase") {
+                require_arguments(method, &arguments, 0)?;
+                let mut seen = std::collections::HashSet::new();
+                values.retain(|value| seen.insert(unescape_once(&value.escaped_identity)));
+            } else if method.eq_ignore_ascii_case("Reverse") {
+                require_arguments(method, &arguments, 0)?;
+                values.reverse();
+            } else if method.eq_ignore_ascii_case("Count") {
+                require_arguments(method, &arguments, 0)?;
+                if !is_last_stage {
+                    bail!("Count must be the last item function in a pipeline");
+                }
+                return Ok(ItemExpressionEvaluation::Scalar {
+                    escaped_value: values.len().to_string(),
+                    source: None,
+                    preserve_metadata: false,
+                });
+            } else if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
+                require_arguments(method, &arguments, 2)?;
+                if !is_last_stage {
+                    bail!("AnyHaveMetadataValue must be the last item function in a pipeline");
+                }
+                let source_value = values.iter().find(|value| {
+                    item_expression_metadata(value, &arguments[0])
+                        .map_or(arguments[1].is_empty(), |metadata| {
+                            ordinal_ignore_case(&metadata, &arguments[1])
+                        })
+                });
+                return Ok(ItemExpressionEvaluation::Scalar {
+                    escaped_value: if source_value.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    .to_string(),
+                    source: source_value.and_then(|value| value.source),
+                    preserve_metadata: source_value.is_some_and(|value| value.preserve_metadata),
+                });
+            } else if method.eq_ignore_ascii_case("HasMetadata") {
+                require_arguments(method, &arguments, 1)?;
+                values.retain(|value| {
+                    item_expression_metadata(value, &arguments[0])
+                        .is_some_and(|metadata| !metadata.is_empty())
+                });
+            } else if method.eq_ignore_ascii_case("WithMetadataValue")
+                || method.eq_ignore_ascii_case("WithoutMetadataValue")
+            {
+                require_arguments(method, &arguments, 2)?;
+                let retain_matches = method.eq_ignore_ascii_case("WithMetadataValue");
+                values.retain(|value| {
+                    let matches = item_expression_metadata(value, &arguments[0])
+                        .map_or(arguments[1].is_empty(), |metadata| {
+                            ordinal_ignore_case(&metadata, &arguments[1])
+                        });
+                    matches == retain_matches
+                });
+            } else if method.eq_ignore_ascii_case("ClearMetadata") {
+                require_arguments(method, &arguments, 0)?;
+                for value in &mut values {
+                    value.preserve_metadata = false;
+                    value.preserve_recursive_dir = false;
+                }
+            } else if method.eq_ignore_ascii_case("Exists") {
+                require_arguments(method, &arguments, 0)?;
+                values.retain(|value| {
+                    value
+                        .source
+                        .is_some_and(|source| source.identity_exists(&value.escaped_identity))
+                });
+            } else if method.eq_ignore_ascii_case("DirectoryName") {
+                require_arguments(method, &arguments, 0)?;
+                for value in &mut values {
+                    let source = value
+                        .source
+                        .expect("item pipelines retain source provenance");
+                    value.escaped_identity = source.directory_name(&value.escaped_identity);
+                    value.preserve_recursive_dir = false;
+                }
+                values.retain(|value| !value.escaped_identity.is_empty());
+            } else if method.eq_ignore_ascii_case("Combine") {
+                require_arguments(method, &arguments, 1)?;
+                for value in &mut values {
+                    let combined =
+                        Path::new(&unescape_once(&value.escaped_identity)).join(&arguments[0]);
+                    value.escaped_identity = escape(&display_path(&combined));
+                    value.preserve_metadata = false;
+                    value.preserve_recursive_dir = false;
+                }
             } else {
                 bail!("Unsupported item function: {method}");
             }
@@ -1066,6 +1255,38 @@ impl<'a> ExpressionEvaluator<'a> {
     fn current_file_path(&self) -> &'a Path {
         self.current_file.unwrap_or_else(|| Path::new(""))
     }
+}
+
+const ITEM_SPEC_MODIFIERS: &[&str] = &[
+    "Identity",
+    "FullPath",
+    "RootDir",
+    "Filename",
+    "Extension",
+    "RelativeDir",
+    "Directory",
+    "RecursiveDir",
+    "DefiningProjectFullPath",
+    "DefiningProjectDirectory",
+    "DefiningProjectName",
+    "DefiningProjectExtension",
+];
+
+fn item_expression_metadata<'a>(
+    value: &'a EvaluatedItemExpression<'a>,
+    name: &str,
+) -> Option<Cow<'a, str>> {
+    let source = value.source?;
+    source.get_metadata_for_identity(
+        name,
+        &unescape_once(&value.escaped_identity),
+        !value.preserve_metadata,
+    )
+}
+
+fn ordinal_ignore_case(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || ((!left.is_ascii() || !right.is_ascii()) && left.to_lowercase() == right.to_lowercase())
 }
 
 fn is_os_platform(platform: &str) -> Result<bool> {
@@ -1233,40 +1454,6 @@ fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
 
 fn dotnet_bool(value: bool) -> String {
     if value { "True" } else { "False" }.to_string()
-}
-
-fn item_spec_modifier(escaped_value: &str, modifier: &str) -> String {
-    let value = unescape_once(escaped_value);
-    let normalized = if std::path::MAIN_SEPARATOR == '\\' {
-        PathBuf::from(value.replace('/', "\\"))
-    } else {
-        PathBuf::from(value.replace('\\', "/"))
-    };
-    let result = if modifier.eq_ignore_ascii_case("Directory") {
-        normalized
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .map(display_path)
-            .map(|mut directory| {
-                if !directory.ends_with(['/', '\\']) {
-                    directory.push(std::path::MAIN_SEPARATOR);
-                }
-                directory
-            })
-            .unwrap_or_default()
-    } else if modifier.eq_ignore_ascii_case("Filename") {
-        normalized
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        normalized
-            .extension()
-            .map(|extension| format!(".{}", extension.to_string_lossy()))
-            .unwrap_or_default()
-    };
-    escape(&result)
 }
 
 fn unquote(value: &str) -> String {

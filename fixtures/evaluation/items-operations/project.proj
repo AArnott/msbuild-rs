@@ -1,0 +1,73 @@
+<Project>
+  <ItemDefinitionGroup>
+    <Operation>
+      <InitialDefault>initial</InitialDefault>
+      <LaterDefault>later</LaterDefault>
+    </Operation>
+    <ClearResult>
+      <DestinationDefault>destination</DestinationDefault>
+    </ClearResult>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <TextFile Include="X.txt;Y.txt;Z.txt" />
+
+    <Source Include="One">
+      <Kind>true</Kind>
+      <Path>tree/root.txt</Path>
+      <List>a;b</List>
+    </Source>
+    <Source Include="Two">
+      <Kind>false</Kind>
+      <Path>tree/missing.txt</Path>
+    </Source>
+    <Source Include="Three">
+      <Kind />
+    </Source>
+    <Source Include="Four" />
+    <Case Include="A;a;B;A" />
+
+    <Operation Include="a;b;c">
+      <State>before</State>
+    </Operation>
+    <OperationSnapshot Include="@(Operation)" />
+
+    <Intermediary Include="1" />
+    <Excluded Include="1;2" Exclude="@(Intermediary)" />
+    <Intermediary Include="2" />
+
+    <Glob Include="tree/**/*.txt" Exclude="tree/sub/skip.txt" />
+    <QuestionGlob Include="tree/sub/????.txt" />
+    <EscapedWildcard Include="tree/%2A.txt" />
+    <BracketLiteral Include="tree/literal[1].txt" />
+    <EscapedSemicolon Include="semi%3Bcolon.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Operation Update="@(Operation-&gt;WithMetadataValue('Identity', 'b'))">
+      <State>updated-%(Identity)</State>
+    </Operation>
+    <Operation Remove="@(Operation-&gt;WithMetadataValue('Identity', 'a'))" />
+
+    <CountResult Include="@(Source-&gt;Count());@(Missing-&gt;Count());@(Source-&gt;Metadata('Missing')-&gt;Count())" />
+    <AnyResult Include="@(Source-&gt;AnyHaveMetadataValue('Kind', 'TRUE'));@(Missing-&gt;AnyHaveMetadataValue('Kind', 'x'))" />
+    <ReverseResult Include="@(Source-&gt;Reverse())" />
+    <DistinctResult Include="@(Case-&gt;Distinct())" />
+    <DistinctCaseResult Include="@(Case-&gt;DistinctWithCase())" />
+    <MetadataResult Include="@(Source-&gt;Metadata('Path'))" />
+    <MetadataListResult Include="@(Source-&gt;Metadata('List'))" />
+    <TemplateListResult Include="@(Source->'%(List)')" />
+    <HasResult Include="@(Source -&gt; HasMetadata('Kind') -&gt; WithMetadataValue('Kind', 'true'))" />
+    <WithoutResult Include="@(Source-&gt;WithoutMetadataValue('Kind', 'true'))" />
+    <ClearResult Include="@(Source-&gt;ClearMetadata())" />
+    <ExistsResult Include="@(MetadataResult-&gt;Exists())" />
+    <DirectoryNameResult Include="@(MetadataResult-&gt;DirectoryName()-&gt;Distinct())" />
+    <CombineResult Include="@(Source-&gt;Combine('.squiggle'))" />
+    <FullPathResult Include="@(MetadataResult-&gt;FullPath())" />
+    <WellKnownTransform Include="@(Glob->'%(RecursiveDir)%(Filename).out')" />
+    <MultipleReferences Include="@(DistinctResult);@(HasResult)" />
+    <CustomSeparatorResult Include="@(Source, '|')" />
+    <TransformSeparatorResult Include="@(Source->'%(Identity).obj', ' + ')" />
+    <TransformSemicolonResult Include="@(TextFile->'%(FileName);%(FileName)%253b%(FileName)%(Extension)','    ')" />
+  </ItemGroup>
+</Project>

@@ -85,19 +85,29 @@ and nonstandard runtime platform identifiers.
 ### Items and Metadata
 
 - [x] Basic item includes and `@(ItemType)` expansion.
-- [x] Represent direct item copies and the supported metadata transforms /
-  `Metadata`, `Directory`, `Filename`, `Extension`, and `Distinct` functions as
-  structured item-expression results so source custom/default metadata reaches
-  the destination items.
-- [ ] Implement the remaining item-transform and item-function surface.
+- [x] Parse literal transforms, multiple item references, custom vector and
+  transform separators, whitespace around arrows, and chained transforms/item
+  functions while retaining structured source-item metadata and escaping.
+- [x] Implement the common evaluation-time intrinsic item functions: `Count`,
+  `Reverse`, `Distinct`, `DistinctWithCase`, `Metadata`, `HasMetadata`,
+  `WithMetadataValue`, `WithoutMetadataValue`, `AnyHaveMetadataValue`,
+  `ClearMetadata`, `Exists`, `DirectoryName`, `Combine`, and the non-timestamp
+  well-known item-spec modifiers.
+- [ ] Implement the remaining obscure item-function surface:
+  `GetPathsOfAllDirectoriesAbove` and a deliberately allowlisted subset of
+  per-item `System.String` methods/properties.
 - [x] Implement indexed, case-insensitive custom metadata and the `Identity`,
   `FullPath`, `RootDir`, `Filename`, `Extension`, `RelativeDir`, `Directory`,
   `RecursiveDir`, and defining-project well-known metadata.
 - [ ] Implement timestamp well-known metadata (`ModifiedTime`, `CreatedTime`,
   and `AccessedTime`).
 - [x] Implement custom separators in item expressions.
-- [ ] Implement `Exclude`, `Remove`, and `Update` operations.
-- [ ] Implement wildcard and recursive glob expansion with MSBuild escaping rules.
+- [x] Implement ordered evaluation-time `Exclude`, `Remove`, and `Update`,
+  including item-expression/transform match inputs, per-item conditions,
+  metadata predecessors, and current item-definition defaults on updates.
+- [x] Implement deterministic eager `*`, `?`, and recursive `**` item-glob
+  expansion from the root project directory, per-Include excludes, recursive
+  path metadata, escaped wildcard literals, and platform path/case rules.
 - [x] Preserve escaped wildcard/list syntax until classification so `%2A`, `%3F`,
   `%3B`, and `%25NN` are not reinterpreted; only unescaped `*` and `?` classify
   a specification as a wildcard (`[` is literal).
@@ -152,7 +162,7 @@ and nonstandard runtime platform identifiers.
 The upstream-test mapping and fixture status are maintained in
 [the evaluation compatibility matrix](evaluation-compatibility-matrix.md).
 
-## Explicitly deferred property gaps
+## Explicitly deferred gaps
 
 - `TreatAsLocalProperty` is not implemented. Global properties are therefore
   always immutable during project/import evaluation.
@@ -164,11 +174,19 @@ The upstream-test mapping and fixture status are maintained in
 - Uninitialized-property warning emission is deferred; before-set reads already
   produce the compatible empty value without recursive reevaluation.
 - Property, item-type, and metadata lookup are indexed and case-insensitive.
-- Timestamp well-known metadata is deferred; all non-timestamp well-known
-  metadata listed above is available.
-- Wildcard execution, recursive glob enumeration, and `GetAllGlobs` reporting
-  are deferred. Escaped wildcard classification and lossless pattern storage
-  are complete.
+- Timestamp well-known metadata (`ModifiedTime`, `CreatedTime`, and
+  `AccessedTime`) remains deferred; all listed non-timestamp metadata is
+  available in transforms.
+- Item wildcards are intentionally eager. MSBuild's opt-in
+  `MsBuildSkipEagerWildCardEvaluationRegexes` lazy representation, synthetic
+  `MSBuildItemGlob` items, and `GetAllGlobs` reporting remain deferred. Repeated
+  identical eager patterns are cached within one evaluation.
+- `GetPathsOfAllDirectoriesAbove` and arbitrary per-item .NET string
+  functions remain deferred. String methods will require an explicit safe
+  allowlist rather than unrestricted dispatch.
+- Target-execution-only item mutation features (`KeepDuplicates`,
+  `KeepMetadata`, `RemoveMetadata`, `MatchOnMetadata`, and
+  `MatchOnMetadataOptions`) are outside evaluation scope.
 - Import suppression uses normalized lexical full paths (case-insensitive on
   Windows and case-sensitive elsewhere) and deliberately does not resolve
   symlinks. A Windows symlink test is skipped when the process lacks the

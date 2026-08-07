@@ -203,6 +203,10 @@ impl MetadataMap {
             .iter()
             .map(|(name, value)| (name, value.value.value()))
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.len() == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -210,13 +214,14 @@ pub struct Item {
     pub item_type: String,
     pub name: String,
     pub(crate) escaped_name: String,
-    #[allow(dead_code)] // Retained for the next-wave glob executor.
+    #[allow(dead_code)] // Kept for object-model consumers that inspect authored item specs.
     pub(crate) spec_kind: ItemSpecKind,
     pub metadata: MetadataMap,
     defaults: Arc<MetadataMap>,
     inherited_defaults: Vec<Arc<MetadataMap>>,
     evaluation_directory: PathBuf,
     defining_project: PathBuf,
+    escaped_recursive_dir: String,
 }
 
 impl Item {
@@ -237,11 +242,23 @@ impl Item {
             inherited_defaults: Vec::new(),
             evaluation_directory,
             defining_project,
+            escaped_recursive_dir: String::new(),
         }
+    }
+
+    pub(crate) fn with_recursive_dir(mut self, escaped_recursive_dir: String) -> Self {
+        self.escaped_recursive_dir = escaped_recursive_dir;
+        self
     }
 
     pub fn set_metadata(&mut self, name: String, escaped_value: String) {
         self.metadata.insert(name, escaped_value);
+    }
+
+    pub(crate) fn apply_update_defaults(&mut self, defaults: Arc<MetadataMap>) {
+        if !defaults.is_empty() {
+            self.inherited_defaults.insert(0, defaults);
+        }
     }
 
     pub fn copy_for_type(
@@ -250,6 +267,7 @@ impl Item {
         escaped_name: String,
         defaults: Arc<MetadataMap>,
         defining_project: PathBuf,
+        preserve_recursive_dir: bool,
     ) -> Self {
         let mut copy = Self::new(
             item_type,
@@ -261,40 +279,123 @@ impl Item {
         copy.metadata = self.metadata.clone();
         copy.inherited_defaults = self.inherited_defaults.clone();
         copy.inherited_defaults.push(Arc::clone(&self.defaults));
+        if preserve_recursive_dir {
+            copy.escaped_recursive_dir = self.escaped_recursive_dir.clone();
+        }
         copy
     }
 
-    pub fn get_metadata(&self, name: &str) -> Option<Cow<'_, str>> {
-        self.metadata
-            .get(name)
-            .or_else(|| {
-                self.inherited_defaults
-                    .iter()
-                    .find_map(|metadata| metadata.get(name))
-            })
-            .or_else(|| self.defaults.get(name))
-            .map(Cow::Borrowed)
-            .or_else(|| self.well_known_metadata(name).map(Cow::Owned))
+    pub(crate) fn copy_for_type_without_metadata(
+        &self,
+        item_type: String,
+        escaped_name: String,
+        defaults: Arc<MetadataMap>,
+        defining_project: PathBuf,
+    ) -> Self {
+        Self::new(
+            item_type,
+            escaped_name,
+            defaults,
+            self.evaluation_directory.clone(),
+            defining_project,
+        )
     }
 
+    #[allow(dead_code)] // Public object-model query.
+    pub fn get_metadata(&self, name: &str) -> Option<Cow<'_, str>> {
+        if name.eq_ignore_ascii_case("Identity") {
+            return Some(Cow::Borrowed(&self.name));
+        }
+        self.get_metadata_for_identity(name, &self.name, false)
+    }
+
+    pub(crate) fn get_metadata_for_identity<'a>(
+        &'a self,
+        name: &str,
+        identity: &str,
+        metadata_cleared: bool,
+    ) -> Option<Cow<'a, str>> {
+        if name.eq_ignore_ascii_case("Identity") {
+            return Some(Cow::Owned(identity.to_string()));
+        }
+        if !metadata_cleared
+            && let Some(value) = self
+                .metadata
+                .get(name)
+                .or_else(|| {
+                    self.inherited_defaults
+                        .iter()
+                        .find_map(|metadata| metadata.get(name))
+                })
+                .or_else(|| self.defaults.get(name))
+        {
+            return Some(Cow::Borrowed(value));
+        }
+        self.well_known_metadata_for_identity(name, identity, metadata_cleared)
+            .map(Cow::Owned)
+    }
+
+    #[allow(dead_code)] // Internal escaped-value query retained for library extraction.
     pub fn get_metadata_escaped(&self, name: &str) -> Option<Cow<'_, str>> {
-        self.metadata
-            .get_escaped(name)
-            .or_else(|| {
-                self.inherited_defaults
-                    .iter()
-                    .find_map(|metadata| metadata.get_escaped(name))
-            })
-            .or_else(|| self.defaults.get_escaped(name))
-            .map(Cow::Borrowed)
-            .or_else(|| {
-                if name.eq_ignore_ascii_case("Identity") {
-                    Some(Cow::Borrowed(self.escaped_name.as_str()))
-                } else {
-                    self.well_known_metadata(name)
-                        .map(|value| Cow::Owned(escape(&value)))
-                }
-            })
+        if name.eq_ignore_ascii_case("Identity") {
+            return Some(Cow::Borrowed(&self.escaped_name));
+        }
+        self.get_metadata_for_identity_escaped(name, &self.escaped_name, false)
+    }
+
+    pub(crate) fn get_metadata_for_identity_escaped<'a>(
+        &'a self,
+        name: &str,
+        escaped_identity: &str,
+        metadata_cleared: bool,
+    ) -> Option<Cow<'a, str>> {
+        if name.eq_ignore_ascii_case("Identity") {
+            return Some(Cow::Owned(escaped_identity.to_string()));
+        }
+        if !metadata_cleared
+            && let Some(value) = self
+                .metadata
+                .get_escaped(name)
+                .or_else(|| {
+                    self.inherited_defaults
+                        .iter()
+                        .find_map(|metadata| metadata.get_escaped(name))
+                })
+                .or_else(|| self.defaults.get_escaped(name))
+        {
+            return Some(Cow::Borrowed(value));
+        }
+        self.well_known_metadata_for_identity(
+            name,
+            &unescape_once(escaped_identity),
+            metadata_cleared,
+        )
+        .map(|value| Cow::Owned(escape(&value)))
+    }
+
+    pub(crate) fn identity_exists(&self, escaped_identity: &str) -> bool {
+        let identity = normalized_item_path(&unescape_once(escaped_identity));
+        if identity.is_absolute() {
+            identity.exists()
+        } else {
+            self.evaluation_directory.join(identity).exists()
+        }
+    }
+
+    pub(crate) fn directory_name(&self, escaped_identity: &str) -> String {
+        let identity = normalized_item_path(&unescape_once(escaped_identity));
+        let full_path = if identity.is_absolute() {
+            lexical_absolute(&identity).ok()
+        } else {
+            lexical_absolute(&self.evaluation_directory.join(identity)).ok()
+        };
+        escape(
+            &full_path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(display_path)
+                .unwrap_or_default(),
+        )
     }
 
     pub fn evaluated_metadata(&self) -> CaseInsensitiveMap<String> {
@@ -313,21 +414,31 @@ impl Item {
         for name in WELL_KNOWN_METADATA {
             result.insert(
                 (*name).to_string(),
-                self.well_known_metadata(name).unwrap_or_default(),
+                self.well_known_metadata_for_identity(name, &self.name, false)
+                    .unwrap_or_default(),
             );
         }
         result
     }
 
-    fn well_known_metadata(&self, name: &str) -> Option<String> {
+    fn well_known_metadata_for_identity(
+        &self,
+        name: &str,
+        identity: &str,
+        metadata_cleared: bool,
+    ) -> Option<String> {
         if name.eq_ignore_ascii_case("Identity") {
-            return Some(self.name.clone());
+            return Some(identity.to_string());
         }
         if name.eq_ignore_ascii_case("RecursiveDir") {
-            return Some(String::new());
+            return Some(if metadata_cleared {
+                String::new()
+            } else {
+                unescape_once(&self.escaped_recursive_dir)
+            });
         }
 
-        let item_path = normalized_item_path(&self.name);
+        let item_path = normalized_item_path(identity);
         let full_path = if item_path.is_absolute() {
             lexical_absolute(&item_path).ok()?
         } else {
@@ -533,6 +644,10 @@ impl ProjectModel {
 
     pub fn get_items(&self, item_type: &str) -> Option<&Vec<Item>> {
         self.items.get(item_type)
+    }
+
+    pub(crate) fn get_items_mut(&mut self, item_type: &str) -> Option<&mut Vec<Item>> {
+        self.items.get_mut(item_type)
     }
 
     pub fn item_defaults(&self, item_type: &str) -> Arc<MetadataMap> {

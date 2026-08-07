@@ -26,6 +26,10 @@ struct Args {
     #[arg(short, long, default_value = "Build")]
     target: String,
 
+    /// Write the evaluated project without executing targets
+    #[arg(long, value_name = "PATH")]
+    preprocess: Option<PathBuf>,
+
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -55,6 +59,10 @@ fn main() -> Result<()> {
 
     let mut evaluator = ProjectEvaluator::new();
     evaluator.load_project(&project_path)?;
+    if let Some(output_path) = args.preprocess {
+        evaluator.write_preprocessed_project(output_path)?;
+        return Ok(());
+    }
     evaluator.execute_target(&args.target)?;
 
     info!("Build completed successfully");

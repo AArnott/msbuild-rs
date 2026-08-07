@@ -1,0 +1,77 @@
+# MSBuild Evaluation Compatibility Worklist
+
+This worklist tracks the behavior needed before preprocessing performance can be considered an apples-to-apples comparison with conventional MSBuild. A feature is complete only when focused unit tests and a parity fixture pass against both `dotnet build /pp` and `msbuild-rs --preprocess`.
+
+## Benchmark Baseline
+
+- [x] Measure fresh process startup, project loading, and preprocessed output creation.
+- [x] Support configurable warmups and iterations and retain raw CSV samples.
+- [ ] Add a parity runner that compares normalized preprocessed output for compatibility fixtures.
+- [ ] Pin the .NET SDK used for repeatable baseline results.
+- [ ] Add larger generated fixtures for properties, items, conditions, and import graphs.
+- [ ] Report wall-clock distribution and peak working set.
+
+Run the current baseline after `cargo build --release`:
+
+```powershell
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
+```
+
+The current outputs are not semantically identical: conventional `/pp` preserves the aggregated project source, while MSBuild-RS writes its evaluated model. Use the harness for directional measurements until the compatibility items below are complete.
+
+## Evaluation Semantics
+
+### Properties
+
+- [x] Basic `$(Property)` expansion.
+- [ ] Evaluate properties in document order with last assignment winning.
+- [ ] Recursively expand property values with cycle detection.
+- [ ] Implement global properties and command-line property precedence.
+- [ ] Implement environment and reserved properties such as `MSBuildProjectDirectory`.
+- [ ] Implement property functions with an explicit allowlist matching MSBuild.
+- [ ] Implement registry properties where supported.
+
+### Conditions
+
+- [x] Basic `==` and `!=` comparisons.
+- [ ] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
+- [ ] Support relational operators and numeric/version comparisons.
+- [ ] Support boolean coercion, case-insensitive comparisons, and quoted literals.
+- [ ] Implement intrinsic condition functions: `Exists`, `HasTrailingSlash`, and `IsOsPlatform`.
+- [ ] Produce errors for malformed conditions instead of treating arbitrary text as true.
+
+### Items and Metadata
+
+- [x] Basic item includes and `@(ItemType)` expansion.
+- [ ] Implement item transforms, including `@(Item->'%(Metadata)')`.
+- [ ] Implement custom and well-known item metadata.
+- [ ] Implement custom separators in item expressions.
+- [ ] Implement `Exclude`, `Remove`, and `Update` operations.
+- [ ] Implement wildcard and recursive glob expansion with MSBuild escaping rules.
+- [ ] Implement item functions and item-expression chaining.
+- [ ] Evaluate item definitions and metadata in MSBuild document order.
+
+### Imports and Project Structure
+
+- [ ] Resolve imports relative to the importing file.
+- [ ] Recursively process imports in document order at their source location.
+- [ ] Support import globs, `ImportGroup`, and conditional imports.
+- [ ] Detect duplicate and cyclic imports with compatible diagnostics.
+- [ ] Implement `Choose`, `When`, and `Otherwise`.
+- [ ] Implement SDK implicit imports and `Sdk` resolution.
+- [ ] Preserve an aggregated source representation equivalent to `/pp`.
+
+### Escaping and Parsing
+
+- [ ] Implement MSBuild percent escaping and unescaping.
+- [ ] Preserve XML text and attribute semantics, including CDATA and entities.
+- [ ] Match case-insensitive property, item, metadata, and function lookup.
+- [ ] Match semicolon splitting and empty-value behavior.
+
+## Parity Fixtures
+
+- [ ] Each completed feature has a minimal standalone project fixture.
+- [ ] Capture queried properties and items from conventional MSBuild for semantic comparison.
+- [ ] Normalize machine-specific paths before comparing outputs.
+- [ ] Cover Windows and a non-Windows platform in CI.
+- [ ] Keep execution/task performance separate from evaluation/preprocessing performance.

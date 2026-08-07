@@ -33,6 +33,9 @@ msbuild-rs --project path/to/project.proj --target Build --verbose
 
 # Run demonstration with sample projects
 msbuild-rs --demo
+
+# Load and write an evaluated project without executing targets
+msbuild-rs --project path/to/project.proj --preprocess out.xml
 ```
 
 ### Project File Format
@@ -143,6 +146,10 @@ cargo test
 
 # Run with sample projects
 cargo run -- --demo
+
+# Compare preprocessing startup and evaluation performance
+cargo build --release
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
 ```
 
 ## Sample Projects

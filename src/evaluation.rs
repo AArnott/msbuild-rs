@@ -38,10 +38,10 @@ impl ProjectEvaluator {
         // Process imports (simplified - would need to handle relative paths properly in real implementation)
         for import in &self.model.imports.clone() {
             let evaluator = ExpressionEvaluator::new(&self.model);
-            if let Some(condition) = &import.condition {
-                if !evaluator.evaluate_condition(condition)? {
-                    continue;
-                }
+            if let Some(condition) = &import.condition
+                && !evaluator.evaluate_condition(condition)?
+            {
+                continue;
             }
 
             let import_path = evaluator.evaluate(&import.project)?;

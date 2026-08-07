@@ -367,12 +367,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 }
                 "makerelative" => {
                     require_arguments(method, &arguments, 2)?;
-                    let base = PathBuf::from(&arguments[0]);
-                    let path = PathBuf::from(&arguments[1]);
-                    Ok(path
-                        .strip_prefix(&base)
-                        .map(display_path)
-                        .unwrap_or_else(|_| display_path(&path)))
+                    Ok(make_relative(&arguments[0], &arguments[1]))
                 }
                 "normalizepath" => {
                     if arguments.is_empty() {
@@ -679,6 +674,41 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
     left.cmp(&right)
 }
 
+fn make_relative(base: &str, path: &str) -> String {
+    if let Ok(relative) = Path::new(path).strip_prefix(base) {
+        return display_path(relative);
+    }
+
+    let is_windows_path = |value: &str| {
+        value.contains('\\')
+            || value
+                .as_bytes()
+                .get(1)
+                .is_some_and(|character| *character == b':')
+    };
+    if is_windows_path(base) || is_windows_path(path) {
+        let base_components = base
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>();
+        let path_components = path
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .collect::<Vec<_>>();
+        if path_components.len() >= base_components.len()
+            && path_components
+                .iter()
+                .zip(&base_components)
+                .all(|(path, base)| path.eq_ignore_ascii_case(base))
+        {
+            let separator = if path.contains('\\') { "\\" } else { "/" };
+            return path_components[base_components.len()..].join(separator);
+        }
+    }
+
+    path.to_string()
+}
+
 fn find_file_above(start: &str, file_name: &str) -> Option<PathBuf> {
     let mut directory = PathBuf::from(start.replace('/', std::path::MAIN_SEPARATOR_STR));
     if directory.is_file() {
@@ -917,6 +947,11 @@ mod tests {
         assert_eq!(
             ExpressionEvaluator::new(&model)
                 .evaluate("$([MSBuild]::MakeRelative('C:\\repo\\', 'C:\\repo\\src\\project'))")?,
+            r"src\project"
+        );
+        assert_eq!(
+            ExpressionEvaluator::new(&model)
+                .evaluate("$([MSBuild]::MakeRelative('C:\\REPO\\', 'c:\\repo\\src\\project'))")?,
             r"src\project"
         );
         Ok(())

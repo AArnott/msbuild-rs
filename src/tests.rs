@@ -139,13 +139,25 @@ mod integration_tests {
     fn test_target_dependencies() -> Result<()> {
         // Test that target dependencies are executed in the correct order
         // This is tested through the integration with sample projects
-        let project_path = Path::new("sample_projects/simple.proj");
-        if !project_path.exists() {
+        let fixture_path = Path::new("sample_projects/simple.proj");
+        if !fixture_path.exists() {
             return Ok(());
         }
 
+        let temp_dir = TempDir::new()?;
+        let project_path = temp_dir.path().join("simple.proj");
+        fs::copy(fixture_path, &project_path)?;
+        fs::copy(
+            "sample_projects/readme.txt",
+            temp_dir.path().join("readme.txt"),
+        )?;
+        fs::copy(
+            "sample_projects/config.xml",
+            temp_dir.path().join("config.xml"),
+        )?;
+
         let mut evaluator = ProjectEvaluator::new();
-        evaluator.load_project(project_path)?;
+        evaluator.load_project(&project_path)?;
 
         // The Build target depends on CopyResources, which depends on Compile, which depends on Clean
         // This should execute all targets in the correct order

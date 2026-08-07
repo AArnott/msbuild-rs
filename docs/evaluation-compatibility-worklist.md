@@ -35,6 +35,29 @@ Both implementations now preserve aggregated project source, including unevaluat
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
 - [ ] Implement registry properties where supported.
 
+#### .NET-backed intrinsic expressions (late-stage)
+
+MSBuild property functions may name .NET types directly. For example:
+
+```xml
+$([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'))
+```
+
+Support will use two execution tiers:
+
+1. Frequently used types and methods will have native Rust implementations selected by an explicit type-and-method allowlist. This is the preferred path for startup time, throughput, portability, and predictable behavior.
+2. Legal MSBuild property-function calls without a native implementation will fall back to a CoreCLR hosted in-process. The fallback will resolve the requested type and method, marshal arguments and return values, and cache runtime/type/method lookup state.
+
+This work is intentionally late in the compatibility plan. The parser, evaluation order, items and metadata, imports, escaping, and native high-value intrinsic set should be stable first. Hosting CoreCLR must not become a prerequisite for projects that only use the native tier.
+
+- [ ] Inventory the .NET types and methods most common in representative evaluated projects.
+- [ ] Define the native Rust intrinsic registry and deterministic overload/coercion rules.
+- [ ] Define the managed fallback contract, including CoreCLR discovery, startup, invocation, caching, exceptions, and diagnostics.
+- [ ] Match MSBuild's allowlist and reject types or members that MSBuild property functions do not permit.
+- [ ] Add parity fixtures for static methods, constructors, instance methods, overloads, nested expressions, metadata arguments, null/empty values, and exceptions.
+- [ ] Benchmark native and managed tiers separately, including cold CoreCLR startup and warm invocation.
+- [ ] Keep CoreCLR unloaded unless a managed fallback is actually required.
+
 ### Conditions
 
 - [x] Basic `==` and `!=` comparisons.

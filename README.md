@@ -129,6 +129,14 @@ Built-in tasks for common operations:
 - **Item References**: `@(ItemType)` - Expands to semicolon-separated list of item names
 - **Conditions**: Support basic equality comparisons like `'$(Prop)' == 'Value'`
 
+MSBuild also permits property functions that reference .NET types, such as:
+
+```xml
+$([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'))
+```
+
+The compatibility plan uses native Rust implementations for common type/method combinations and, later, an in-process CoreCLR fallback for legal MSBuild property functions that have no native implementation. CoreCLR will load lazily so the managed runtime does not affect projects that stay on native fast paths.
+
 ### Evaluation Order
 
 1. **Properties**: All properties are evaluated first, allowing forward references

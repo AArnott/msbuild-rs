@@ -93,10 +93,10 @@ pub struct TaskExecutionContext {
 
 ### Security Principles
 1. **Task Isolation**: Tasks cannot access the full ProjectModel, only passed attributes
-2. **Expression Sandboxing**: Property/item evaluation cannot execute arbitrary code
+2. **Expression Policy**: Native property/item evaluation uses an explicit intrinsic allowlist. A planned in-process CoreCLR fallback may invoke only the .NET types and members permitted by MSBuild property-function policy; it is trusted managed code inside the MSBuild-RS process, not a security sandbox
 3. **Path Security**: All file operations are restricted to project directory context
 4. **Process Boundary**: Conventional MSBuild tasks execute outside the Rust build process in a task host with an explicit input and output contract
-5. **Trust Boundary**: Conventional task assemblies are executable code and may access runtime or system APIs; only trusted assemblies should be loaded, and host policy controls must be extensible
+5. **Trust Boundary**: Conventional task assemblies are executable code and may access runtime or system APIs; only trusted assemblies should be loaded, and host policy controls must be extensible. Managed property-function fallback executes in-process and therefore has a different, broader failure and trust boundary than the out-of-process task host
 
 ### Performance Characteristics
 - **Single Pass Parsing**: XML parsed once with intelligent element handling
@@ -194,12 +194,12 @@ msbuild-rs --demo
 1. **Task Scope**: Limited to built-in tasks (Message, Copy, Error)
 2. **Import Complexity**: Simplified import processing vs full MSBuild
 3. **Custom Tasks**: No .NET Framework or modern .NET task host for loading conventional MSBuild task assemblies yet
-4. **Property Functions**: No MSBuild property function support
+4. **Property Functions**: A native subset is supported; arbitrary legal .NET-backed MSBuild property functions do not yet have a managed fallback
 5. **Wildcard Items**: Basic item inclusion, no advanced wildcards
 
 ### Future Enhancements
 1. **Conventional Task Host**: Build a host executable for .NET Framework and modern .NET that resolves `<UsingTask>` declarations, loads conventional MSBuild task assemblies, executes tasks, and returns outputs and log events to MSBuild-RS
-2. **Property Functions**: String manipulation and utility functions
+2. **Property Functions**: Expand the native Rust allowlist for common functions, then add a late-stage in-process CoreCLR fallback for legal .NET types and methods without native implementations. For example, `$([System.Text.RegularExpressions.Regex]::IsMatch(...))` should use a native fast path when available and managed invocation otherwise
 3. **Advanced Wildcards**: Complex file pattern matching
 4. **NuGet Integration**: Package reference support
 5. **IDE Integration**: Language server protocol support

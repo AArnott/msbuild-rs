@@ -46,20 +46,20 @@ for ($index = 0; $index -lt $Warmup; $index++) {
 $dotnetSamples = for ($index = 1; $index -le $Iterations; $index++) {
     [pscustomobject]@{
         Iteration = $index
-        DotnetMs = Invoke-TimedCommand "dotnet build" $dotnetCommand
+        DotnetMs  = Invoke-TimedCommand "dotnet build" $dotnetCommand
     }
 }
 $rustSamples = for ($index = 1; $index -le $Iterations; $index++) {
     [pscustomobject]@{
         Iteration = $index
-        RustMs = Invoke-TimedCommand "msbuild-rs" $rustCommand
+        RustMs    = Invoke-TimedCommand "msbuild-rs" $rustCommand
     }
 }
 $samples = for ($index = 0; $index -lt $Iterations; $index++) {
     [pscustomobject]@{
         Iteration = $index + 1
-        DotnetMs = $dotnetSamples[$index].DotnetMs
-        RustMs = $rustSamples[$index].RustMs
+        DotnetMs  = $dotnetSamples[$index].DotnetMs
+        RustMs    = $rustSamples[$index].RustMs
     }
 }
 
@@ -73,7 +73,8 @@ function Get-Summary {
     $middle = [int][Math]::Floor($sorted.Count / 2)
     $median = if ($sorted.Count % 2 -eq 0) {
         ($sorted[$middle - 1] + $sorted[$middle]) / 2
-    } else {
+    }
+    else {
         $sorted[$middle]
     }
     $p95Index = [Math]::Min($sorted.Count - 1, [int][Math]::Ceiling($sorted.Count * 0.95) - 1)
@@ -81,17 +82,18 @@ function Get-Summary {
     $deviationMiddle = [int][Math]::Floor($deviations.Count / 2)
     $medianAbsoluteDeviation = if ($deviations.Count % 2 -eq 0) {
         ($deviations[$deviationMiddle - 1] + $deviations[$deviationMiddle]) / 2
-    } else {
+    }
+    else {
         $deviations[$deviationMiddle]
     }
     $outlierThreshold = $median + [Math]::Max(1, 6 * $medianAbsoluteDeviation)
 
     return [pscustomobject]@{
-        MeanMs = [Math]::Round(($Values | Measure-Object -Average).Average, 3)
-        MedianMs = [Math]::Round($median, 3)
-        P95Ms = [Math]::Round($sorted[$p95Index], 3)
-        MinMs = [Math]::Round(($Values | Measure-Object -Minimum).Minimum, 3)
-        MaxMs = [Math]::Round(($Values | Measure-Object -Maximum).Maximum, 3)
+        MeanMs       = [Math]::Round(($Values | Measure-Object -Average).Average, 3)
+        MedianMs     = [Math]::Round($median, 3)
+        P95Ms        = [Math]::Round($sorted[$p95Index], 3)
+        MinMs        = [Math]::Round(($Values | Measure-Object -Minimum).Minimum, 3)
+        MaxMs        = [Math]::Round(($Values | Measure-Object -Maximum).Maximum, 3)
         HighOutliers = @($Values | Where-Object { $_ -gt $outlierThreshold }).Count
     }
 }

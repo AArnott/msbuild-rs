@@ -10,6 +10,47 @@ mod integration_tests {
     use crate::object_model::ProjectModel;
 
     #[test]
+    fn test_project_default_targets_match_sample_project() -> Result<()> {
+        let project_path = Path::new("sample_projects/simple.proj");
+        if !project_path.exists() {
+            return Ok(());
+        }
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project_path)?;
+
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("MSBuildProjectDefaultTargets")
+                .map(String::as_str),
+            Some("Build")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_self_closing_project_preserves_default_targets_text() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_path = temp_dir.path().join("empty.proj");
+        fs::write(&project_path, r#"<Project DefaultTargets="Build;Pack" />"#)?;
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(&project_path)?;
+
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("MSBuildProjectDefaultTargets")
+                .map(String::as_str),
+            Some("Build;Pack")
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_simple_project_execution() -> Result<()> {
         // Test that we can load and execute a simple project
         let project_path = Path::new("sample_projects/simple.proj");

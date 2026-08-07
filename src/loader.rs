@@ -236,7 +236,16 @@ impl EvaluationState {
             let event_end = reader.buffer_position() as usize;
 
             match event {
-                Event::Start(element) if element.name().as_ref() == b"Project" => {}
+                Event::Start(element)
+                    if include_project_element && element.name().as_ref() == b"Project" =>
+                {
+                    self.evaluate_project_default_targets(&element, &reader, &lexical_path)?;
+                }
+                Event::Empty(element)
+                    if include_project_element && element.name().as_ref() == b"Project" =>
+                {
+                    self.evaluate_project_default_targets(&element, &reader, &lexical_path)?;
+                }
                 Event::Start(element)
                     if element.name().as_ref() == b"PropertyGroup" && current_target.is_none() =>
                 {
@@ -584,6 +593,28 @@ impl EvaluationState {
                 }),
             None => Ok(true),
         }
+    }
+
+    fn evaluate_project_default_targets(
+        &mut self,
+        element: &BytesStart<'_>,
+        reader: &Reader<&[u8]>,
+        current_file: &Path,
+    ) -> Result<()> {
+        let Some(default_targets) = attribute_value(element, reader, b"DefaultTargets")? else {
+            return Ok(());
+        };
+        let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
+            .evaluate(&default_targets)
+            .with_context(|| {
+                format!(
+                    "Failed to evaluate DefaultTargets in {}",
+                    current_file.display()
+                )
+            })?;
+        self.model
+            .set_property("MSBuildProjectDefaultTargets".to_string(), evaluated);
+        Ok(())
     }
 
     fn assign_property(

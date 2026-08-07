@@ -28,7 +28,9 @@ Both implementations now preserve aggregated project source, including unevaluat
 - [ ] Recursively expand property values with cycle detection.
 - [ ] Implement global properties and command-line property precedence.
 - [ ] Implement environment and reserved properties such as `MSBuildProjectDirectory`.
+- [x] Provide core project/current-file paths and active .NET SDK properties during preprocessing.
 - [ ] Implement property functions with an explicit allowlist matching MSBuild.
+- [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
 - [ ] Implement registry properties where supported.
 
 ### Conditions
@@ -38,6 +40,7 @@ Both implementations now preserve aggregated project source, including unevaluat
 - [ ] Support relational operators and numeric/version comparisons.
 - [x] Support boolean coercion, case-insensitive comparisons, and quoted literals.
 - [ ] Implement intrinsic condition functions: `Exists`, `HasTrailingSlash`, and `IsOsPlatform`.
+- [x] Implement `Exists`, `HasTrailingSlash`, SDK version comparisons, feature-wave checks, and common string predicates.
 - [x] Produce errors for malformed conditions instead of treating arbitrary text as true.
 
 ### Items and Metadata
@@ -53,12 +56,13 @@ Both implementations now preserve aggregated project source, including unevaluat
 
 ### Imports and Project Structure
 
-- [ ] Resolve imports relative to the importing file.
-- [ ] Recursively process imports in document order at their source location.
-- [ ] Support import globs, `ImportGroup`, and conditional imports.
+- [x] Resolve imports relative to the importing file.
+- [x] Recursively process imports in document order at their source location.
+- [x] Support deterministic import globs and conditional imports.
+- [ ] Honor `ImportGroup` conditions.
 - [ ] Detect duplicate and cyclic imports with compatible diagnostics.
 - [ ] Implement `Choose`, `When`, and `Otherwise`.
-- [ ] Implement SDK implicit imports and `Sdk` resolution.
+- [x] Implement implicit `Sdk.props` and `Sdk.targets` imports for installed .NET SDKs.
 - [x] Preserve an aggregated source representation equivalent to `/pp`.
 
 ### Escaping and Parsing

@@ -31,7 +31,7 @@ pub struct Import {
     pub condition: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ProjectModel {
     pub properties: IndexMap<String, String>,
     pub items: IndexMap<String, Vec<Item>>,
@@ -51,7 +51,12 @@ impl ProjectModel {
     }
 
     pub fn get_property(&self, name: &str) -> Option<&String> {
-        self.properties.get(name)
+        self.properties.get(name).or_else(|| {
+            self.properties
+                .iter()
+                .find(|(property_name, _)| property_name.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        })
     }
 
     pub fn add_item(&mut self, item: Item) {
@@ -102,5 +107,21 @@ impl ProjectModel {
         self.project_file_path
             .as_ref()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_lookup_is_case_insensitive() {
+        let mut model = ProjectModel::new();
+        model.set_property("NETCoreSdkVersion".to_string(), "10.0.400".to_string());
+
+        assert_eq!(
+            model.get_property("NetCoreSdkVersion"),
+            Some(&"10.0.400".to_string())
+        );
     }
 }

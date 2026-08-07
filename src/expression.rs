@@ -79,7 +79,14 @@ impl ConditionParser {
     }
 
     fn parse_comparison(&mut self) -> Result<bool> {
-        let left = self.take_value()?;
+        let left = if matches!(
+            self.peek(),
+            Some(ConditionToken::Equal | ConditionToken::NotEqual)
+        ) {
+            String::new()
+        } else {
+            self.take_value()?
+        };
         if self.consume(&ConditionToken::Equal) {
             let right = self.take_value()?;
             return Ok(left.eq_ignore_ascii_case(&right));
@@ -202,7 +209,7 @@ impl<'a> ExpressionEvaluator<'a> {
         let mut result = input.to_string();
 
         // Replace property references $(PropertyName)
-        let prop_regex = Regex::new(r"\$\(([^)]+)\)").unwrap();
+        let prop_regex = Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap();
         while let Some(captures) = prop_regex.captures(&result) {
             let full_match = &captures[0];
             let prop_name = &captures[1];
@@ -217,7 +224,7 @@ impl<'a> ExpressionEvaluator<'a> {
         }
 
         // Replace item references @(ItemType)
-        let item_regex = Regex::new(r"@\(([^)]+)\)").unwrap();
+        let item_regex = Regex::new(r"@\(([A-Za-z_][A-Za-z0-9_.-]*)\)").unwrap();
         while let Some(captures) = item_regex.captures(&result) {
             let full_match = &captures[0];
             let item_type = &captures[1];
@@ -338,5 +345,14 @@ mod tests {
         assert!(evaluator.evaluate_condition("(true Or false").is_err());
         assert!(evaluator.evaluate_condition("arbitrary text").is_err());
         assert!(evaluator.evaluate_condition("'unterminated").is_err());
+    }
+
+    #[test]
+    fn test_empty_unquoted_property_in_comparison() {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert!(!evaluator.evaluate_condition("$(Missing) != ''").unwrap());
+        assert!(evaluator.evaluate_condition("$(Missing) == ''").unwrap());
     }
 }

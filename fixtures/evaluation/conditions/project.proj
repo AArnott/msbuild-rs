@@ -7,6 +7,18 @@
     <NumericVersionRelational Condition="6 &lt;= 6.0.0.1">true</NumericVersionRelational>
     <BooleanAlias Condition="false==no">true</BooleanAlias>
     <BooleanNotAlias Condition="true==!false">true</BooleanNotAlias>
+    <DoublePrecisionRounding Condition="9007199254740992 == 9007199254740993">true</DoublePrecisionRounding>
+    <SignedHexEquality Condition="0xFFFFFFFF == -1">true</SignedHexEquality>
+    <VersionCoercionOrder Condition="1.1 &gt; 1.0.0 And 1.0.0 &lt; 1.1">true</VersionCoercionOrder>
+    <VersionWhitespaceCoercion Condition="' 1.2 ' &lt; 2.0">true</VersionWhitespaceCoercion>
+    <AllBooleanAliases Condition="'true' == 'on' And 'on' == 'yes' And 'yes' == '!false' And '!false' == '!off' And '!off' == '!no' And 'false' == 'off' And 'off' == 'no' And 'no' == '!true' And '!true' == '!on' And '!on' == '!yes'">true</AllBooleanAliases>
+    <WhitespaceIsNotBoolean>false</WhitespaceIsNotBoolean>
+    <WhitespaceIsNotBoolean Condition="' true ' == true">true</WhitespaceIsNotBoolean>
+    <EmptyIsNotFalse>false</EmptyIsNotFalse>
+    <EmptyIsNotFalse Condition="'' == false">true</EmptyIsNotFalse>
+    <LazyTrueOr Condition="true Or $([System.Int32]::Parse('not-a-number'))">true</LazyTrueOr>
+    <LazyFalseAnd Condition="false And $([System.Int32]::Parse('not-a-number'))">failed</LazyFalseAnd>
+    <LazyFalseAnd>passed</LazyFalseAnd>
 
     <IsWindows Condition="$([MSBuild]::IsOSPlatform('wInDoWs'))">true</IsWindows>
     <IsWindows Condition="!$([MSBuild]::IsOSPlatform('Windows'))">false</IsWindows>

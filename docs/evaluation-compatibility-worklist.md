@@ -67,9 +67,10 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 
 - [x] Basic `==` and `!=` comparisons.
 - [x] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
-- [x] Support `<`, `>`, `<=`, and `>=` with exact decimal/hex comparison and
-  two-to-four-part version ordering.
-- [x] Support boolean coercion, case-insensitive comparisons, and quoted literals.
+- [x] Support `<`, `>`, `<=`, and `>=` with invariant finite IEEE-754 decimal,
+  signed 32-bit hexadecimal, and two-to-four-part version coercion and ordering.
+- [x] Support exact MSBuild boolean aliases, case-insensitive comparisons, and
+  quoted literals without coercing whitespace or empty strings to booleans.
 - [x] Implement `$([MSBuild]::IsOSPlatform(...))` for case-insensitive
   `Windows`, `Linux`, and `OSX` platform names.
 - [x] Implement `Exists`, `HasTrailingSlash`, SDK version comparisons, feature-wave checks, and common string predicates.

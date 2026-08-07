@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow, bail};
-use num_bigint::BigInt;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -18,6 +17,7 @@ pub struct ExpressionEvaluator<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ConditionToken {
     Value(String),
+    Function(String, Vec<String>),
     Equal,
     NotEqual,
     Less,
@@ -29,6 +29,30 @@ enum ConditionToken {
     Not,
     LeftParen,
     RightParen,
+}
+
+#[derive(Debug)]
+enum ConditionExpression {
+    Value(String),
+    Function(String, Vec<String>),
+    Not(Box<Self>),
+    Comparison {
+        left: Box<Self>,
+        operator: ComparisonOperator,
+        right: Box<Self>,
+    },
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ComparisonOperator {
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
 }
 
 struct ConditionParser {
@@ -44,134 +68,86 @@ impl ConditionParser {
         })
     }
 
-    fn parse(mut self) -> Result<bool> {
+    fn parse(mut self) -> Result<ConditionExpression> {
         if self.tokens.is_empty() {
-            return Ok(false);
+            bail!("A condition must evaluate to a boolean value");
         }
 
-        let result = self.parse_or(true)?;
+        let result = self.parse_or()?;
         if let Some(token) = self.peek() {
             bail!("Unexpected token in condition: {token:?}");
         }
         Ok(result)
     }
 
-    fn parse_or(&mut self, evaluate: bool) -> Result<bool> {
-        let mut result = self.parse_and(evaluate)?;
+    fn parse_or(&mut self) -> Result<ConditionExpression> {
+        let mut result = self.parse_and()?;
         while self.consume(&ConditionToken::Or) {
-            let right = self.parse_and(evaluate && !result)?;
-            if evaluate {
-                result = result || right;
-            }
+            result = ConditionExpression::Or(Box::new(result), Box::new(self.parse_and()?));
         }
         Ok(result)
     }
 
-    fn parse_and(&mut self, evaluate: bool) -> Result<bool> {
-        let mut result = self.parse_unary(evaluate)?;
+    fn parse_and(&mut self) -> Result<ConditionExpression> {
+        let mut result = self.parse_comparison()?;
         while self.consume(&ConditionToken::And) {
-            let right = self.parse_unary(evaluate && result)?;
-            if evaluate {
-                result = result && right;
-            }
+            result = ConditionExpression::And(Box::new(result), Box::new(self.parse_comparison()?));
         }
         Ok(result)
     }
 
-    fn parse_unary(&mut self, evaluate: bool) -> Result<bool> {
+    fn parse_factor(&mut self) -> Result<ConditionExpression> {
         if self.consume(&ConditionToken::Not) {
-            let result = self.parse_unary(evaluate)?;
-            return Ok(evaluate && !result);
+            return Ok(ConditionExpression::Not(Box::new(self.parse_factor()?)));
         }
 
         if self.consume(&ConditionToken::LeftParen) {
-            let result = self.parse_or(evaluate)?;
+            let result = self.parse_or()?;
             if !self.consume(&ConditionToken::RightParen) {
                 bail!("Missing closing parenthesis in condition");
             }
             return Ok(result);
         }
 
-        self.parse_comparison(evaluate)
-    }
-
-    fn parse_comparison(&mut self, evaluate: bool) -> Result<bool> {
-        let left = if matches!(
-            self.peek(),
-            Some(
-                ConditionToken::Equal
-                    | ConditionToken::NotEqual
-                    | ConditionToken::Less
-                    | ConditionToken::LessOrEqual
-                    | ConditionToken::Greater
-                    | ConditionToken::GreaterOrEqual
-            )
-        ) {
-            String::new()
-        } else {
-            self.take_value()?
-        };
-        if self.consume(&ConditionToken::Equal) {
-            let right = self.take_value()?;
-            return if evaluate {
-                compare_equality(&left, &right)
-            } else {
-                Ok(false)
-            };
-        }
-        if self.consume(&ConditionToken::NotEqual) {
-            let right = self.take_value()?;
-            return if evaluate {
-                compare_equality(&left, &right).map(|result| !result)
-            } else {
-                Ok(false)
-            };
-        }
-
-        let operator = [
-            ConditionToken::Less,
-            ConditionToken::LessOrEqual,
-            ConditionToken::Greater,
-            ConditionToken::GreaterOrEqual,
-        ]
-        .into_iter()
-        .find(|operator| self.consume(operator));
-        if let Some(operator) = operator {
-            let right = self.take_value()?;
-            if !evaluate {
-                return Ok(false);
-            }
-            let ordering = compare_relational(&left, &right)?;
-            return Ok(match operator {
-                ConditionToken::Less => ordering.is_lt(),
-                ConditionToken::LessOrEqual => !ordering.is_gt(),
-                ConditionToken::Greater => ordering.is_gt(),
-                ConditionToken::GreaterOrEqual => !ordering.is_lt(),
-                _ => unreachable!(),
-            });
-        }
-
-        if !evaluate {
-            return Ok(false);
-        }
-        parse_condition_bool(&left)
-            .ok_or_else(|| anyhow!("Expected a boolean value or comparison, found '{left}'"))
-    }
-
-    fn take_value(&mut self) -> Result<String> {
-        if self.consume(&ConditionToken::Not) {
-            let value = self.take_value()?;
-            let value = parse_condition_bool(&value)
-                .ok_or_else(|| anyhow!("Expected a boolean value after '!', found '{value}'"))?;
-            return Ok((!value).to_string());
-        }
         match self.tokens.get(self.position).cloned() {
             Some(ConditionToken::Value(value)) => {
                 self.position += 1;
-                Ok(value)
+                Ok(ConditionExpression::Value(value))
+            }
+            Some(ConditionToken::Function(name, arguments)) => {
+                self.position += 1;
+                Ok(ConditionExpression::Function(name, arguments))
             }
             Some(token) => bail!("Expected a value in condition, found {token:?}"),
             None => bail!("Expected a value at the end of the condition"),
+        }
+    }
+
+    fn parse_comparison(&mut self) -> Result<ConditionExpression> {
+        let left = self.parse_factor()?;
+        let operator = if self.consume(&ConditionToken::Equal) {
+            Some(ComparisonOperator::Equal)
+        } else if self.consume(&ConditionToken::NotEqual) {
+            Some(ComparisonOperator::NotEqual)
+        } else if self.consume(&ConditionToken::Less) {
+            Some(ComparisonOperator::Less)
+        } else if self.consume(&ConditionToken::LessOrEqual) {
+            Some(ComparisonOperator::LessOrEqual)
+        } else if self.consume(&ConditionToken::Greater) {
+            Some(ComparisonOperator::Greater)
+        } else if self.consume(&ConditionToken::GreaterOrEqual) {
+            Some(ComparisonOperator::GreaterOrEqual)
+        } else {
+            None
+        };
+        if let Some(operator) = operator {
+            Ok(ConditionExpression::Comparison {
+                left: Box::new(left),
+                operator,
+                right: Box::new(self.parse_factor()?),
+            })
+        } else {
+            Ok(left)
         }
     }
 
@@ -235,17 +211,33 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
             }
             quote @ ('\'' | '"') => {
                 position += 1;
-                let start = position;
-                while position < chars.len() && chars[position] != quote {
-                    position += 1;
+                let mut value = String::new();
+                while position < chars.len() {
+                    if chars[position] == quote {
+                        break;
+                    }
+                    if matches!(chars[position], '$' | '@') && chars.get(position + 1) == Some(&'(')
+                    {
+                        let end = find_matching_condition_parenthesis(&chars, position + 1)?;
+                        value.extend(chars[position..=end].iter());
+                        position = end + 1;
+                    } else {
+                        value.push(chars[position]);
+                        position += 1;
+                    }
                 }
                 if position == chars.len() {
                     bail!("Unterminated quoted value in condition");
                 }
-                tokens.push(ConditionToken::Value(
-                    chars[start..position].iter().collect(),
-                ));
+                tokens.push(ConditionToken::Value(value));
                 position += 1;
+            }
+            '$' | '@' if chars.get(position + 1) == Some(&'(') => {
+                let end = find_matching_condition_parenthesis(&chars, position + 1)?;
+                tokens.push(ConditionToken::Value(
+                    chars[position..=end].iter().collect(),
+                ));
+                position = end + 1;
             }
             _ => {
                 let start = position;
@@ -262,10 +254,33 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
                     ));
                 }
                 let value: String = chars[start..position].iter().collect();
+                let mut invocation_start = position;
+                while chars
+                    .get(invocation_start)
+                    .is_some_and(|character| character.is_whitespace())
+                {
+                    invocation_start += 1;
+                }
                 if value.eq_ignore_ascii_case("and") {
                     tokens.push(ConditionToken::And);
                 } else if value.eq_ignore_ascii_case("or") {
                     tokens.push(ConditionToken::Or);
+                } else if value
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic())
+                    && value
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                    && chars.get(invocation_start) == Some(&'(')
+                {
+                    let end = find_matching_condition_parenthesis(&chars, invocation_start)?;
+                    let arguments: String = chars[invocation_start + 1..end].iter().collect();
+                    tokens.push(ConditionToken::Function(
+                        value,
+                        split_arguments(&arguments)?,
+                    ));
+                    position = end + 1;
                 } else {
                     tokens.push(ConditionToken::Value(value));
                 }
@@ -276,13 +291,36 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
     Ok(tokens)
 }
 
-// MSBuild falls back to string equality when its numeric coercion overflows.
-const MAX_MSBUILD_NUMERIC_DIGITS: usize = 309;
-
-#[derive(Debug)]
-struct NumericValue {
-    coefficient: BigInt,
-    scale: usize,
+fn find_matching_condition_parenthesis(chars: &[char], opening: usize) -> Result<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (position, &character) in chars.iter().enumerate().skip(opening) {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => {
+                depth += 1;
+                if depth > MAX_EXPRESSION_NESTING {
+                    bail!(
+                        "Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}"
+                    );
+                }
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(position);
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("Unterminated expression in condition")
 }
 
 #[derive(Debug)]
@@ -292,7 +330,7 @@ struct VersionValue {
 
 fn compare_equality(left: &str, right: &str) -> Result<bool> {
     if let (Some(left), Some(right)) = (parse_numeric(left), parse_numeric(right)) {
-        return Ok(compare_numeric(&left, &right).is_eq());
+        return Ok(left == right);
     }
     if let (Some(left), Some(right)) = (parse_condition_bool(left), parse_condition_bool(right)) {
         return Ok(left == right);
@@ -307,7 +345,7 @@ fn compare_relational(left: &str, right: &str) -> Result<Ordering> {
     let right_version = parse_version(right);
 
     match (left_numeric, left_version, right_numeric, right_version) {
-        (Some(left), _, Some(right), _) => Ok(compare_numeric(&left, &right)),
+        (Some(left), _, Some(right), _) => Ok(left.partial_cmp(&right).unwrap()),
         (_, Some(left), _, Some(right)) => Ok(compare_versions_exact(&left, &right)),
         (Some(left), _, _, Some(right)) => Ok(compare_number_and_version(&left, &right)),
         (_, Some(left), Some(right), _) => Ok(compare_number_and_version(&right, &left).reverse()),
@@ -318,15 +356,20 @@ fn compare_relational(left: &str, right: &str) -> Result<Ordering> {
 }
 
 fn parse_condition_bool(value: &str) -> Option<bool> {
-    if value.trim().eq_ignore_ascii_case("true")
-        || value.trim().eq_ignore_ascii_case("on")
-        || value.trim().eq_ignore_ascii_case("yes")
+    if value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("on")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("!false")
+        || value.eq_ignore_ascii_case("!off")
+        || value.eq_ignore_ascii_case("!no")
     {
         Some(true)
-    } else if value.trim().is_empty()
-        || value.trim().eq_ignore_ascii_case("false")
-        || value.trim().eq_ignore_ascii_case("off")
-        || value.trim().eq_ignore_ascii_case("no")
+    } else if value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("off")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("!true")
+        || value.eq_ignore_ascii_case("!on")
+        || value.eq_ignore_ascii_case("!yes")
     {
         Some(false)
     } else {
@@ -334,40 +377,26 @@ fn parse_condition_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn parse_numeric(value: &str) -> Option<NumericValue> {
-    let value = value.trim();
-    let (negative, value) = match value.as_bytes().first() {
-        Some(b'-') => (true, &value[1..]),
-        Some(b'+') => (false, &value[1..]),
-        _ => (false, value),
-    };
-    if value.is_empty() {
-        return None;
-    }
-
+fn parse_numeric(value: &str) -> Option<f64> {
     if let Some(hex) = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
     {
-        if hex.is_empty()
-            || hex.len() > MAX_MSBUILD_NUMERIC_DIGITS
-            || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
+        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return None;
         }
-        let coefficient = BigInt::parse_bytes(hex.as_bytes(), 16)?;
-        return Some(NumericValue {
-            coefficient: if negative { -coefficient } else { coefficient },
-            scale: 0,
-        });
+        return u32::from_str_radix(hex, 16)
+            .ok()
+            .map(|value| value as i32 as f64);
     }
 
+    let unsigned = value
+        .strip_prefix(['+', '-'])
+        .filter(|unsigned| !unsigned.is_empty())
+        .unwrap_or(value);
     let mut decimal_seen = false;
-    let mut fractional_digits = 0usize;
     let mut digits = 0usize;
-    let mut last_nonzero = None;
-    let mut scale_at_last_nonzero = 0usize;
-    for (index, byte) in value.bytes().enumerate() {
+    for byte in unsigned.bytes() {
         if byte == b'.' && !decimal_seen {
             decimal_seen = true;
             continue;
@@ -376,37 +405,11 @@ fn parse_numeric(value: &str) -> Option<NumericValue> {
             return None;
         }
         digits += 1;
-        if digits > MAX_MSBUILD_NUMERIC_DIGITS {
-            return None;
-        }
-        if decimal_seen {
-            fractional_digits += 1;
-        }
-        if byte != b'0' {
-            last_nonzero = Some(index);
-            scale_at_last_nonzero = fractional_digits;
-        }
     }
-    if digits == 0 {
-        return None;
-    }
-    let Some(last_nonzero) = last_nonzero else {
-        return Some(NumericValue {
-            coefficient: BigInt::from(0u8),
-            scale: 0,
-        });
-    };
-
-    let mut coefficient = BigInt::from(0u8);
-    for byte in value[..=last_nonzero].bytes() {
-        if byte.is_ascii_digit() {
-            coefficient = coefficient * 10u8 + BigInt::from(byte - b'0');
-        }
-    }
-    Some(NumericValue {
-        coefficient: if negative { -coefficient } else { coefficient },
-        scale: scale_at_last_nonzero,
-    })
+    (digits != 0)
+        .then(|| value.parse::<f64>().ok())
+        .flatten()
+        .filter(|value| value.is_finite())
 }
 
 fn parse_version(value: &str) -> Option<VersionValue> {
@@ -426,40 +429,105 @@ fn parse_version(value: &str) -> Option<VersionValue> {
     (2..=4).contains(&count).then_some(VersionValue { parts })
 }
 
-fn compare_numeric(left: &NumericValue, right: &NumericValue) -> Ordering {
-    if left.scale == right.scale {
-        return left.coefficient.cmp(&right.coefficient);
-    }
-    if left.scale < right.scale {
-        scale_coefficient(&left.coefficient, right.scale - left.scale).cmp(&right.coefficient)
-    } else {
-        left.coefficient.cmp(&scale_coefficient(
-            &right.coefficient,
-            left.scale - right.scale,
-        ))
-    }
-}
-
-fn scale_coefficient(value: &BigInt, scale: usize) -> BigInt {
-    let mut result = value.clone();
-    for _ in 0..scale {
-        result *= 10u8;
-    }
-    result
-}
-
 fn compare_versions_exact(left: &VersionValue, right: &VersionValue) -> Ordering {
     left.parts.cmp(&right.parts)
 }
 
-fn compare_number_and_version(number: &NumericValue, version: &VersionValue) -> Ordering {
-    let major = NumericValue {
-        coefficient: BigInt::from(version.parts[0]),
-        scale: 0,
-    };
-    match compare_numeric(number, &major) {
+fn compare_number_and_version(number: &f64, version: &VersionValue) -> Ordering {
+    match number.partial_cmp(&(version.parts[0] as f64)).unwrap() {
         Ordering::Equal => Ordering::Less,
         ordering => ordering,
+    }
+}
+
+enum ConditionOperand {
+    Text(String),
+    Boolean(bool),
+}
+
+impl ConditionExpression {
+    fn evaluate_bool(&self, evaluator: &ExpressionEvaluator<'_>) -> Result<bool> {
+        match self {
+            Self::Value(value) => {
+                let value = evaluator.evaluate(value)?;
+                parse_condition_bool(&value).ok_or_else(|| {
+                    anyhow!("Expected a boolean value or comparison, found '{value}'")
+                })
+            }
+            Self::Function(name, arguments) => {
+                evaluator.evaluate_condition_function(name, arguments)
+            }
+            Self::Not(expression) => Ok(!expression.evaluate_bool(evaluator)?),
+            Self::And(left, right) => {
+                if !left.evaluate_bool(evaluator)? {
+                    Ok(false)
+                } else {
+                    right.evaluate_bool(evaluator)
+                }
+            }
+            Self::Or(left, right) => {
+                if left.evaluate_bool(evaluator)? {
+                    Ok(true)
+                } else {
+                    right.evaluate_bool(evaluator)
+                }
+            }
+            Self::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left = left.evaluate_operand(evaluator)?;
+                let right = right.evaluate_operand(evaluator)?;
+                match operator {
+                    ComparisonOperator::Equal | ComparisonOperator::NotEqual => {
+                        let equal = compare_condition_operands(left, right)?;
+                        Ok(if matches!(operator, ComparisonOperator::Equal) {
+                            equal
+                        } else {
+                            !equal
+                        })
+                    }
+                    _ => {
+                        let (ConditionOperand::Text(left), ConditionOperand::Text(right)) =
+                            (left, right)
+                        else {
+                            bail!("Relational comparison requires value operands");
+                        };
+                        let ordering = compare_relational(&left, &right)?;
+                        Ok(match operator {
+                            ComparisonOperator::Less => ordering.is_lt(),
+                            ComparisonOperator::LessOrEqual => !ordering.is_gt(),
+                            ComparisonOperator::Greater => ordering.is_gt(),
+                            ComparisonOperator::GreaterOrEqual => !ordering.is_lt(),
+                            _ => unreachable!(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    fn evaluate_operand(&self, evaluator: &ExpressionEvaluator<'_>) -> Result<ConditionOperand> {
+        match self {
+            Self::Value(value) => Ok(ConditionOperand::Text(evaluator.evaluate(value)?)),
+            _ => Ok(ConditionOperand::Boolean(self.evaluate_bool(evaluator)?)),
+        }
+    }
+}
+
+fn compare_condition_operands(left: ConditionOperand, right: ConditionOperand) -> Result<bool> {
+    match (left, right) {
+        (ConditionOperand::Text(left), ConditionOperand::Text(right)) => {
+            compare_equality(&left, &right)
+        }
+        (ConditionOperand::Boolean(left), ConditionOperand::Boolean(right)) => Ok(left == right),
+        (ConditionOperand::Boolean(left), ConditionOperand::Text(right))
+        | (ConditionOperand::Text(right), ConditionOperand::Boolean(left)) => {
+            parse_condition_bool(&right)
+                .map(|right| left == right)
+                .ok_or_else(|| anyhow!("Cannot compare a boolean with '{right}'"))
+        }
     }
 }
 
@@ -497,9 +565,9 @@ impl<'a> ExpressionEvaluator<'a> {
 
     /// Evaluate a condition expression
     pub fn evaluate_condition(&self, condition: &str) -> Result<bool> {
-        let evaluated = self.evaluate(condition)?;
-        let evaluated = self.expand_condition_functions(&evaluated)?;
-        ConditionParser::new(&evaluated)?.parse()
+        ConditionParser::new(condition)?
+            .parse()?
+            .evaluate_bool(self)
     }
 
     fn expand(&self, input: &str, depth: usize) -> Result<String> {
@@ -609,7 +677,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 }
                 "isosplatform" => {
                     require_arguments(method, &arguments, 1)?;
-                    Ok(is_os_platform(&arguments[0]).to_string())
+                    Ok(is_os_platform(&arguments[0])?.to_string())
                 }
                 "versiongreaterthan"
                 | "versiongreaterthanorequals"
@@ -780,36 +848,25 @@ impl<'a> ExpressionEvaluator<'a> {
         Ok(self.model.get_all_item_names(expression))
     }
 
-    fn expand_condition_functions(&self, input: &str) -> Result<String> {
-        let mut output = String::with_capacity(input.len());
-        let mut position = 0;
-        while position < input.len() {
-            let Some((start, name, arguments_start)) = find_condition_function(input, position)
-            else {
-                output.push_str(&input[position..]);
-                break;
-            };
-            output.push_str(&input[position..start]);
-            let end = find_matching_parenthesis(input, arguments_start)?;
-            let arguments = split_arguments(&input[arguments_start + 1..end])?;
-            let value = if name.eq_ignore_ascii_case("Exists") {
-                require_arguments(name, &arguments, 1)?;
-                let path = Path::new(&arguments[0]);
-                if path.is_absolute() {
-                    path.exists()
-                } else {
-                    self.base_directory.join(path).exists()
-                }
-            } else if name.eq_ignore_ascii_case("HasTrailingSlash") {
-                require_arguments(name, &arguments, 1)?;
-                arguments[0].ends_with(['/', '\\'])
+    fn evaluate_condition_function(&self, name: &str, arguments: &[String]) -> Result<bool> {
+        let arguments = arguments
+            .iter()
+            .map(|argument| self.evaluate(argument))
+            .collect::<Result<Vec<_>>>()?;
+        if name.eq_ignore_ascii_case("Exists") {
+            require_arguments(name, &arguments, 1)?;
+            let path = Path::new(&arguments[0]);
+            Ok(if path.is_absolute() {
+                path.exists()
             } else {
-                bail!("Unsupported condition function: {name}")
-            };
-            output.push_str(&value.to_string());
-            position = end + 1;
+                self.base_directory.join(path).exists()
+            })
+        } else if name.eq_ignore_ascii_case("HasTrailingSlash") {
+            require_arguments(name, &arguments, 1)?;
+            Ok(arguments[0].ends_with(['/', '\\']))
+        } else {
+            bail!("Unsupported condition function: {name}")
         }
-        Ok(output)
     }
 
     fn property_value(&self, name: &str) -> Option<Cow<'a, str>> {
@@ -824,14 +881,17 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 }
 
-fn is_os_platform(platform: &str) -> bool {
+fn is_os_platform(platform: &str) -> Result<bool> {
+    if platform.is_empty() {
+        bail!("IsOSPlatform platform cannot be empty");
+    }
     let current_platform = match std::env::consts::OS {
         "windows" => "Windows",
         "linux" => "Linux",
         "macos" => "OSX",
-        _ => return false,
+        _ => return Ok(false),
     };
-    platform.eq_ignore_ascii_case(current_platform)
+    Ok(platform.eq_ignore_ascii_case(current_platform))
 }
 
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
@@ -923,34 +983,6 @@ fn unquote(value: &str) -> String {
     } else {
         value.to_string()
     }
-}
-
-fn find_condition_function(input: &str, from: usize) -> Option<(usize, &str, usize)> {
-    let bytes = input.as_bytes();
-    let mut position = from;
-    while position < bytes.len() {
-        if bytes[position].is_ascii_alphabetic() {
-            let start = position;
-            while position < bytes.len()
-                && (bytes[position].is_ascii_alphanumeric() || bytes[position] == b'_')
-            {
-                position += 1;
-            }
-            let name = &input[start..position];
-            while position < bytes.len() && bytes[position].is_ascii_whitespace() {
-                position += 1;
-            }
-            if bytes.get(position) == Some(&b'(')
-                && (name.eq_ignore_ascii_case("Exists")
-                    || name.eq_ignore_ascii_case("HasTrailingSlash"))
-            {
-                return Some((start, name, position));
-            }
-        } else {
-            position += 1;
-        }
-    }
-    None
 }
 
 fn require_arguments(method: &str, arguments: &[String], count: usize) -> Result<()> {
@@ -1155,7 +1187,7 @@ mod tests {
                 .evaluate_condition("'$(Configuration)' == 'Release'")
                 .unwrap()
         );
-        assert!(!evaluator.evaluate_condition("").unwrap());
+        assert!(evaluator.evaluate_condition("").is_err());
         assert!(evaluator.evaluate_condition("true").unwrap());
     }
 
@@ -1286,6 +1318,126 @@ mod tests {
     }
 
     #[test]
+    fn numeric_coercion_matches_msbuild_double_and_int32_hex_behavior() {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        for expression in [
+            "9007199254740992 == 9007199254740993",
+            "0.0 == -0",
+            "-0 >= 0",
+            "+4.25 > -4.25",
+            "0x7FFFFFFF == 2147483647",
+            "0x80000000 == -2147483648",
+            "0xFFFFFFFF == -1",
+            "1.1 > 1.0.0",
+            "1.0.0 < 1.1",
+            "' 1.2 ' < 2.0",
+        ] {
+            assert!(
+                evaluator.evaluate_condition(expression).unwrap(),
+                "expected true: {expression}"
+            );
+        }
+
+        assert!(
+            !evaluator
+                .evaluate_condition("0x100000000 == 4294967296")
+                .unwrap()
+        );
+        assert!(!evaluator.evaluate_condition("-0 < 0").unwrap());
+        assert!(evaluator.evaluate_condition("0x100000000 > 0").is_err());
+        let overflowing_decimal = format!("1{}", "0".repeat(309));
+        assert!(
+            evaluator
+                .evaluate_condition(&format!("{overflowing_decimal} > 0"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn boolean_aliases_are_exact_and_do_not_trim_or_coerce_empty() {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        for expression in [
+            "true",
+            "ON",
+            "Yes",
+            "'!false'",
+            "'!OFF'",
+            "'!No'",
+            "!false",
+            "!off",
+            "!no",
+            "true == on",
+            "yes == !false",
+        ] {
+            assert!(
+                evaluator.evaluate_condition(expression).unwrap(),
+                "expected true: {expression}"
+            );
+        }
+        for expression in [
+            "false", "OFF", "No", "'!true'", "'!ON'", "'!Yes'", "!true", "!on", "!yes",
+        ] {
+            assert!(
+                !evaluator.evaluate_condition(expression).unwrap(),
+                "expected false: {expression}"
+            );
+        }
+
+        assert!(!evaluator.evaluate_condition("' true ' == true").unwrap());
+        assert!(!evaluator.evaluate_condition("'' == false").unwrap());
+        assert!(evaluator.evaluate_condition("' true '").is_err());
+        assert!(evaluator.evaluate_condition("''").is_err());
+    }
+
+    #[test]
+    fn conditions_expand_only_reachable_operands() {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+        let failing_function = "$([System.Int32]::Parse('not-a-number'))";
+
+        assert!(
+            evaluator
+                .evaluate_condition(&format!("true Or {failing_function}"))
+                .unwrap()
+        );
+        assert!(
+            !evaluator
+                .evaluate_condition(&format!("false And {failing_function}"))
+                .unwrap()
+        );
+        assert!(
+            evaluator
+                .evaluate_condition(&format!("false Or {failing_function}"))
+                .is_err()
+        );
+        assert!(
+            evaluator
+                .evaluate_condition(&format!("true And {failing_function}"))
+                .is_err()
+        );
+
+        assert!(
+            evaluator
+                .evaluate_condition("true Or Exists($([System.Int32]::Parse('not-a-number')))")
+                .unwrap()
+        );
+        assert!(
+            evaluator
+                .evaluate_condition("'$([System.IO.Path]::GetFileName('a==b.txt'))' == 'a==b.txt'")
+                .unwrap()
+        );
+        assert!(
+            evaluator
+                .evaluate_condition("HasTrailingSlash('obj(parentheses)/')")
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn is_os_platform_matches_msbuild_platform_names_case_insensitively() -> Result<()> {
         let model = ProjectModel::new();
         let evaluator = ExpressionEvaluator::new(&model);
@@ -1304,6 +1456,12 @@ mod tests {
         );
         assert!(!evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('MacOS'))")?);
         assert!(!evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform('unknown'))")?);
+        assert!(!evaluator.evaluate_condition("$([MSBuild]::IsOSPlatform(' '))")?);
+        assert!(
+            evaluator
+                .evaluate_condition("$([MSBuild]::IsOSPlatform(''))")
+                .is_err()
+        );
         Ok(())
     }
 

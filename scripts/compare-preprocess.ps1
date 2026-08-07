@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "path-normalization.ps1")
 if ([string]::IsNullOrWhiteSpace($RustExecutable)) {
     $executableName = if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
             [System.Runtime.InteropServices.OSPlatform]::Windows)) {
@@ -51,11 +52,7 @@ function Normalize-PreprocessedOutput {
             @{ Path = $SdkPath; Token = "<MSBUILD_SDKS_PATH>" }
         )) {
         if (-not [string]::IsNullOrWhiteSpace($replacement.Path)) {
-            $content = [regex]::Replace(
-                $content,
-                [regex]::Escape($replacement.Path),
-                $replacement.Token,
-                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $content = Replace-PathForComparison $content $replacement.Path $replacement.Token
         }
     }
     [System.IO.File]::WriteAllText($NormalizedPath, $content.Replace("`n", [Environment]::NewLine))

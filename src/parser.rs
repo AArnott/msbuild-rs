@@ -53,10 +53,16 @@ impl ProjectParser {
                         "Project" => {
                             // Root element, continue parsing
                         }
-                        "PropertyGroup" if self.should_process_conditional(&attributes)? => {
+                        "PropertyGroup"
+                            if current_target.is_none()
+                                && self.should_process_conditional(&attributes)? =>
+                        {
                             in_property_group = true;
                         }
-                        "ItemGroup" if self.should_process_conditional(&attributes)? => {
+                        "ItemGroup"
+                            if current_target.is_none()
+                                && self.should_process_conditional(&attributes)? =>
+                        {
                             in_item_group = true;
                         }
                         "Target" => {
@@ -79,7 +85,7 @@ impl ProjectParser {
                                 tasks: Vec::new(),
                             });
                         }
-                        "Import" => {
+                        "Import" if current_target.is_none() => {
                             if self.should_process_conditional(&attributes)?
                                 && let Some(project) = attributes.get("Project")
                             {
@@ -89,7 +95,7 @@ impl ProjectParser {
                                 });
                             }
                         }
-                        "UsingTask" => {
+                        "UsingTask" if current_target.is_none() => {
                             if let (Some(task_name), Some(assembly)) =
                                 (attributes.get("TaskName"), attributes.get("AssemblyName"))
                             {
@@ -106,18 +112,23 @@ impl ProjectParser {
                             });
                         }
                         property_name
-                            if in_property_group
+                            if current_target.is_none()
+                                && in_property_group
                             // Only set property name if there's no condition or condition is true
                             && self.should_process_conditional(&attributes)? =>
                         {
                             current_property_name = Some(property_name.to_string());
                             current_property_value.clear();
                         }
-                        metadata_name if in_item_group && current_item_type.is_some() => {
+                        metadata_name
+                            if current_target.is_none()
+                                && in_item_group
+                                && current_item_type.is_some() =>
+                        {
                             current_metadata_name = Some(metadata_name.to_string());
                             current_metadata_value.clear();
                         }
-                        item_type if in_item_group => {
+                        item_type if current_target.is_none() && in_item_group => {
                             current_item_type = Some(item_type.to_string());
                             current_item_metadata.clear();
                             current_item_include = attributes.get("Include").cloned();
@@ -133,14 +144,17 @@ impl ProjectParser {
                     let name = std::str::from_utf8(name_bytes.as_ref())?;
                     let attributes = self.parse_attributes(e)?;
 
-                    if name == "Import" && self.should_process_conditional(&attributes)? {
+                    if name == "Import"
+                        && current_target.is_none()
+                        && self.should_process_conditional(&attributes)?
+                    {
                         if let Some(project) = attributes.get("Project") {
                             self.model.add_import(Import {
                                 project: project.clone(),
                                 condition: attributes.get("Condition").cloned(),
                             });
                         }
-                    } else if in_item_group {
+                    } else if current_target.is_none() && in_item_group {
                         // This is an item definition
                         if let Some(include) = attributes.get("Include") {
                             self.process_item(name.to_string(), include.clone(), HashMap::new())?;
@@ -182,7 +196,8 @@ impl ProjectParser {
                             }
                         }
                         property_name
-                            if in_property_group
+                            if current_target.is_none()
+                                && in_property_group
                                 && current_property_name.as_ref()
                                     == Some(&property_name.to_string()) =>
                         {
@@ -194,7 +209,8 @@ impl ProjectParser {
                             current_property_value.clear();
                         }
                         metadata_name
-                            if in_item_group
+                            if current_target.is_none()
+                                && in_item_group
                                 && current_metadata_name.as_ref()
                                     == Some(&metadata_name.to_string()) =>
                         {
@@ -204,7 +220,8 @@ impl ProjectParser {
                             current_metadata_value.clear();
                         }
                         item_type
-                            if in_item_group
+                            if current_target.is_none()
+                                && in_item_group
                                 && current_item_type.as_ref() == Some(&item_type.to_string()) =>
                         {
                             // Process item after we have all properties

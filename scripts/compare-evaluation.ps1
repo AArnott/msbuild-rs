@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "path-normalization.ps1")
 
 if ([string]::IsNullOrWhiteSpace($RustExecutable)) {
     $executableName = if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
@@ -31,17 +32,9 @@ function Normalize-Value {
 
     # Only replace machine-specific roots. All other text, ordering, and
     # separators remain significant to the comparison.
-    $normalized = [regex]::Replace(
-        $Value,
-        [regex]::Escape($FixtureDirectory),
-        "<FIXTURE_DIRECTORY>",
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $normalized = Replace-PathForComparison $Value $FixtureDirectory "<FIXTURE_DIRECTORY>"
     if (-not [string]::IsNullOrWhiteSpace($script:SdkPath)) {
-        $normalized = [regex]::Replace(
-            $normalized,
-            [regex]::Escape($script:SdkPath),
-            "<MSBUILD_SDKS_PATH>",
-            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $normalized = Replace-PathForComparison $normalized $script:SdkPath "<MSBUILD_SDKS_PATH>"
     }
     return $normalized
 }

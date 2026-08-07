@@ -25,12 +25,16 @@ jobs:
       - name: Set up pinned .NET SDK
         uses: actions/setup-dotnet@v5
         with:
+          dotnet-version: 10.0.302
           global-json-file: global.json
 
       - name: Log .NET SDK and MSBuild SDK path
         shell: pwsh
         run: |
           dotnet --info
+          if ((dotnet --version).Trim() -cne "10.0.302") {
+            throw "Expected .NET SDK 10.0.302."
+          }
           $sdkPath = (dotnet msbuild sample_projects/simple.proj -nologo -getProperty:MSBuildSDKsPath).Trim()
           Write-Host "MSBuildSDKsPath=$sdkPath"
 
@@ -62,6 +66,10 @@ jobs:
         run: |
           $executable = if ($IsWindows) { "target/debug/msbuild-rs.exe" } else { "target/debug/msbuild-rs" }
           ./scripts/compare-evaluation.ps1 -Fixture fixtures/evaluation/basic/fixture.json -RustExecutable $executable
+
+      - name: Test path normalization
+        shell: pwsh
+        run: ./scripts/tests/path-normalization.tests.ps1
 
       - name: Run demo mode
         run: cargo run -- --demo

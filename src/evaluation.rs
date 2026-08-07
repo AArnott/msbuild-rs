@@ -285,7 +285,10 @@ mod tests {
   <PropertyGroup><Base>base</Base><Derived>$(Base)-value</Derived></PropertyGroup>
   <Import Project="values.props" />
   <ItemGroup><Compile Include="Program.cs"><Kind>source</Kind></Compile></ItemGroup>
-  <Target Name="Build"><Error Text="Targets must not run during a query" /></Target>
+  <Target Name="Build">
+    <ItemGroup><Compile Include="Generated.cs" /></ItemGroup>
+    <Error Text="Targets must not run during a query" />
+  </Target>
 </Project>"#,
         )?;
 
@@ -300,6 +303,7 @@ mod tests {
         assert_eq!(result.properties["Imported"], "from-import");
         assert_eq!(result.items["Compile"][0].identity, "Program.cs");
         assert_eq!(result.items["Compile"][0].metadata["Kind"], "source");
+        assert_eq!(result.items["Compile"].len(), 1);
         Ok(())
     }
 }

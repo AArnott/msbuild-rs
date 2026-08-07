@@ -83,8 +83,8 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 ### Imports and Project Structure
 
 - [x] Resolve imports relative to the importing file.
-- [x] Recursively process imports in document order at their source location.
-- [x] Support deterministic import globs and conditional imports.
+- [ ] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
+- [x] Support deterministic preprocessing of import globs and conditional imports.
 - [ ] Honor `ImportGroup` conditions.
 - [ ] Detect duplicate and cyclic imports with compatible diagnostics.
 - [ ] Implement `Choose`, `When`, and `Otherwise`.
@@ -103,7 +103,6 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 - [ ] Each completed feature has a minimal standalone project fixture.
 - [x] Capture queried properties and items from conventional MSBuild for semantic comparison.
 - [x] Normalize machine-specific paths before comparing outputs.
-- [ ] Cover Windows and a non-Windows platform in CI.
 - [x] Cover Windows and a non-Windows platform in CI.
 - [x] Keep execution/task performance separate from evaluation/preprocessing performance.
 

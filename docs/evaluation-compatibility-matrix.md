@@ -7,7 +7,7 @@ claim full upstream parity.
 
 | Area | Upstream test file + method | Local port / fixture | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Basic property expansion and order | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `UsePropertyBeforeSet` | `fixtures/evaluation/basic` (`Base`, `Derived`) | representative | Queried through `compare-evaluation.ps1`. |
+| Basic property expansion | — | `fixtures/evaluation/basic` (`Base`, `Derived`) | partial | Covers only a property that refers to an earlier assignment. `UsePropertyBeforeSet` and document-order semantics remain backlog. |
 | Property conditions | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `UsePropertyInCondition` | `fixtures/evaluation/basic` (`ConditionalValue`) | representative | Exercises a true property condition. |
 | Last assignment / document order | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `EmptyPropertyIsThenSet` | — | backlog | Needs a parity fixture after evaluator ordering is completed. |
 | Recursive properties and cycles | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `SetPropertyToItself` | — | backlog | Query projection expands supported references; cycle handling remains incomplete. |
@@ -26,9 +26,9 @@ claim full upstream parity.
 | `Exclude`, `Remove`, and `Update` | `src/Build.UnitTests/Evaluation/ItemEvaluation_Tests.cs` — `RemoveRespectsItemTransform` | — | backlog | Operations are not implemented. |
 | Wildcards and recursive globs | `src/Build.UnitTests/Evaluation/ItemGlobs_Tests.cs` — `DocumentOrderIsPreserved` | — | backlog | Escaping and lazy glob behavior remain. |
 | Item definition ordering | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `ItemDefinitionPredecessorToItem` | — | backlog | Item definitions are not evaluated. |
-| Relative import resolution | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `VerifyLoadingImportScenarios` | `fixtures/evaluation/basic/values.props` | representative | Query fixture verifies a relative import. |
+| Relative import resolution | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `VerifyLoadingImportScenarios` | `fixtures/evaluation/basic/values.props` | partial | Covers loading one relative import only; source-location ordering and conditions that depend on parent project state remain backlog. |
 | Import duplicates/cycles | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `RejectCircularImportsWithCircularImports` | — | backlog | Preprocessor detects cycles; evaluator diagnostics need parity. |
-| Conditional import and import glob | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `ImportWildcardsRelative` | `src/preprocess.rs` tests | representative | Deterministic preprocessing only. |
+| Conditional import and import glob | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `ImportWildcardsRelative` | `src/preprocess.rs` tests | partial | Deterministic preprocessing only; evaluator import ordering and parent-state conditions remain backlog. |
 | `ImportGroup` conditions | `src/Build.UnitTests/Evaluation/Preprocessor_Tests.cs` — `ImportGroupDoubleChildPlusCondition` | — | backlog | Not yet honored. |
 | `Choose` / `When` / `Otherwise` | `src/Build.UnitTests/Evaluation/Evaluator_Tests.cs` — `VerifyConditionsInsideOutsideTargets` | — | backlog | Project-structure selection is not implemented. |
 | Implicit SDK imports | `src/Build.UnitTests/Evaluation/ProjectSdkImplicitImport_Tests.cs` — `SdkImportsAreInLogicalProject` | — | backlog | The preprocessor has focused synthetic tests; an installed-SDK parity fixture is deferred because current SDK props use unsupported property methods. |

@@ -140,7 +140,39 @@
       "metadata": ["RecursiveDir"]
     },
     {
+      "type": "TerminalStarDirectory",
+      "metadata": []
+    },
+    {
+      "type": "TerminalRecursiveDirectory",
+      "metadata": []
+    },
+    {
       "type": "StarDot",
+      "metadata": []
+    },
+    {
+      "type": "PrefixedStarDot",
+      "metadata": []
+    },
+    {
+      "type": "LogicalDot",
+      "metadata": ["RelativeDir", "FullPath"]
+    },
+    {
+      "type": "LogicalDotDot",
+      "metadata": ["RelativeDir", "FullPath"]
+    },
+    {
+      "type": "LogicalExcludePhysical",
+      "metadata": []
+    },
+    {
+      "type": "LogicalExcludeSame",
+      "metadata": []
+    },
+    {
+      "type": "LogicalRemovePhysical",
       "metadata": []
     },
     {

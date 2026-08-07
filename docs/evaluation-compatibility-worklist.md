@@ -108,19 +108,31 @@ and nonstandard runtime platform identifiers.
 - [x] Evaluate each item operation condition once before expanding its specs,
   then evaluate all candidates and child metadata against the immutable
   pre-operation item vector and batch-apply the result.
+- [x] Reject direct custom and well-known metadata references in item
+  operation-level conditions with `MSB4191`/`MSB4190`, while retaining
+  current-item metadata context for child metadata conditions.
 - [x] Implement deterministic eager `*`, `?`, and recursive `**` item-glob
   expansion from the root project directory, per-Include excludes, recursive
   path metadata, escaped wildcard literals, and platform path/case rules.
 - [x] Use the MSBuild wildcard grammar and project-rooted lexical identity
   matching (including absolute/relative and Windows drive/root-relative
-  equivalence), prune safely excluded recursive directory subtrees, and index
-  exact item mutations without resolving symlinks.
+  equivalence), preserve authored `./`, `../`, and root-relative glob identity
+  separately from normalized traversal paths, prune safely excluded recursive
+  directory subtrees, and index exact item mutations without resolving
+  symlinks.
+- [x] Preserve terminal directory separators so `tree/*/` and `tree/**/`
+  enumerate no files, and apply the extensionless-file special case only to
+  the exact filename pattern `*.*`.
+- [x] Bound exact-mutation identity buckets and item-definition default layers
+  across 10,000 remove/include cycles and 10,000 repeated updates.
 
 Pipeline entries now distinguish retained source metadata, cleared metadata,
-and source-less scalars. This preserves empty transform correlation through
-chained functions, makes explicit separators atomic, and matches escaped
-ordinal distinctness without changing the still-open remaining-item-function
-checkbox above.
+and source-less scalars. Source-independent stages such as `Combine` can
+consume scalars; item-spec modifiers, metadata filters/transforms, `Exists`,
+and `DirectoryName` require source-item capability and fail clearly when it is
+absent. This preserves empty transform correlation through chained functions,
+makes explicit separators atomic, and matches escaped ordinal distinctness
+without changing the still-open remaining-item-function checkbox above.
 - [x] Preserve escaped wildcard/list syntax until classification so `%2A`, `%3F`,
   `%3B`, and `%25NN` are not reinterpreted; only unescaped `*` and `?` classify
   a specification as a wildcard (`[` is literal).

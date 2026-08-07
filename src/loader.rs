@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::escaping::{escape, tokenize_list, unescape_once};
 use crate::evaluation::{ActiveToolset, EvaluationContext};
 use crate::expression::{ExpressionEvaluator, ItemProvenance};
-use crate::item_glob::{ItemSpec, MsBuildGlob, normalized_identity_key};
+use crate::item_glob::{ItemSpec, MsBuildGlob, exclude_literal_matches, normalized_identity_key};
 use crate::object_model::{
     Import, Item, ProjectModel, PropertyMap, Target, Task, is_well_known_metadata,
 };
@@ -115,6 +115,13 @@ struct ItemSpecMatcher {
     literals: HashSet<String>,
     patterns: Vec<MsBuildGlob>,
     fingerprint: String,
+    semantics: ItemSpecMatchSemantics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemSpecMatchSemantics {
+    Exclude,
+    Mutation,
 }
 
 impl ItemSpecMatcher {
@@ -123,6 +130,7 @@ impl ItemSpecMatcher {
             literals: HashSet::new(),
             patterns: Vec::new(),
             fingerprint: String::new(),
+            semantics: ItemSpecMatchSemantics::Exclude,
         }
     }
 
@@ -131,6 +139,7 @@ impl ItemSpecMatcher {
         current_file: &Path,
         project_root: &Path,
         expression: &str,
+        semantics: ItemSpecMatchSemantics,
     ) -> Result<Self> {
         let evaluated =
             ExpressionEvaluator::with_current_file(model, current_file).evaluate(expression)?;
@@ -139,7 +148,12 @@ impl ItemSpecMatcher {
         for spec in tokenize_list(&evaluated)? {
             match ItemSpec::parse(project_root, spec)? {
                 ItemSpec::Literal { value } => {
-                    literals.insert(normalized_identity_key(project_root, &value));
+                    literals.insert(match semantics {
+                        ItemSpecMatchSemantics::Exclude => value,
+                        ItemSpecMatchSemantics::Mutation => {
+                            normalized_identity_key(project_root, &value)
+                        }
+                    });
                 }
                 ItemSpec::Glob(pattern) => patterns.push(pattern),
             }
@@ -148,19 +162,27 @@ impl ItemSpecMatcher {
             literals,
             patterns,
             fingerprint: evaluated,
+            semantics,
         })
     }
 
     fn matches(&self, project_root: &Path, identity: &str) -> bool {
-        if self
-            .literals
-            .contains(&normalized_identity_key(project_root, identity))
-        {
+        let literal_match = match self.semantics {
+            ItemSpecMatchSemantics::Exclude => self
+                .literals
+                .iter()
+                .any(|literal| exclude_literal_matches(project_root, literal, identity)),
+            ItemSpecMatchSemantics::Mutation => self
+                .literals
+                .contains(&normalized_identity_key(project_root, identity)),
+        };
+        if literal_match {
             return true;
         }
-        self.patterns
-            .iter()
-            .any(|pattern| pattern.matches(identity))
+        self.patterns.iter().any(|pattern| match self.semantics {
+            ItemSpecMatchSemantics::Exclude => pattern.matches_exclude(identity),
+            ItemSpecMatchSemantics::Mutation => pattern.matches(identity),
+        })
     }
 }
 
@@ -176,6 +198,70 @@ fn item_path_sort_key(escaped_identity: &str) -> (String, String) {
         identity.clone()
     };
     (folded, identity)
+}
+
+fn reject_item_operation_metadata_references(condition: &str) -> Result<()> {
+    let mut position = 0;
+    let start = loop {
+        let Some(relative_start) = condition[position..].find(['@', '%']) else {
+            return Ok(());
+        };
+        let start = position + relative_start;
+        if condition.as_bytes().get(start + 1) != Some(&b'(') {
+            position = start + 1;
+            continue;
+        }
+        if condition.as_bytes()[start] == b'@' {
+            position = find_expression_end(condition, start + 1).unwrap_or(start + 1) + 1;
+            continue;
+        }
+        break start;
+    };
+    let Some(relative_end) = condition[start + 2..].find(')') else {
+        return Ok(());
+    };
+    let end = start + 2 + relative_end;
+    let expression = &condition[start + 2..end];
+    let name = expression
+        .rsplit_once('.')
+        .map_or(expression, |(_, name)| name);
+    let position = condition[..start].chars().count();
+    if is_well_known_metadata(name) {
+        bail!(
+            "MSB4190: The reference to the built-in metadata \"{name}\" at position {position} is not allowed in this condition \"{condition}\"."
+        );
+    }
+    bail!(
+        "MSB4191: The reference to custom metadata \"{name}\" at position {position} is not allowed in this condition \"{condition}\"."
+    );
+}
+
+fn find_expression_end(value: &str, opening_parenthesis: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut position = opening_parenthesis + 1;
+    while position < value.len() {
+        let character = value[position..].chars().next()?;
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+        } else {
+            match character {
+                '\'' | '"' => quote = Some(character),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(position);
+                    }
+                }
+                _ => {}
+            }
+        }
+        position += character.len_utf8();
+    }
+    None
 }
 
 impl SdkReference {
@@ -1011,11 +1097,13 @@ impl EvaluationState {
         if !group_eligible {
             return Ok(());
         }
-        if let Some(condition) = &item.condition
-            && !ExpressionEvaluator::with_current_file(&self.model, current_file)
+        if let Some(condition) = &item.condition {
+            reject_item_operation_metadata_references(condition)?;
+            if !ExpressionEvaluator::with_current_file(&self.model, current_file)
                 .evaluate_condition(condition)?
-        {
-            return Ok(());
+            {
+                return Ok(());
+            }
         }
         if item.include.is_some() {
             self.include_items(item, current_file)
@@ -1039,7 +1127,15 @@ impl EvaluationState {
             .unwrap_or_else(|| PathBuf::from("."));
         let excludes = item.exclude.as_ref().map_or_else(
             || Ok(ItemSpecMatcher::empty()),
-            |exclude| ItemSpecMatcher::evaluate(&self.model, current_file, &project_root, exclude),
+            |exclude| {
+                ItemSpecMatcher::evaluate(
+                    &self.model,
+                    current_file,
+                    &project_root,
+                    exclude,
+                    ItemSpecMatchSemantics::Exclude,
+                )
+            },
         )?;
         let defaults = self.model.item_defaults(&item.item_type);
         let evaluation_directory = project_root.clone();
@@ -1130,12 +1226,16 @@ impl EvaluationState {
                 .then(|| normalized_identity_key(&project_root, &candidate.name));
             let index = self.model.add_item(candidate);
             if let Some(identity_key) = identity_key {
-                self.item_identity_index
+                let bucket = self
+                    .item_identity_index
                     .get_mut(&item_type_key)
                     .expect("the identity index was checked before appending the item")
                     .entry(identity_key)
-                    .or_default()
-                    .push(index);
+                    .or_default();
+                bucket.push(index);
+                #[cfg(test)]
+                self.model
+                    .observe_identity_bucket(bucket.len(), bucket.capacity());
             }
         }
         Ok(())
@@ -1153,15 +1253,17 @@ impl EvaluationState {
             item.remove
                 .as_deref()
                 .expect("remove operation was selected"),
+            ItemSpecMatchSemantics::Mutation,
         )?;
         let removals = self.matching_item_indices(&item.item_type, &matcher, &project_root);
         if let Some(items) = self.model.get_items_mut(&item.item_type) {
-            for index in removals {
-                if let Some(candidate) = items.get_mut(index) {
+            for index in &removals {
+                if let Some(candidate) = items.get_mut(*index) {
                     candidate.deactivate();
                 }
             }
         }
+        self.remove_inactive_identity_indices(&item.item_type, &matcher, &removals);
         Ok(())
     }
 
@@ -1177,6 +1279,7 @@ impl EvaluationState {
             item.update
                 .as_deref()
                 .expect("update operation was selected"),
+            ItemSpecMatchSemantics::Mutation,
         )?;
         let indices = self.matching_item_indices(&item.item_type, &matcher, &project_root);
         let defaults = self.model.item_defaults(&item.item_type);
@@ -1223,18 +1326,19 @@ impl EvaluationState {
         let mut matches = BTreeSet::new();
         if !matcher.literals.is_empty() {
             self.ensure_item_identity_index(item_type, project_root);
+            let active_items = self.model.get_items(item_type);
             if let Some(index) = self
                 .item_identity_index
-                .get(&item_type.to_ascii_lowercase())
+                .get_mut(&item_type.to_ascii_lowercase())
             {
                 for literal in &matcher.literals {
-                    if let Some(indices) = index.get(literal) {
-                        matches.extend(indices.iter().copied().filter(|candidate_index| {
-                            self.model
-                                .get_items(item_type)
+                    if let Some(indices) = index.get_mut(literal) {
+                        indices.retain(|candidate_index| {
+                            active_items
                                 .and_then(|items| items.get(*candidate_index))
                                 .is_some_and(Item::is_active)
-                        }));
+                        });
+                        matches.extend(indices.iter().copied());
                     }
                 }
             }
@@ -1273,7 +1377,39 @@ impl EvaluationState {
                 }
             }
         }
+        #[cfg(test)]
+        for bucket in index.values() {
+            self.model
+                .observe_identity_bucket(bucket.len(), bucket.capacity());
+        }
         self.item_identity_index.insert(item_type_key, index);
+    }
+
+    fn remove_inactive_identity_indices(
+        &mut self,
+        item_type: &str,
+        matcher: &ItemSpecMatcher,
+        removals: &[usize],
+    ) {
+        let Some(index) = self
+            .item_identity_index
+            .get_mut(&item_type.to_ascii_lowercase())
+        else {
+            return;
+        };
+        if matcher.patterns.is_empty() {
+            for literal in &matcher.literals {
+                if let Some(bucket) = index.get_mut(literal) {
+                    bucket.clear();
+                }
+            }
+            return;
+        }
+
+        let removals = removals.iter().copied().collect::<HashSet<_>>();
+        for bucket in index.values_mut() {
+            bucket.retain(|item_index| !removals.contains(item_index));
+        }
     }
 
     fn expand_item_glob(

@@ -264,9 +264,20 @@ impl Item {
     }
 
     pub(crate) fn apply_update_defaults(&mut self, defaults: Arc<MetadataMap>) {
-        if !defaults.is_empty() {
+        if !defaults.is_empty()
+            && !Arc::ptr_eq(&defaults, &self.defaults)
+            && !self
+                .inherited_defaults
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &defaults))
+        {
             self.inherited_defaults.insert(0, defaults);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inherited_default_layer_count(&self) -> usize {
+        self.inherited_defaults.len()
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -631,6 +642,10 @@ pub struct ProjectModel {
     pub imports: Vec<Import>,
     pub using_tasks: HashMap<String, String>,
     pub project_file_path: Option<PathBuf>,
+    #[cfg(test)]
+    identity_index_peak_bucket_len: usize,
+    #[cfg(test)]
+    identity_index_peak_bucket_capacity: usize,
 }
 
 impl ProjectModel {
@@ -681,6 +696,21 @@ impl ProjectModel {
         for (_, items) in self.items.iter_mut() {
             items.retain(Item::is_active);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_identity_bucket(&mut self, len: usize, capacity: usize) {
+        self.identity_index_peak_bucket_len = self.identity_index_peak_bucket_len.max(len);
+        self.identity_index_peak_bucket_capacity =
+            self.identity_index_peak_bucket_capacity.max(capacity);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity_index_peak_bucket(&self) -> (usize, usize) {
+        (
+            self.identity_index_peak_bucket_len,
+            self.identity_index_peak_bucket_capacity,
+        )
     }
 
     pub fn item_defaults(&self, item_type: &str) -> Arc<MetadataMap> {

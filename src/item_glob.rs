@@ -18,15 +18,39 @@ pub(crate) enum ItemSpec {
 pub(crate) struct MsBuildGlob {
     project_root: PathBuf,
     fixed_root: PathBuf,
+    logical_fixed_root: PathBuf,
     components: Vec<GlobComponent>,
-    subtree_pattern: Option<Vec<GlobComponent>>,
-    absolute_identity: bool,
+    logical_root: LogicalRoot,
+    logical_components: Vec<GlobComponent>,
+    logical_subtree_pattern: Option<Vec<GlobComponent>>,
+    terminal_separator: bool,
 }
 
 #[derive(Debug, Clone)]
 struct GlobComponent {
     pattern: String,
     recursive: bool,
+}
+
+impl GlobComponent {
+    fn new(pattern: String) -> Self {
+        Self {
+            recursive: pattern == "**",
+            pattern,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogicalRoot {
+    prefix: Option<String>,
+    rooted: bool,
+}
+
+#[derive(Debug)]
+struct LogicalPath {
+    root: LogicalRoot,
+    components: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -56,8 +80,6 @@ impl MsBuildGlob {
     fn parse(project_root: &Path, spec: &str) -> Result<Self> {
         let project_root = lexical_absolute(project_root)?;
         let native_spec = native_path(spec);
-        let spec_path = Path::new(&native_spec);
-        let absolute_identity = spec_path.is_absolute();
         let first_wildcard = native_spec
             .find(['*', '?'])
             .expect("a glob has an authored wildcard");
@@ -69,35 +91,48 @@ impl MsBuildGlob {
         let fixed_part = &native_spec[..fixed_end];
         let wildcard_part = &native_spec[fixed_end..];
         let fixed_root = rooted_lexical_path(&project_root, fixed_part)?;
-        let ended_with_separator = native_spec.ends_with(std::path::MAIN_SEPARATOR);
+        let terminal_separator = native_spec.ends_with(std::path::MAIN_SEPARATOR);
         let mut components = split_components(wildcard_part)
             .into_iter()
-            .map(|pattern| GlobComponent {
-                recursive: pattern == "**",
-                pattern,
-            })
+            .map(GlobComponent::new)
             .collect::<Vec<_>>();
 
         let subtree_pattern = (components.last().is_some_and(|part| part.recursive)
-            && !ended_with_separator)
+            && !terminal_separator)
             .then(|| components[..components.len() - 1].to_vec());
         if subtree_pattern.is_some() {
-            components.push(GlobComponent {
-                pattern: "*.*".to_string(),
-                recursive: false,
-            });
+            components.push(GlobComponent::new("*.*".to_string()));
+        }
+
+        let logical_path = split_logical_path(&native_spec);
+        let mut logical_components = logical_path
+            .components
+            .into_iter()
+            .map(GlobComponent::new)
+            .collect::<Vec<_>>();
+        let logical_subtree_pattern =
+            (logical_components.last().is_some_and(|part| part.recursive) && !terminal_separator)
+                .then(|| logical_components[..logical_components.len() - 1].to_vec());
+        if logical_subtree_pattern.is_some() {
+            logical_components.push(GlobComponent::new("*.*".to_string()));
         }
 
         Ok(Self {
             project_root,
             fixed_root,
+            logical_fixed_root: PathBuf::from(fixed_part),
             components,
-            subtree_pattern,
-            absolute_identity,
+            logical_root: logical_path.root,
+            logical_components,
+            logical_subtree_pattern,
+            terminal_separator,
         })
     }
 
     pub(crate) fn matches(&self, identity: &str) -> bool {
+        if self.terminal_separator {
+            return false;
+        }
         let Ok(candidate) = rooted_lexical_path(&self.project_root, identity) else {
             return false;
         };
@@ -107,18 +142,51 @@ impl MsBuildGlob {
         matches_components(&self.components, &relative, true)
     }
 
-    pub(crate) fn covers_directory(&self, directory: &Path) -> bool {
-        let Some(pattern) = &self.subtree_pattern else {
+    pub(crate) fn matches_exclude(&self, identity: &str) -> bool {
+        if self.terminal_separator {
             return false;
-        };
-        let Some(relative) = relative_components(&self.fixed_root, directory) else {
-            return false;
-        };
+        }
+        let candidate = split_logical_path(&native_path(identity));
+        if logical_root_eq(&self.logical_root, &candidate.root)
+            && matches_components(&self.logical_components, &candidate.components, true)
+        {
+            return true;
+        }
+        physical_exclude_fallback_allowed(
+            &self.logical_root,
+            self.logical_components
+                .first()
+                .is_some_and(|component| component.pattern == "."),
+            has_embedded_parent_pattern(&self.logical_components),
+            &candidate.root,
+            candidate
+                .components
+                .first()
+                .is_some_and(|component| component == "."),
+            has_embedded_parent(&candidate.components),
+        ) && self.matches(identity)
+    }
 
-        (0..=relative.len()).any(|length| matches_components(pattern, &relative[..length], false))
+    pub(crate) fn covers_logical_directory(&self, identity: &str) -> bool {
+        if self.terminal_separator {
+            return false;
+        }
+        let Some(pattern) = &self.logical_subtree_pattern else {
+            return false;
+        };
+        let candidate = split_logical_path(&native_path(identity));
+        if !logical_root_eq(&self.logical_root, &candidate.root) {
+            return false;
+        }
+
+        (0..=candidate.components.len())
+            .any(|length| matches_components(pattern, &candidate.components[..length], false))
     }
 
     pub(crate) fn enumerate(&self, excludes: &[MsBuildGlob]) -> Vec<GlobMatch> {
+        if self.terminal_separator {
+            return Vec::new();
+        }
         let mut paths = Vec::new();
         let mut seen_paths = HashSet::new();
         let mut seen_states = HashSet::new();
@@ -143,12 +211,14 @@ impl MsBuildGlob {
     }
 
     pub(crate) fn identity_for_path(&self, path: &Path) -> String {
-        if self.absolute_identity {
+        let Some(relative) = lexical_relative(&self.fixed_root, path) else {
             return display_path(path);
+        };
+        let mut identity = self.logical_fixed_root.clone();
+        if !relative.as_os_str().is_empty() {
+            identity.push(relative);
         }
-        lexical_relative(&self.project_root, path)
-            .map(|relative| display_path(&relative))
-            .unwrap_or_else(|| display_path(path))
+        display_path(&identity)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -162,9 +232,10 @@ impl MsBuildGlob {
         seen_states: &mut HashSet<(String, usize)>,
         directory_cache: &mut HashMap<PathBuf, DirectoryEntries>,
     ) {
+        let logical_directory = self.identity_for_path(directory);
         if excludes
             .iter()
-            .any(|exclude| exclude.covers_directory(directory))
+            .any(|exclude| exclude.covers_logical_directory(&logical_directory))
         {
             return;
         }
@@ -182,15 +253,19 @@ impl MsBuildGlob {
                 let Some(name) = path.file_name().and_then(OsStr::to_str) else {
                     continue;
                 };
-                if component_matches(name, &component.pattern, true)
-                    && !excludes
-                        .iter()
-                        .any(|exclude| exclude.matches(&display_path(path)))
+                if !component_matches(name, &component.pattern, true) {
+                    continue;
+                }
+                let identity = self.identity_for_path(path);
+                if excludes
+                    .iter()
+                    .any(|exclude| exclude.matches_exclude(&identity))
                 {
-                    let key = path_compare_key(path);
-                    if seen_paths.insert(key) {
-                        paths.push(path.clone());
-                    }
+                    continue;
+                }
+                let key = path_compare_key(path);
+                if seen_paths.insert(key) {
+                    paths.push(path.clone());
                 }
             }
             return;
@@ -267,6 +342,38 @@ pub(crate) fn normalized_identity_key(project_root: &Path, identity: &str) -> St
         })
 }
 
+pub(crate) fn exclude_literal_matches(project_root: &Path, pattern: &str, identity: &str) -> bool {
+    let native_pattern = native_path(pattern);
+    let native_identity = native_path(identity);
+    let pattern = split_logical_path(&native_pattern);
+    let candidate = split_logical_path(&native_identity);
+    if logical_root_eq(&pattern.root, &candidate.root)
+        && pattern.components.len() == candidate.components.len()
+        && pattern
+            .components
+            .iter()
+            .zip(&candidate.components)
+            .all(|(left, right)| path_text_eq(left, right))
+    {
+        return true;
+    }
+    physical_exclude_fallback_allowed(
+        &pattern.root,
+        pattern
+            .components
+            .first()
+            .is_some_and(|component| component == "."),
+        has_embedded_parent(&pattern.components),
+        &candidate.root,
+        candidate
+            .components
+            .first()
+            .is_some_and(|component| component == "."),
+        has_embedded_parent(&candidate.components),
+    ) && normalized_identity_key(project_root, &native_pattern)
+        == normalized_identity_key(project_root, identity)
+}
+
 fn is_legal_glob(spec: &str) -> bool {
     if spec.contains(['\0', '"', '<', '>', '|'])
         || spec.contains("...")
@@ -300,6 +407,123 @@ fn split_components(value: &str) -> Vec<String> {
         .filter(|component| !component.is_empty() && *component != ".")
         .map(str::to_string)
         .collect()
+}
+
+fn split_logical_path(value: &str) -> LogicalPath {
+    let mut remainder = value;
+    let mut root = LogicalRoot {
+        prefix: None,
+        rooted: false,
+    };
+
+    if cfg!(windows) {
+        if let Some(without_prefix) = remainder.strip_prefix(r"\\") {
+            let mut parts = without_prefix.splitn(3, '\\');
+            let server = parts.next().unwrap_or_default();
+            let share = parts.next().unwrap_or_default();
+            if !server.is_empty() && !share.is_empty() {
+                root.prefix = Some(format!(r"\\{server}\{share}"));
+                root.rooted = true;
+                remainder = parts.next().unwrap_or_default();
+            } else {
+                root.rooted = true;
+                remainder = without_prefix.trim_start_matches('\\');
+            }
+        } else if remainder.as_bytes().get(1) == Some(&b':') {
+            root.prefix = Some(remainder[..2].to_string());
+            remainder = &remainder[2..];
+            if remainder.starts_with('\\') {
+                root.rooted = true;
+                remainder = remainder.trim_start_matches('\\');
+            }
+        } else if remainder.starts_with('\\') {
+            root.rooted = true;
+            remainder = remainder.trim_start_matches('\\');
+        }
+    } else if remainder.starts_with('/') {
+        root.rooted = true;
+        remainder = remainder.trim_start_matches('/');
+    }
+
+    LogicalPath {
+        root,
+        components: remainder
+            .split(std::path::MAIN_SEPARATOR)
+            .filter(|component| !component.is_empty())
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+fn logical_root_eq(left: &LogicalRoot, right: &LogicalRoot) -> bool {
+    left.rooted == right.rooted
+        && match (&left.prefix, &right.prefix) {
+            (Some(left), Some(right)) => path_text_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+}
+
+fn physical_exclude_fallback_allowed(
+    pattern_root: &LogicalRoot,
+    pattern_has_leading_curdir: bool,
+    pattern_has_embedded_parent: bool,
+    candidate_root: &LogicalRoot,
+    candidate_has_leading_curdir: bool,
+    candidate_has_embedded_parent: bool,
+) -> bool {
+    !is_windows_root_relative(pattern_root)
+        && !is_windows_root_relative(candidate_root)
+        && !pattern_has_leading_curdir
+        && !candidate_has_leading_curdir
+        && !pattern_has_embedded_parent
+        && !candidate_has_embedded_parent
+}
+
+fn is_windows_root_relative(root: &LogicalRoot) -> bool {
+    cfg!(windows) && root.rooted && root.prefix.is_none()
+}
+
+fn has_embedded_parent_pattern(components: &[GlobComponent]) -> bool {
+    let mut has_non_parent = false;
+    for component in components {
+        if component.pattern == "." {
+            continue;
+        }
+        if component.pattern == ".." {
+            if has_non_parent {
+                return true;
+            }
+        } else {
+            has_non_parent = true;
+        }
+    }
+    false
+}
+
+fn has_embedded_parent(components: &[String]) -> bool {
+    let mut has_non_parent = false;
+    for component in components {
+        if component == "." {
+            continue;
+        }
+        if component == ".." {
+            if has_non_parent {
+                return true;
+            }
+        } else {
+            has_non_parent = true;
+        }
+    }
+    false
+}
+
+fn path_text_eq(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right) || left.to_lowercase() == right.to_lowercase()
+    } else {
+        left == right
+    }
 }
 
 fn rooted_lexical_path(project_root: &Path, value: &str) -> std::io::Result<PathBuf> {
@@ -467,8 +691,8 @@ fn matches_components(
 }
 
 fn component_matches(value: &str, pattern: &str, is_filename: bool) -> bool {
-    let normalized_pattern = if is_filename {
-        pattern.replace("*.*", "*")
+    let normalized_pattern = if is_filename && pattern == "*.*" {
+        "*".to_string()
     } else {
         pattern.to_string()
     };
@@ -559,6 +783,8 @@ mod tests {
     #[test]
     fn component_matching_uses_msbuild_filename_rules() {
         assert!(component_matches("Dockerfile", "*.*", true));
+        assert!(!component_matches("Dockerfile", "D*.*", true));
+        assert!(component_matches("Dockerfile.txt", "D*.*", true));
         assert!(component_matches("literal[1].txt", "literal[1].txt", true));
         assert!(!component_matches("literal1.txt", "literal[1].txt", true));
         assert!(component_matches("abc.txt", "a?c.*", true));
@@ -588,16 +814,16 @@ mod tests {
         let ItemSpec::Glob(fixed) = ItemSpec::parse(&root, "node_modules/**")? else {
             panic!("expected a glob");
         };
-        assert!(fixed.covers_directory(&root.join("node_modules")));
-        assert!(fixed.covers_directory(&root.join("node_modules").join("package")));
-        assert!(!fixed.covers_directory(&root.join("src")));
+        assert!(fixed.covers_logical_directory("node_modules"));
+        assert!(fixed.covers_logical_directory("node_modules/package"));
+        assert!(!fixed.covers_logical_directory("src"));
 
         let ItemSpec::Glob(anywhere) = ItemSpec::parse(&root, "**/node_modules/**")? else {
             panic!("expected a glob");
         };
-        assert!(anywhere.covers_directory(&root.join("src").join("node_modules")));
-        assert!(anywhere.covers_directory(&root.join("src").join("node_modules").join("package")));
-        assert!(!anywhere.covers_directory(&root.join("src").join("packages")));
+        assert!(anywhere.covers_logical_directory("src/node_modules"));
+        assert!(anywhere.covers_logical_directory("src/node_modules/package"));
+        assert!(!anywhere.covers_logical_directory("src/packages"));
         Ok(())
     }
 }

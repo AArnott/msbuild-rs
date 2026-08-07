@@ -2448,6 +2448,115 @@ mod tests {
     }
 
     #[test]
+    fn item_operation_conditions_reject_metadata_but_child_conditions_retain_context() -> Result<()>
+    {
+        let directory = TempDir::new()?;
+        for (name, operation) in [
+            (
+                "include",
+                r#"<I Include="x" Condition="'%(Identity)' == 'x'" />"#,
+            ),
+            (
+                "exclude",
+                r#"<I Include="x" Exclude="y" Condition="'%(Identity)' == 'x'" />"#,
+            ),
+            (
+                "remove",
+                r#"<I Include="x" /><I Remove="x" Condition="'%(Identity)' == 'x'" />"#,
+            ),
+            (
+                "update",
+                r#"<I Include="x" /><I Update="x" Condition="'%(Identity)' == 'x'"><M>v</M></I>"#,
+            ),
+        ] {
+            let project = write_project(
+                &directory,
+                &format!("{name}.proj"),
+                &format!("<Project><ItemGroup>{operation}</ItemGroup></Project>"),
+            );
+            let error = ProjectEvaluator::new().load_project(project).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains("MSB4190"), "{name}: {error}");
+            assert!(
+                error.contains(
+                    r#"built-in metadata "Identity" at position 1 is not allowed in this condition"#
+                ),
+                "{name}: {error}"
+            );
+        }
+
+        let custom = write_project(
+            &directory,
+            "custom.proj",
+            r#"<Project><ItemGroup><I Include="x" Condition="'%(M)' == 'x'" /></ItemGroup></Project>"#,
+        );
+        let error = ProjectEvaluator::new().load_project(custom).unwrap_err();
+        assert!(format!("{error:#}").contains(
+            r#"MSB4191: The reference to custom metadata "M" at position 1 is not allowed"#
+        ));
+
+        let child = write_project(
+            &directory,
+            "child.proj",
+            r#"<Project><ItemGroup><I Include="a;b"><M Condition="'%(Identity)' == 'a'">yes</M></I></ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(child)?;
+        let items = evaluator.get_model().get_items("I").unwrap();
+        assert_eq!(items[0].get_metadata("M").as_deref(), Some("yes"));
+        assert!(items[1].get_metadata("M").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn source_less_item_pipeline_values_require_compatible_stages() -> Result<()> {
+        let directory = TempDir::new()?;
+        for (name, stage) in [
+            ("identity", "Identity()"),
+            ("full-path", "FullPath()"),
+            ("metadata-filter", "HasMetadata('M')"),
+            ("exists", "Exists()"),
+            ("metadata-transform", "'%(Identity)'"),
+        ] {
+            let project = write_project(
+                &directory,
+                &format!("{name}.proj"),
+                &format!(
+                    r#"<Project><ItemGroup><I Include="a;b"><M>x</M></I><R Include="@(I->Count()->{stage})" /></ItemGroup></Project>"#
+                ),
+            );
+            let error = ProjectEvaluator::new().load_project(project).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("requires source-item context")
+                    && error.contains("source-less value"),
+                "{name}: {error}"
+            );
+        }
+
+        let compatible = write_project(
+            &directory,
+            "compatible.proj",
+            r#"<Project><ItemGroup>
+  <I Include="a;b" />
+  <Combined Include="@(I->Count()->Combine('x'))" />
+  <Distinct Include="@(I->Count()->Distinct())" />
+  <Constant Include="@(I->Count()->'constant')" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(compatible)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model.get_items("Combined").unwrap()[0].name,
+            format!("2{}x", std::path::MAIN_SEPARATOR)
+        );
+        assert_eq!(model.get_items("Distinct").unwrap()[0].name, "2");
+        assert_eq!(model.get_items("Constant").unwrap()[0].name, "constant");
+        Ok(())
+    }
+
+    #[test]
     fn upstream_different_excludes_and_recursive_glob_metadata() -> Result<()> {
         // Exact project-data port of ItemEvaluation_Tests.
         // DifferentExcludesOnSameWildcardProduceDifferentResults, extended with
@@ -2559,6 +2668,7 @@ mod tests {
         )?;
         for path in [
             "Dockerfile",
+            "Dockerfile.txt",
             "tree/root.txt",
             "tree/sub/a.txt",
             "tree/sub/deep/b.txt",
@@ -2582,8 +2692,17 @@ mod tests {
   <DuplicateSnapshot Include="@(Duplicate)" />
   <Duplicate Remove="x" />
   <Terminal Include="tree/**" />
+  <TerminalStar Include="tree/*/" />
+  <TerminalRecursive Include="tree/**/" />
   <StarDot Include="*.*" />
+  <PrefixedStarDot Include="D*.*" />
   <Ordinary Include="tree/s*/*.txt" />
+  <LogicalDot Include="./tree/*.txt" />
+  <LogicalDotDot Include="tree/sub/../*.txt" />
+  <LogicalExcludePhysical Include="tree/sub/../*.txt" Exclude="tree/*.txt" />
+  <LogicalExcludeSame Include="tree/sub/../*.txt" Exclude="tree/sub/../*.txt" />
+  <LogicalRemovePhysical Include="tree/sub/../*.txt" />
+  <LogicalRemovePhysical Remove="tree/*.txt" />
   <Mixed Include="%2A-*.txt" />
   <Illegal Include="tree/**.txt" />
   <LiteralMutation Include="%2A-*.txt;tree/**.txt" />
@@ -2653,15 +2772,42 @@ mod tests {
             ["y"]
         );
         assert_eq!(items("Terminal").len(), 4);
+        assert!(items("TerminalStar").is_empty());
+        assert!(items("TerminalRecursive").is_empty());
         assert!(
             items("StarDot")
                 .iter()
                 .any(|item| item.name == "Dockerfile")
         );
         assert_eq!(
+            items("PrefixedStarDot")
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Dockerfile.txt"]
+        );
+        assert_eq!(
             items("Ordinary")[0].get_metadata("RecursiveDir").as_deref(),
             Some(format!("sub{}", std::path::MAIN_SEPARATOR).as_str())
         );
+        assert_eq!(
+            items("LogicalDot")[0].name,
+            format!(
+                ".{}tree{}root.txt",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            )
+        );
+        let logical_dot_dot = format!(
+            "tree{}sub{}..{}root.txt",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
+        assert_eq!(items("LogicalDotDot")[0].name, logical_dot_dot);
+        assert_eq!(items("LogicalExcludePhysical")[0].name, logical_dot_dot);
+        assert!(items("LogicalExcludeSame").is_empty());
+        assert!(items("LogicalRemovePhysical").is_empty());
         assert_eq!(items("Mixed")[0].name, "*-*.txt");
         assert_eq!(items("Illegal")[0].name, "tree/**.txt");
         assert_eq!(items("LiteralMutation")[0].name, "tree/**.txt");
@@ -2724,6 +2870,14 @@ mod tests {
             .into_owned();
         let drive_relative = format!("{current_drive}__msbuild_rs_drive_probe__\\x.txt");
         let drive_absolute = display_path(&std::path::absolute(&drive_relative)?);
+        fs::write(directory.path().join("root-relative.txt"), "")?;
+        let directory_spelling = display_path(directory.path());
+        let root_relative_directory = directory_spelling
+            .strip_prefix(drive.as_ref())
+            .expect("temporary directory should be on its reported drive");
+        let root_relative_glob = format!(r"{root_relative_directory}\*.txt");
+        let root_relative_identity = format!(r"{root_relative_directory}\root-relative.txt");
+        let absolute_glob_file = display_path(&directory.path().join("root-relative.txt"));
         let project = write_project(
             &directory,
             "paths.proj",
@@ -2733,6 +2887,10 @@ mod tests {
   <ReverseRoot Include="{root_absolute}" /><ReverseRoot Remove="{root_relative}" />
   <Drive Include="{drive_relative}" /><Drive Remove="{drive_absolute}" />
   <ReverseDrive Include="{drive_absolute}" /><ReverseDrive Remove="{drive_relative}" />
+  <RootGlob Include="{root_relative_glob}" />
+  <RootGlobExcludeAbsolute Include="{root_relative_glob}" Exclude="{absolute_glob_file}" />
+  <RootGlobRemoveAbsolute Include="{root_relative_glob}" />
+  <RootGlobRemoveAbsolute Remove="{absolute_glob_file}" />
 </ItemGroup></Project>"#
             ),
         );
@@ -2746,6 +2904,24 @@ mod tests {
                     .is_none_or(Vec::is_empty)
             );
         }
+        assert_eq!(
+            evaluator.get_model().get_items("RootGlob").unwrap()[0].name,
+            root_relative_identity
+        );
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_items("RootGlobExcludeAbsolute")
+                .unwrap()[0]
+                .name,
+            root_relative_identity
+        );
+        assert!(
+            evaluator
+                .get_model()
+                .get_items("RootGlobRemoveAbsolute")
+                .is_none_or(Vec::is_empty)
+        );
         Ok(())
     }
 
@@ -2881,6 +3057,80 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(60),
             "10,000 separate updates and removes took {elapsed:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_ten_thousand_remove_include_churn_compacts_identity_buckets() -> Result<()> {
+        let directory = TempDir::new()?;
+        let mut content = String::from("<Project><ItemGroup><Scale Include=\"x\" />");
+        for _ in 0..10_000 {
+            content.push_str("<Scale Remove=\"x\" /><Scale Include=\"x\" />");
+        }
+        content.push_str("</ItemGroup></Project>");
+        let project = write_project(&directory, "churn.proj", &content);
+        let started = std::time::Instant::now();
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let elapsed = started.elapsed();
+        let model = evaluator.get_model();
+        assert_eq!(model.get_items("Scale").unwrap().len(), 1);
+        let (peak_len, peak_capacity) = model.identity_index_peak_bucket();
+        eprintln!(
+            "10,000 remove/include churn: {elapsed:?}; identity bucket peak len/capacity: {peak_len}/{peak_capacity}"
+        );
+        assert!(
+            peak_len <= 2,
+            "inactive identity slots accumulated: {peak_len}"
+        );
+        assert!(
+            peak_capacity <= 8,
+            "identity bucket allocation grew unexpectedly: {peak_capacity}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "10,000 remove/include cycles took {elapsed:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_repeated_update_deduplicates_item_definition_layers() -> Result<()> {
+        let directory = TempDir::new()?;
+        let mut content = String::from(
+            "<Project><ItemDefinitionGroup><Scale><Base>base</Base></Scale></ItemDefinitionGroup><ItemGroup><Scale Include=\"x\" /></ItemGroup><ItemDefinitionGroup><Scale><Later>later</Later></Scale></ItemDefinitionGroup><ItemGroup>",
+        );
+        for _ in 0..10_000 {
+            content.push_str("<Scale Update=\"x\" />");
+        }
+        content.push_str("</ItemGroup></Project>");
+        let project = write_project(&directory, "updates.proj", &content);
+        let started = std::time::Instant::now();
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let evaluation_elapsed = started.elapsed();
+        let item = &evaluator.get_model().get_items("Scale").unwrap()[0];
+        assert_eq!(item.get_metadata("Base").as_deref(), Some("base"));
+        assert_eq!(item.get_metadata("Later").as_deref(), Some("later"));
+        assert_eq!(item.inherited_default_layer_count(), 1);
+
+        let lookup_started = std::time::Instant::now();
+        for _ in 0..10_000 {
+            assert!(item.get_metadata("Missing").is_none());
+        }
+        let lookup_elapsed = lookup_started.elapsed();
+        eprintln!(
+            "10,000 repeated updates: {evaluation_elapsed:?}; 10,000 missing metadata lookups: {lookup_elapsed:?}; inherited layers: {}",
+            item.inherited_default_layer_count()
+        );
+        assert!(
+            evaluation_elapsed < std::time::Duration::from_secs(60),
+            "10,000 repeated updates took {evaluation_elapsed:?}"
+        );
+        assert!(
+            lookup_elapsed < std::time::Duration::from_secs(5),
+            "10,000 missing metadata lookups took {lookup_elapsed:?}"
         );
         Ok(())
     }

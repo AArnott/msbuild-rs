@@ -53,7 +53,16 @@
     </SameOperationUpdate>
     <DuplicateOperation Include="x;x;y" />
     <TerminalRecursive Include="tree/**" />
+    <TerminalStarDirectory Include="tree/*/" />
+    <TerminalRecursiveDirectory Include="tree/**/" />
     <StarDot Include="*.*" />
+    <PrefixedStarDot Include="D*.*" />
+    <LogicalDot Include="./tree/*.txt" />
+    <LogicalDotDot Include="tree/sub/../*.txt" />
+    <LogicalExcludePhysical Include="tree/sub/../*.txt" Exclude="tree/*.txt" />
+    <LogicalExcludeSame Include="tree/sub/../*.txt" Exclude="tree/sub/../*.txt" />
+    <LogicalRemovePhysical Include="tree/sub/../*.txt" />
+    <LogicalRemovePhysical Remove="tree/*.txt" />
     <OrdinaryRecursiveDir Include="tree/s*/*.txt" />
     <MixedEscapedWildcard Include="%2A-*.txt" />
     <IllegalRecursiveWildcard Include="tree/**.txt" />

@@ -41,6 +41,10 @@ impl<'a> ItemProvenance<'a> {
         }
     }
 
+    fn has_source(self) -> bool {
+        !matches!(self, Self::SourceLess)
+    }
+
     fn clear_metadata(self) -> Self {
         match self {
             Self::SourceRetained(source) | Self::MetadataCleared(source) => {
@@ -1058,6 +1062,9 @@ impl<'a> ExpressionEvaluator<'a> {
                 || (stage.starts_with('"') && stage.ends_with('"'))
             {
                 let template = unquote(stage);
+                if template.contains("%(") {
+                    require_source_items(&values, "metadata transform")?;
+                }
                 for value in &mut values {
                     if value.escaped_identity.is_empty() {
                         continue;
@@ -1113,6 +1120,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 values = transformed;
             } else if matches_ignore_ascii_case(method, ITEM_SPEC_MODIFIERS) {
                 require_arguments(method, &arguments, 0)?;
+                require_source_items(&values, method)?;
                 let mut transformed = Vec::with_capacity(values.len());
                 for mut value in values {
                     if value.escaped_identity.is_empty() {
@@ -1135,10 +1143,9 @@ impl<'a> ExpressionEvaluator<'a> {
                             )
                             .map(Cow::into_owned)
                             .unwrap_or_default(),
-                        ItemProvenance::SourceLess if method.eq_ignore_ascii_case("Identity") => {
-                            value.escaped_identity.clone()
+                        ItemProvenance::SourceLess => {
+                            unreachable!("source capability is checked before item-spec modifiers")
                         }
-                        ItemProvenance::SourceLess => String::new(),
                     };
                     if !value.escaped_identity.is_empty() {
                         transformed.push(value);
@@ -1170,6 +1177,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 }];
             } else if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
                 require_arguments(method, &arguments, 2)?;
+                require_source_items(&values, method)?;
                 let source_value = values.iter().find(|value| {
                     item_expression_metadata(value, &arguments[0])
                         .is_some_and(|metadata| ordinal_ignore_case(&metadata, &arguments[1]))
@@ -1186,6 +1194,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 }];
             } else if method.eq_ignore_ascii_case("HasMetadata") {
                 require_arguments(method, &arguments, 1)?;
+                require_source_items(&values, method)?;
                 values.retain(|value| {
                     item_expression_metadata(value, &arguments[0])
                         .is_some_and(|metadata| !metadata.is_empty())
@@ -1194,6 +1203,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 || method.eq_ignore_ascii_case("WithoutMetadataValue")
             {
                 require_arguments(method, &arguments, 2)?;
+                require_source_items(&values, method)?;
                 let retain_matches = method.eq_ignore_ascii_case("WithMetadataValue");
                 values.retain(|value| {
                     let matches = item_expression_metadata(value, &arguments[0])
@@ -1207,6 +1217,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 }
             } else if method.eq_ignore_ascii_case("Exists") {
                 require_arguments(method, &arguments, 0)?;
+                require_source_items(&values, method)?;
                 values.retain(|value| {
                     !value.escaped_identity.is_empty()
                         && value
@@ -1216,6 +1227,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 });
             } else if method.eq_ignore_ascii_case("DirectoryName") {
                 require_arguments(method, &arguments, 0)?;
+                require_source_items(&values, method)?;
                 let mut transformed = Vec::with_capacity(values.len());
                 for mut value in values {
                     if value.escaped_identity.is_empty() {
@@ -1327,6 +1339,15 @@ fn item_expression_metadata<'a>(
             .get_metadata_escaped(name)
             .unwrap_or(Cow::Borrowed("")),
     )
+}
+
+fn require_source_items(values: &[EvaluatedItemExpression<'_>], stage: &str) -> Result<()> {
+    if values.iter().any(|value| !value.provenance.has_source()) {
+        bail!(
+            "Item pipeline stage '{stage}' requires source-item context, but a prior stage produced a source-less value"
+        );
+    }
+    Ok(())
 }
 
 fn ordinal_ignore_case(left: &str, right: &str) -> bool {

@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::escaping::{escape, unescape_once};
+use crate::escaping::{DecodedString, EscapedString, escape, unescape_once};
 use crate::object_model::{Item, ProjectModel};
 use crate::properties::this_file_property;
 
@@ -15,6 +15,20 @@ pub struct ExpressionEvaluator<'a> {
     current_file: Option<&'a Path>,
     current_item: Option<&'a Item>,
     current_item_type: Option<&'a str>,
+}
+
+pub(crate) struct EvaluatedItemExpression<'a> {
+    pub source: &'a Item,
+    pub escaped_identity: String,
+}
+
+enum ItemExpressionEvaluation<'a> {
+    Items {
+        values: Vec<EvaluatedItemExpression<'a>>,
+        separator: String,
+        preserves_items: bool,
+    },
+    Scalar(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,50 +653,62 @@ impl<'a> ExpressionEvaluator<'a> {
         if let Some((property, invocation)) = expression.split_once('.')
             && let Some((method, arguments)) = parse_invocation(invocation)
         {
-            let value = self.property_value(property).unwrap_or(Cow::Borrowed(""));
+            let value = EscapedString::new(
+                self.property_value(property)
+                    .unwrap_or(Cow::Borrowed(""))
+                    .into_owned(),
+            )
+            .decode();
             let arguments = split_arguments(arguments)?
                 .into_iter()
                 .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
+                .map(|argument| {
+                    argument.map(|value| EscapedString::new(value).decode().into_string())
+                })
                 .collect::<Result<Vec<_>>>()?;
             let argument = arguments.first().map_or("", |value| value.as_str());
             if let Some(matched) =
                 match_ignore_ascii_case(method, &["Contains", "StartsWith", "EndsWith"])
             {
-                return Ok(match matched {
-                    "Contains" => value.contains(argument),
-                    "StartsWith" => value.starts_with(argument),
-                    _ => value.ends_with(argument),
-                }
-                .to_string());
+                let result = match matched {
+                    "Contains" => value.as_str().contains(argument),
+                    "StartsWith" => value.as_str().starts_with(argument),
+                    _ => value.as_str().ends_with(argument),
+                };
+                return Ok(DecodedString::new(dotnet_bool(result))
+                    .into_escaped()
+                    .into_string());
             }
             if method.eq_ignore_ascii_case("Substring") {
                 if !(1..=2).contains(&arguments.len()) {
                     bail!("Substring expects one or two arguments");
                 }
                 let start = arguments[0].parse::<usize>()?;
-                let characters = value.chars().collect::<Vec<_>>();
+                let characters = value.as_str().chars().collect::<Vec<_>>();
                 let end = if arguments.len() == 2 {
                     start + arguments[1].parse::<usize>()?
                 } else {
                     characters.len()
                 };
-                return characters
+                let result = characters
                     .get(start..end)
                     .map(|characters| characters.iter().collect())
-                    .ok_or_else(|| anyhow!("Substring range {start}..{end} is out of bounds"));
+                    .ok_or_else(|| anyhow!("Substring range {start}..{end} is out of bounds"))?;
+                return Ok(DecodedString::new(result).into_escaped().into_string());
             }
             if method.eq_ignore_ascii_case("ToLower")
                 || method.eq_ignore_ascii_case("ToUpper")
                 || method.eq_ignore_ascii_case("Trim")
             {
                 require_arguments(method, &arguments, 0)?;
-                return Ok(if method.eq_ignore_ascii_case("ToLower") {
-                    value.to_lowercase()
+                let result = if method.eq_ignore_ascii_case("ToLower") {
+                    value.as_str().to_lowercase()
                 } else if method.eq_ignore_ascii_case("ToUpper") {
-                    value.to_uppercase()
+                    value.as_str().to_uppercase()
                 } else {
-                    value.trim().to_string()
-                });
+                    value.as_str().trim().to_string()
+                };
+                return Ok(DecodedString::new(result).into_escaped().into_string());
             }
             bail!("Unsupported property method: {method}")
         }
@@ -721,6 +747,14 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 
     fn evaluate_static_function(&self, expression: &str, depth: usize) -> Result<String> {
+        Ok(
+            DecodedString::new(self.evaluate_static_function_decoded(expression, depth)?)
+                .into_escaped()
+                .into_string(),
+        )
+    }
+
+    fn evaluate_static_function_decoded(&self, expression: &str, depth: usize) -> Result<String> {
         let (type_name, invocation) = expression
             .split_once("]::")
             .ok_or_else(|| anyhow!("Malformed property function: $([{expression})"))?;
@@ -729,18 +763,19 @@ impl<'a> ExpressionEvaluator<'a> {
         let arguments = split_arguments(arguments)?
             .into_iter()
             .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
+            .map(|argument| argument.map(|value| EscapedString::new(value).decode().into_string()))
             .collect::<Result<Vec<_>>>()?;
 
         if type_name.eq_ignore_ascii_case("MSBuild") {
             match method.to_ascii_lowercase().as_str() {
-                "arefeaturesenabled" => Ok("true".to_string()),
+                "arefeaturesenabled" => Ok("True".to_string()),
                 "isrunningfromvisualstudio" => {
                     require_arguments(method, &arguments, 0)?;
-                    Ok("false".to_string())
+                    Ok("False".to_string())
                 }
                 "isosplatform" => {
                     require_arguments(method, &arguments, 1)?;
-                    Ok(is_os_platform(&arguments[0])?.to_string())
+                    Ok(dotnet_bool(is_os_platform(&arguments[0])?))
                 }
                 "versiongreaterthan"
                 | "versiongreaterthanorequals"
@@ -756,7 +791,7 @@ impl<'a> ExpressionEvaluator<'a> {
                         "versionlessthanorequals" => !ordering.is_gt(),
                         _ => ordering.is_eq(),
                     };
-                    Ok(result.to_string())
+                    Ok(dotnet_bool(result))
                 }
                 "getdirectorynameoffileabove" => {
                     require_arguments(method, &arguments, 2)?;
@@ -827,7 +862,7 @@ impl<'a> ExpressionEvaluator<'a> {
                 Ok(display_path(&Path::new(&arguments[0]).join(&arguments[1])))
             } else if method.eq_ignore_ascii_case("IsPathRooted") {
                 require_arguments(method, &arguments, 1)?;
-                Ok(Path::new(&arguments[0]).is_absolute().to_string())
+                Ok(dotnet_bool(Path::new(&arguments[0]).is_absolute()))
             } else if method.eq_ignore_ascii_case("GetDirectoryName") {
                 require_arguments(method, &arguments, 1)?;
                 Ok(Path::new(&arguments[0])
@@ -871,7 +906,42 @@ impl<'a> ExpressionEvaluator<'a> {
         }
     }
 
+    pub(crate) fn evaluate_item_expression_items(
+        &self,
+        input: &str,
+    ) -> Result<Option<Vec<EvaluatedItemExpression<'a>>>> {
+        let input = input.trim();
+        if !input.starts_with("@(") {
+            return Ok(None);
+        }
+        let end = find_matching_parenthesis(input, 1)?;
+        if end + 1 != input.len() {
+            return Ok(None);
+        }
+        match self.evaluate_item_pipeline(&input[2..end])? {
+            ItemExpressionEvaluation::Items {
+                values,
+                preserves_items: true,
+                ..
+            } => Ok(Some(values)),
+            _ => Ok(None),
+        }
+    }
+
     fn evaluate_item_expression(&self, expression: &str) -> Result<String> {
+        match self.evaluate_item_pipeline(expression)? {
+            ItemExpressionEvaluation::Items {
+                values, separator, ..
+            } => Ok(values
+                .into_iter()
+                .map(|value| value.escaped_identity)
+                .collect::<Vec<_>>()
+                .join(&separator)),
+            ItemExpressionEvaluation::Scalar(value) => Ok(value),
+        }
+    }
+
+    fn evaluate_item_pipeline(&self, expression: &str) -> Result<ItemExpressionEvaluation<'a>> {
         let (pipeline, separator) = split_item_separator(expression)?;
         let stages = split_item_pipeline(pipeline)?;
         let item_type = stages
@@ -879,42 +949,37 @@ impl<'a> ExpressionEvaluator<'a> {
             .map(|stage| stage.trim())
             .filter(|item_type| !item_type.is_empty())
             .ok_or_else(|| anyhow!("Item expression has no item type"))?;
+        let preserves_items = separator.is_none();
         let separator = separator
             .map(|value| self.evaluate(&unquote(value.trim())))
             .transpose()?
             .unwrap_or_else(|| ";".to_string());
 
         let items = self.model.get_items(item_type);
-        if stages.len() == 1 {
-            return Ok(items
-                .into_iter()
-                .flatten()
-                .map(|item| item.escaped_name.as_str())
-                .collect::<Vec<_>>()
-                .join(&separator));
-        }
-
         if stages.len() == 2
             && let Some((method, arguments)) = parse_invocation(stages[1].trim())
         {
             let arguments = split_arguments(arguments)?;
             if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
                 require_arguments(method, &arguments, 2)?;
-                return Ok(items
-                    .is_some_and(|items| {
+                return Ok(ItemExpressionEvaluation::Scalar(dotnet_bool(
+                    items.is_some_and(|items| {
                         items.iter().any(|item| {
                             item.get_metadata(&arguments[0])
                                 .is_some_and(|value| value.eq_ignore_ascii_case(&arguments[1]))
                         })
-                    })
-                    .to_string());
+                    }),
+                )));
             }
         }
 
         let mut values = items
             .into_iter()
             .flatten()
-            .map(|item| (item, item.escaped_name.clone()))
+            .map(|item| EvaluatedItemExpression {
+                source: item,
+                escaped_identity: item.escaped_name.clone(),
+            })
             .collect::<Vec<_>>();
         for stage in &stages[1..] {
             let stage = stage.trim();
@@ -922,10 +987,14 @@ impl<'a> ExpressionEvaluator<'a> {
                 || (stage.starts_with('"') && stage.ends_with('"'))
             {
                 let template = unquote(stage);
-                for (item, value) in &mut values {
-                    let evaluated = Self::with_item(self.model, self.current_file_path(), item)
-                        .evaluate(&template)?;
-                    *value = escape(&unescape_once(&evaluated));
+                for value in &mut values {
+                    let evaluated =
+                        Self::with_item(self.model, self.current_file_path(), value.source)
+                            .evaluate(&template)?;
+                    value.escaped_identity = EscapedString::new(evaluated)
+                        .decode()
+                        .into_escaped()
+                        .into_string();
                 }
                 continue;
             }
@@ -935,30 +1004,33 @@ impl<'a> ExpressionEvaluator<'a> {
             let arguments = split_arguments(arguments)?;
             if method.eq_ignore_ascii_case("Metadata") {
                 require_arguments(method, &arguments, 1)?;
-                for (item, value) in &mut values {
-                    *value = item
+                for value in &mut values {
+                    value.escaped_identity = value
+                        .source
                         .get_metadata_escaped(&arguments[0])
                         .map(Cow::into_owned)
                         .unwrap_or_default();
                 }
             } else if matches_ignore_ascii_case(method, &["Directory", "Filename", "Extension"]) {
                 require_arguments(method, &arguments, 0)?;
-                for (_, value) in &mut values {
-                    *value = item_spec_modifier(value, method);
+                for value in &mut values {
+                    value.escaped_identity = item_spec_modifier(&value.escaped_identity, method);
                 }
             } else if method.eq_ignore_ascii_case("Distinct") {
                 require_arguments(method, &arguments, 0)?;
                 let mut seen = std::collections::HashSet::new();
-                values.retain(|(_, value)| seen.insert(unescape_once(value).to_ascii_lowercase()));
+                values.retain(|value| {
+                    seen.insert(unescape_once(&value.escaped_identity).to_ascii_lowercase())
+                });
             } else {
                 bail!("Unsupported item function: {method}");
             }
         }
-        Ok(values
-            .into_iter()
-            .map(|(_, value)| value)
-            .collect::<Vec<_>>()
-            .join(&separator))
+        Ok(ItemExpressionEvaluation::Items {
+            values,
+            separator,
+            preserves_items,
+        })
     }
 
     fn evaluate_condition_function(&self, name: &str, arguments: &[String]) -> Result<bool> {
@@ -1157,6 +1229,10 @@ fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
     options
         .iter()
         .any(|option| value.eq_ignore_ascii_case(option))
+}
+
+fn dotnet_bool(value: bool) -> String {
+    if value { "True" } else { "False" }.to_string()
 }
 
 fn item_spec_modifier(escaped_value: &str, modifier: &str) -> String {
@@ -1372,6 +1448,7 @@ mod tests {
             "Compile".to_string(),
             "file1.cs".to_string(),
             Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
             PathBuf::from("project.proj"),
         );
 
@@ -1379,6 +1456,7 @@ mod tests {
             "Compile".to_string(),
             "file2.cs".to_string(),
             Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
             PathBuf::from("project.proj"),
         );
 
@@ -1716,7 +1794,7 @@ mod tests {
             evaluator
                 .evaluate("$([System.IO.Path]::IsPathRooted('C:\\root'))")
                 .unwrap(),
-            cfg!(windows).to_string()
+            dotnet_bool(cfg!(windows))
         );
         assert_eq!(
             evaluator.evaluate("$(SdkVersion.Substring(0, 4))").unwrap(),

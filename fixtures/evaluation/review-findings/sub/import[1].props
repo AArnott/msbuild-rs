@@ -1,0 +1,7 @@
+<Project>
+  <ItemGroup>
+    <Imported Include="relative/file.cs">
+      <Custom>from-import</Custom>
+    </Imported>
+  </ItemGroup>
+</Project>

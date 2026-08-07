@@ -451,6 +451,7 @@ fn parse_dotnet_info(output: &str) -> Option<ActiveToolset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::properties::display_path;
     use std::fmt::Write as _;
     use tempfile::TempDir;
 
@@ -1652,6 +1653,169 @@ mod tests {
         );
         let error = evaluator.load_project(dtd).unwrap_err().to_string();
         assert!(error.contains("DTD declarations and external entities are disabled"));
+        Ok(())
+    }
+
+    #[test]
+    fn review_function_operands_provenance_and_structured_items_match_msbuild() -> Result<()> {
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "review.proj",
+            r#"<Project>
+  <PropertyGroup>
+    <P>a%3Bb</P>
+    <RawProperty>a;b</RawProperty>
+    <EscapedProperty>a%3Bb</EscapedProperty>
+    <ContainsResult>$(P.Contains(';'))</ContainsResult>
+    <ContainsCondition Condition="$(P.Contains(';')) == True">passed</ContainsCondition>
+    <FileNameResult>$([System.IO.Path]::GetFileName('dir%2Ffile.txt'))</FileNameResult>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Source><Default>source-default</Default></Source>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <RawPropertyResult Include="$(RawProperty)" />
+    <EscapedPropertyResult Include="$(EscapedProperty)" />
+    <FunctionResult Include="$(P.Substring(0,3))" />
+    <Raw Include="one"><M>a;b</M><Custom>raw</Custom></Raw>
+    <Authored Include="two"><M>a%3Bb</M><Custom>authored</Custom></Authored>
+    <RawResult Include="@(Raw->Metadata('M'))" />
+    <AuthoredResult Include="@(Authored->Metadata('M'))" />
+    <Source Include="dir/one.cs"><Custom>first</Custom></Source>
+    <Source Include="dir/one.cs"><Custom>second</Custom></Source>
+    <DistinctResult Include="@(Source->Distinct())" />
+    <TransformResult Include="@(Source->'%(Filename).out')" />
+  </ItemGroup>
+</Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model.get_property("ContainsResult").map(String::as_str),
+            Some("True")
+        );
+        assert_eq!(
+            model.get_property("ContainsCondition").map(String::as_str),
+            Some("passed")
+        );
+        assert_eq!(
+            model.get_property("FileNameResult").map(String::as_str),
+            Some("file.txt")
+        );
+        assert_eq!(model.get_items("RawPropertyResult").unwrap().len(), 2);
+        assert_eq!(model.get_items("EscapedPropertyResult").unwrap().len(), 1);
+        assert_eq!(model.get_items("FunctionResult").unwrap()[0].name, "a;b");
+
+        let raw = model.get_items("RawResult").unwrap();
+        assert_eq!(
+            raw.iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(
+            raw.iter()
+                .all(|item| item.get_metadata("Custom").as_deref() == Some("raw"))
+        );
+        let authored = model.get_items("AuthoredResult").unwrap();
+        assert_eq!(authored.len(), 1);
+        assert_eq!(authored[0].name, "a;b");
+        assert_eq!(
+            authored[0].get_metadata("Custom").as_deref(),
+            Some("authored")
+        );
+
+        let distinct = model.get_items("DistinctResult").unwrap();
+        assert_eq!(distinct.len(), 1);
+        assert_eq!(distinct[0].get_metadata("Custom").as_deref(), Some("first"));
+        assert_eq!(
+            distinct[0].get_metadata("Default").as_deref(),
+            Some("source-default")
+        );
+        let transformed = model.get_items("TransformResult").unwrap();
+        assert_eq!(
+            transformed
+                .iter()
+                .map(|item| item.get_metadata("Custom").unwrap().into_owned())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(
+            transformed
+                .iter()
+                .all(|item| item.get_metadata("Default").as_deref() == Some("source-default"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn imported_items_use_root_directory_and_literal_bracket_imports() -> Result<()> {
+        let directory = TempDir::new()?;
+        let import_directory = directory.path().join("sub");
+        fs::create_dir(&import_directory)?;
+        let imported_path = import_directory.join("import[1].props");
+        fs::write(
+            &imported_path,
+            r#"<Project><ItemGroup><Imported Include="relative/file.cs" /></ItemGroup></Project>"#,
+        )?;
+        let project = write_project(
+            &directory,
+            "root.proj",
+            r#"<Project><Import Project="sub/import[1].props" /></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let item = &evaluator.get_model().get_items("Imported").unwrap()[0];
+        let expected_full_path = display_path(&directory.path().join("relative").join("file.cs"));
+        let expected_defining_path = display_path(&imported_path);
+        assert_eq!(
+            item.get_metadata("FullPath").as_deref(),
+            Some(expected_full_path.as_str())
+        );
+        assert_eq!(
+            item.get_metadata("DefiningProjectFullPath").as_deref(),
+            Some(expected_defining_path.as_str())
+        );
+        assert_eq!(
+            item.get_metadata("DefiningProjectName").as_deref(),
+            Some("import[1]")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_metadata_is_rejected_case_insensitively() -> Result<()> {
+        let directory = TempDir::new()?;
+        for (name, contents, metadata) in [
+            (
+                "item.proj",
+                r#"<Project><ItemGroup><I Include="x"><fullPATH>bad</fullPATH></I></ItemGroup></Project>"#,
+                "fullPATH",
+            ),
+            (
+                "definition.proj",
+                r#"<Project><ItemDefinitionGroup><I><identity>bad</identity></I></ItemDefinitionGroup></Project>"#,
+                "identity",
+            ),
+            (
+                "inactive.proj",
+                r#"<Project><ItemGroup Condition="false"><I Include="x"><Filename>bad</Filename></I></ItemGroup></Project>"#,
+                "Filename",
+            ),
+        ] {
+            let project = write_project(&directory, name, contents);
+            let error = ProjectEvaluator::new()
+                .load_project(project)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("MSB4033"), "{error}");
+            assert!(error.contains(metadata), "{error}");
+            assert!(error.contains("reserved item metadata"), "{error}");
+        }
         Ok(())
     }
 

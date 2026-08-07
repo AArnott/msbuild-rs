@@ -113,6 +113,7 @@ mod integration_tests {
             "Source".to_string(),
             "file1.cs".to_string(),
             Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
             PathBuf::from("project.proj"),
         );
 
@@ -120,6 +121,7 @@ mod integration_tests {
             "Source".to_string(),
             "file2.cs".to_string(),
             Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
             PathBuf::from("project.proj"),
         );
 

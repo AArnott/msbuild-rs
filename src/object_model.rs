@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::escaping::{ItemSpecKind, classify_item_spec, escape, unescape_once};
+use crate::escaping::{EscapedString, ItemSpecKind, classify_item_spec, escape, unescape_once};
 use crate::properties::{display_path, lexical_absolute};
 
 /// An insertion-ordered map with O(1) ASCII case-insensitive lookup.
@@ -96,13 +96,14 @@ fn hash_name<H: Hasher>(name: &str, state: &mut H) {
 
 #[derive(Debug, Clone)]
 pub struct EscapedValue {
-    escaped: String,
+    escaped: EscapedString,
     value: String,
 }
 
 impl EscapedValue {
     pub fn new(escaped: String) -> Self {
-        let value = unescape_once(&escaped);
+        let escaped = EscapedString::new(escaped);
+        let value = escaped.decode().into_string();
         Self { escaped, value }
     }
 
@@ -111,7 +112,7 @@ impl EscapedValue {
     }
 
     pub fn escaped(&self) -> &str {
-        &self.escaped
+        self.escaped.as_str()
     }
 }
 
@@ -168,16 +169,12 @@ pub struct MetadataMap {
 #[derive(Debug, Clone)]
 struct MetadataValue {
     value: EscapedValue,
-    escaped_for_expansion: String,
 }
 
 impl MetadataValue {
     fn new(escaped: String) -> Self {
-        let value = EscapedValue::new(escaped);
-        let escaped_for_expansion = escape(value.value());
         Self {
-            value,
-            escaped_for_expansion,
+            value: EscapedValue::new(escaped),
         }
     }
 }
@@ -198,9 +195,7 @@ impl MetadataMap {
     }
 
     pub fn get_escaped(&self, name: &str) -> Option<&str> {
-        self.entries
-            .get(name)
-            .map(|value| value.escaped_for_expansion.as_str())
+        self.entries.get(name).map(|value| value.value.escaped())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &str)> {
@@ -220,6 +215,7 @@ pub struct Item {
     pub metadata: MetadataMap,
     defaults: Arc<MetadataMap>,
     inherited_defaults: Vec<Arc<MetadataMap>>,
+    evaluation_directory: PathBuf,
     defining_project: PathBuf,
 }
 
@@ -228,6 +224,7 @@ impl Item {
         item_type: String,
         escaped_name: String,
         defaults: Arc<MetadataMap>,
+        evaluation_directory: PathBuf,
         defining_project: PathBuf,
     ) -> Self {
         Self {
@@ -238,6 +235,7 @@ impl Item {
             metadata: MetadataMap::new(),
             defaults,
             inherited_defaults: Vec::new(),
+            evaluation_directory,
             defining_project,
         }
     }
@@ -249,13 +247,15 @@ impl Item {
     pub fn copy_for_type(
         &self,
         item_type: String,
+        escaped_name: String,
         defaults: Arc<MetadataMap>,
         defining_project: PathBuf,
     ) -> Self {
         let mut copy = Self::new(
             item_type,
-            self.escaped_name.clone(),
+            escaped_name,
             defaults,
+            self.evaluation_directory.clone(),
             defining_project,
         );
         copy.metadata = self.metadata.clone();
@@ -328,14 +328,10 @@ impl Item {
         }
 
         let item_path = normalized_item_path(&self.name);
-        let project_directory = self
-            .defining_project
-            .parent()
-            .unwrap_or_else(|| Path::new(""));
         let full_path = if item_path.is_absolute() {
             lexical_absolute(&item_path).ok()?
         } else {
-            lexical_absolute(&project_directory.join(&item_path)).ok()?
+            lexical_absolute(&self.evaluation_directory.join(&item_path)).ok()?
         };
 
         if name.eq_ignore_ascii_case("FullPath") {
@@ -434,11 +430,20 @@ const WELL_KNOWN_METADATA: &[&str] = &[
     "RelativeDir",
     "Directory",
     "RecursiveDir",
+    "ModifiedTime",
+    "CreatedTime",
+    "AccessedTime",
     "DefiningProjectFullPath",
     "DefiningProjectDirectory",
     "DefiningProjectName",
     "DefiningProjectExtension",
 ];
+
+pub fn is_well_known_metadata(name: &str) -> bool {
+    WELL_KNOWN_METADATA
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
 
 fn normalized_item_path(value: &str) -> PathBuf {
     if std::path::MAIN_SEPARATOR == '\\' {

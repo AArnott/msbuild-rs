@@ -7,6 +7,52 @@ pub enum ItemSpecKind {
     Glob,
 }
 
+/// Text that still carries MSBuild's `%XX` escaping and is safe to reinsert
+/// into an expression or list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscapedString(String);
+
+impl EscapedString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    pub fn decode(&self) -> DecodedString {
+        DecodedString(unescape_once(&self.0))
+    }
+}
+
+/// Text after exactly one MSBuild unescape operation. It must be escaped again
+/// before being reinserted into an expression or list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedString(String);
+
+impl DecodedString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    pub fn into_escaped(self) -> EscapedString {
+        EscapedString(escape(&self.0))
+    }
+}
+
 /// Decode one MSBuild `%XX` layer.
 ///
 /// Callers retain the escaped source separately whenever list boundaries or
@@ -132,12 +178,48 @@ pub fn classify_item_spec(escaped: &str) -> ItemSpecKind {
             position += 3;
             continue;
         }
-        if matches!(bytes[position], b'*' | b'?' | b'[') {
+        if matches!(bytes[position], b'*' | b'?') {
             return ItemSpecKind::Glob;
         }
         position += 1;
     }
     ItemSpecKind::Literal
+}
+
+/// Convert an escaped MSBuild wildcard specification to `glob` syntax without
+/// turning escaped wildcards or literal brackets into pattern operators.
+pub fn to_glob_pattern(escaped: &str) -> String {
+    let bytes = escaped.as_bytes();
+    let mut pattern = String::with_capacity(escaped.len());
+    let mut literal = String::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position] == b'%'
+            && position + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (hex(bytes[position + 1]), hex(bytes[position + 2]))
+        {
+            literal.push(
+                char::from_u32(high * 16 + low).expect("two hex digits are a valid character"),
+            );
+            position += 3;
+            continue;
+        }
+
+        let character = escaped[position..]
+            .chars()
+            .next()
+            .expect("position must be on a character boundary");
+        if matches!(character, '*' | '?') {
+            pattern.push_str(&glob::Pattern::escape(&literal));
+            literal.clear();
+            pattern.push(character);
+        } else {
+            literal.push(character);
+        }
+        position += character.len_utf8();
+    }
+    pattern.push_str(&glob::Pattern::escape(&literal));
+    pattern
 }
 
 fn push_trimmed<'a>(tokens: &mut Vec<&'a str>, token: &'a str) {
@@ -203,7 +285,19 @@ mod tests {
     fn escaped_wildcards_are_classified_as_literals() {
         assert_eq!(classify_item_spec("%2A"), ItemSpecKind::Literal);
         assert_eq!(classify_item_spec("a%3Fb"), ItemSpecKind::Literal);
+        assert_eq!(classify_item_spec("[literal].txt"), ItemSpecKind::Literal);
         assert_eq!(classify_item_spec("*.cs"), ItemSpecKind::Glob);
         assert_eq!(classify_item_spec("a?.cs"), ItemSpecKind::Glob);
+    }
+
+    #[test]
+    fn glob_patterns_only_treat_unescaped_star_and_question_as_wildcards() {
+        let bracket = glob::Pattern::new(&to_glob_pattern("import[*].props")).unwrap();
+        assert!(bracket.matches("import[one].props"));
+        assert!(!bracket.matches("importone.props"));
+
+        let escaped = glob::Pattern::new(&to_glob_pattern("%2A-*.props")).unwrap();
+        assert!(escaped.matches("*-one.props"));
+        assert!(!escaped.matches("x-one.props"));
     }
 }

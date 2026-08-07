@@ -6,10 +6,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::escaping::{ItemSpecKind, classify_item_spec, tokenize_list, unescape_once};
+use crate::escaping::{
+    ItemSpecKind, classify_item_spec, to_glob_pattern, tokenize_list, unescape_once,
+};
 use crate::evaluation::{ActiveToolset, EvaluationContext};
 use crate::expression::ExpressionEvaluator;
-use crate::object_model::{Import, Item, ProjectModel, PropertyMap, Target, Task};
+use crate::object_model::{
+    Import, Item, ProjectModel, PropertyMap, Target, Task, is_well_known_metadata,
+};
 use crate::properties::{
     display_path, is_reserved_property, lexical_absolute, set_reserved_project_properties,
 };
@@ -888,6 +892,7 @@ impl EvaluationState {
         group_eligible: bool,
         current_file: &Path,
     ) -> Result<()> {
+        reject_reserved_metadata(&item.metadata, current_file)?;
         if !group_eligible {
             return Ok(());
         }
@@ -896,31 +901,34 @@ impl EvaluationState {
         };
 
         let defaults = self.model.item_defaults(&item.item_type);
+        let evaluation_directory = self
+            .model
+            .get_project_directory()
+            .unwrap_or_else(|| PathBuf::from("."));
         let mut candidates = Vec::new();
         for fragment in tokenize_list(&include)? {
-            if let Some(source_type) = simple_item_reference(fragment) {
-                let source_items = self
-                    .model
-                    .get_items(source_type)
-                    .cloned()
-                    .unwrap_or_default();
-                candidates.extend(source_items.into_iter().map(|source| {
-                    source.copy_for_type(
-                        item.item_type.clone(),
-                        defaults.clone(),
-                        current_file.to_path_buf(),
-                    )
-                }));
+            let evaluator = ExpressionEvaluator::with_current_file(&self.model, current_file);
+            if let Some(results) = evaluator.evaluate_item_expression_items(fragment)? {
+                for result in results {
+                    for identity in tokenize_list(&result.escaped_identity)? {
+                        candidates.push(result.source.copy_for_type(
+                            item.item_type.clone(),
+                            identity.to_string(),
+                            defaults.clone(),
+                            current_file.to_path_buf(),
+                        ));
+                    }
+                }
                 continue;
             }
 
-            let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
-                .evaluate(fragment)?;
+            let evaluated = evaluator.evaluate(fragment)?;
             for identity in tokenize_list(&evaluated)? {
                 candidates.push(Item::new(
                     item.item_type.clone(),
                     identity.to_string(),
                     defaults.clone(),
+                    evaluation_directory.clone(),
                     current_file.to_path_buf(),
                 ));
             }
@@ -955,6 +963,7 @@ impl EvaluationState {
         group_eligible: bool,
         current_file: &Path,
     ) -> Result<()> {
+        reject_reserved_metadata(&definition.metadata, current_file)?;
         if !group_eligible {
             return Ok(());
         }
@@ -1057,7 +1066,11 @@ impl EvaluationState {
             );
         }
         let import_kind = classify_item_spec(&evaluated_project_escaped);
-        let evaluated_project = unescape_once(&evaluated_project_escaped);
+        let evaluated_project = if import_kind == ItemSpecKind::Glob {
+            to_glob_pattern(&evaluated_project_escaped)
+        } else {
+            unescape_once(&evaluated_project_escaped)
+        };
         let import_path = lexical_absolute(
             &importing_path
                 .parent()
@@ -1197,13 +1210,18 @@ fn with_trailing_separator(mut value: String) -> String {
     value
 }
 
-fn simple_item_reference(expression: &str) -> Option<&str> {
-    let body = expression.strip_prefix("@(")?.strip_suffix(')')?.trim();
-    (!body.is_empty()
-        && !body.contains("->")
-        && !body.contains(',')
-        && !body.contains(['(', ')', '\'', '"']))
-    .then_some(body)
+fn reject_reserved_metadata(metadata: &[PendingMetadata], current_file: &Path) -> Result<()> {
+    if let Some(metadata) = metadata
+        .iter()
+        .find(|metadata| is_well_known_metadata(&metadata.name))
+    {
+        bail!(
+            "MSB4033: \"{}\" is a reserved item metadata, and cannot be redefined as a custom metadata on the item ({}).",
+            metadata.name,
+            current_file.display()
+        );
+    }
+    Ok(())
 }
 
 fn parse_import(element: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<ImportAttributes> {

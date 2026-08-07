@@ -85,7 +85,11 @@ and nonstandard runtime platform identifiers.
 ### Items and Metadata
 
 - [x] Basic item includes and `@(ItemType)` expansion.
-- [ ] Implement item transforms, including `@(Item->'%(Metadata)')`.
+- [x] Represent direct item copies and the supported metadata transforms /
+  `Metadata`, `Directory`, `Filename`, `Extension`, and `Distinct` functions as
+  structured item-expression results so source custom/default metadata reaches
+  the destination items.
+- [ ] Implement the remaining item-transform and item-function surface.
 - [x] Implement indexed, case-insensitive custom metadata and the `Identity`,
   `FullPath`, `RootDir`, `Filename`, `Extension`, `RelativeDir`, `Directory`,
   `RecursiveDir`, and defining-project well-known metadata.
@@ -95,14 +99,19 @@ and nonstandard runtime platform identifiers.
 - [ ] Implement `Exclude`, `Remove`, and `Update` operations.
 - [ ] Implement wildcard and recursive glob expansion with MSBuild escaping rules.
 - [x] Preserve escaped wildcard/list syntax until classification so `%2A`, `%3F`,
-  `%3B`, and `%25NN` are not reinterpreted.
-- [ ] Implement item functions and item-expression chaining.
+  `%3B`, and `%25NN` are not reinterpreted; only unescaped `*` and `?` classify
+  a specification as a wildcard (`[` is literal).
 - [x] Evaluate item definitions and child metadata/conditions in document order,
   with immutable layered defaults and explicit metadata precedence.
+- [x] Reject attempts to define reserved well-known metadata on items or item
+  definitions, using case-insensitive `MSB4033` diagnostics.
 
 ### Imports and Project Structure
 
 - [x] Resolve imports relative to the importing file.
+- [x] Resolve relative item identities and path well-known metadata against the
+  root project directory while retaining the declaring file for
+  `DefiningProject*` metadata.
 - [x] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
 - [x] Support deterministic preprocessing of import globs and conditional imports.
 - [x] Honor `ImportGroup` and child `Import` conditions using the importing
@@ -123,7 +132,9 @@ and nonstandard runtime platform identifiers.
 ### Escaping and Parsing
 
 - [x] Implement exactly-once MSBuild percent escaping and unescaping while
-  retaining escaped syntax through list and wildcard classification.
+  retaining authored escaped provenance through list/wildcard classification
+  and metadata/property expansion. Function operands cross into decoded text;
+  function results are escaped before expression reinsertion.
 - [x] Preserve XML attribute/property/metadata text semantics, including
   entities, CDATA, and whitespace, while rejecting DTD/external entities.
 - [x] Match indexed case-insensitive property, item, metadata, and function

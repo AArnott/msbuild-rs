@@ -1,0 +1,5 @@
+<Project>
+  <ItemGroup>
+    <WildcardBracketImported Include="wildcard-bracket" />
+  </ItemGroup>
+</Project>

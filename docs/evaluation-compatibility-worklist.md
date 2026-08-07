@@ -34,11 +34,11 @@ The current outputs are not semantically identical: conventional `/pp` preserves
 ### Conditions
 
 - [x] Basic `==` and `!=` comparisons.
-- [ ] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
+- [x] Parse parentheses and boolean `And`/`Or` with MSBuild precedence.
 - [ ] Support relational operators and numeric/version comparisons.
-- [ ] Support boolean coercion, case-insensitive comparisons, and quoted literals.
+- [x] Support boolean coercion, case-insensitive comparisons, and quoted literals.
 - [ ] Implement intrinsic condition functions: `Exists`, `HasTrailingSlash`, and `IsOsPlatform`.
-- [ ] Produce errors for malformed conditions instead of treating arbitrary text as true.
+- [x] Produce errors for malformed conditions instead of treating arbitrary text as true.
 
 ### Items and Metadata
 

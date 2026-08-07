@@ -6,7 +6,7 @@ MSBuild-RS is a Rust implementation of Microsoft's MSBuild project reader and ex
 
 ## Vision
 
-Create a fast, secure, and lightweight MSBuild-compatible build system that enables concurrent builds and follows proper security principles while maintaining compatibility with standard MSBuild project syntax.
+Create a fast, secure, and lightweight MSBuild-compatible build system that enables concurrent builds, follows proper security principles, and maintains compatibility with standard MSBuild project syntax and conventional MSBuild tasks through an isolated task host.
 
 ## Core Requirements
 
@@ -18,7 +18,7 @@ Create a fast, secure, and lightweight MSBuild-compatible build system that enab
   - `<ItemGroup>` - Item collections with metadata support
   - `<Target>` - Build targets with dependencies and conditions
   - `<Import>` - External project file inclusion
-  - `<UsingTask>` - Custom task registration (planned)
+  - `<UsingTask>` - Custom task registration and assembly resolution through the task host (planned)
 - **Attribute Support**: All standard MSBuild attributes including `Condition`, `DependsOnTargets`, `Include`, etc.
 
 ### 2. Expression Evaluation System
@@ -44,7 +44,9 @@ Create a fast, secure, and lightweight MSBuild-compatible build system that enab
   - `Message` - Logging and informational output
   - `Copy` - File copying with relative path support
   - `Error` - Build failure with error messages
-- **Extensible Registry**: Plugin architecture for custom tasks (planned)
+- **Conventional Task Host**: Provide an out-of-process executable that can run under .NET Framework or modern .NET and load conventional MSBuild task assemblies (planned)
+- **Runtime Selection**: Select a compatible task host based on the task assembly and requested runtime, with clear errors when no compatible runtime is available (planned)
+- **Host Protocol**: Exchange evaluated parameters, item metadata, logging events, outputs, and success or failure results over a structured, versioned protocol (planned)
 
 ### 5. Import System
 - **File Inclusion**: Support for `<Import Project="..." />` elements
@@ -93,7 +95,8 @@ pub struct TaskExecutionContext {
 1. **Task Isolation**: Tasks cannot access the full ProjectModel, only passed attributes
 2. **Expression Sandboxing**: Property/item evaluation cannot execute arbitrary code
 3. **Path Security**: All file operations are restricted to project directory context
-4. **No System Access**: Tasks cannot directly access environment variables or system APIs
+4. **Process Boundary**: Conventional MSBuild tasks execute outside the Rust build process in a task host with an explicit input and output contract
+5. **Trust Boundary**: Conventional task assemblies are executable code and may access runtime or system APIs; only trusted assemblies should be loaded, and host policy controls must be extensible
 
 ### Performance Characteristics
 - **Single Pass Parsing**: XML parsed once with intelligent element handling
@@ -190,12 +193,12 @@ msbuild-rs --demo
 ### Current Limitations
 1. **Task Scope**: Limited to built-in tasks (Message, Copy, Error)
 2. **Import Complexity**: Simplified import processing vs full MSBuild
-3. **Custom Tasks**: No custom task assembly loading yet
+3. **Custom Tasks**: No .NET Framework or modern .NET task host for loading conventional MSBuild task assemblies yet
 4. **Property Functions**: No MSBuild property function support
 5. **Wildcard Items**: Basic item inclusion, no advanced wildcards
 
 ### Future Enhancements
-1. **Custom Task Loading**: Assembly loading and task discovery
+1. **Conventional Task Host**: Build a host executable for .NET Framework and modern .NET that resolves `<UsingTask>` declarations, loads conventional MSBuild task assemblies, executes tasks, and returns outputs and log events to MSBuild-RS
 2. **Property Functions**: String manipulation and utility functions
 3. **Advanced Wildcards**: Complex file pattern matching
 4. **NuGet Integration**: Package reference support
@@ -210,6 +213,7 @@ msbuild-rs --demo
 - ✅ Support target dependencies and execution order
 - ✅ Maintain security model (tasks cannot access full project)
 - ✅ Provide proper project directory context
+- Run representative conventional MSBuild tasks through both .NET Framework and modern .NET task hosts without loading managed task assemblies into the Rust process
 
 ### Quality Metrics
 - ✅ Zero compilation warnings
@@ -233,7 +237,7 @@ msbuild-rs --demo
 
 ### Architectural Principles
 1. **Separation of Concerns**: Keep parsing, evaluation, and execution separate
-2. **Security First**: Tasks only access passed parameters
+2. **Security First**: Built-in tasks only access passed parameters, and conventional task assemblies execute across a defined process boundary
 3. **MSBuild Compatibility**: Follow MSBuild semantics where possible
 4. **Extensibility**: Design for future enhancement
 5. **Performance**: Optimize for build speed and memory usage

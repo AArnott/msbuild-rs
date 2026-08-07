@@ -1,6 +1,7 @@
 mod escaping;
 mod evaluation;
 mod expression;
+mod item_glob;
 mod loader;
 mod logger;
 mod object_model;

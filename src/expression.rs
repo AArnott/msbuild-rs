@@ -1046,9 +1046,7 @@ impl<'a> ExpressionEvaluator<'a> {
 
         let mut values = self
             .model
-            .get_items(item_type)
-            .into_iter()
-            .flatten()
+            .iter_items(item_type)
             .map(|item| EvaluatedItemExpression {
                 provenance: ItemProvenance::SourceRetained(item),
                 escaped_identity: item.escaped_name.clone(),

@@ -41,6 +41,35 @@
     <EscapedWildcard Include="tree/%2A.txt" />
     <BracketLiteral Include="tree/literal[1].txt" />
     <EscapedSemicolon Include="semi%3Bcolon.txt" />
+    <OperationCondition Include="a;b" Condition="'@(OperationCondition)' == ''">
+      <Seen>@(OperationCondition)</Seen>
+      <OnlyA Condition="'%(Identity)' == 'a'">yes</OnlyA>
+    </OperationCondition>
+    <ConditionUpdate Include="a;b">
+      <State>old-%(Identity)</State>
+    </ConditionUpdate>
+    <SameOperationUpdate Include="a;b">
+      <State>old-%(Identity)</State>
+    </SameOperationUpdate>
+    <DuplicateOperation Include="x;x;y" />
+    <TerminalRecursive Include="tree/**" />
+    <StarDot Include="*.*" />
+    <OrdinaryRecursiveDir Include="tree/s*/*.txt" />
+    <MixedEscapedWildcard Include="%2A-*.txt" />
+    <IllegalRecursiveWildcard Include="tree/**.txt" />
+    <LiteralMutation Include="%2A-*.txt;tree/**.txt" />
+    <LiteralMutation Update="tree/**.txt">
+      <Updated>yes</Updated>
+    </LiteralMutation>
+    <LiteralMutation Remove="%2A-*.txt" />
+    <OutsideCone Include="../outside.md;tree/root.txt" />
+    <OutsideCone Remove="**/*.md" />
+    <AbsoluteEquivalent Include="$(MSBuildProjectDirectory)/tree/root.txt" />
+    <AbsoluteEquivalent Remove="tree/root.txt" />
+    <PrunedExclude Include="tree/**/*.txt" Exclude="tree/node_modules/**" />
+    <ExcludeCacheA Include="tree/**/*.txt" Exclude="tree/sub/**" />
+    <ExcludeCacheB Include="tree/**/*.txt" Exclude="tree/node_modules/**" />
+    <FalseInvalidGlob Condition="false" Include="tree/**/../*.txt" />
   </ItemGroup>
 
   <ItemGroup>
@@ -48,6 +77,17 @@
       <State>updated-%(Identity)</State>
     </Operation>
     <Operation Remove="@(Operation-&gt;WithMetadataValue('Identity', 'a'))" />
+    <ConditionUpdate Update="a;b" Condition="'@(ConditionUpdate->'%(State)')' == 'old-a;old-b'">
+      <State>new-%(Identity)</State>
+    </ConditionUpdate>
+    <SameOperationUpdate Update="a;b">
+      <Seen>@(SameOperationUpdate->'%(State)')</Seen>
+    </SameOperationUpdate>
+    <DuplicateOperation Update="x">
+      <Updated>yes</Updated>
+    </DuplicateOperation>
+    <DuplicateOperationSnapshot Include="@(DuplicateOperation)" />
+    <DuplicateOperation Remove="x" />
 
     <CountResult Include="@(Source-&gt;Count());@(Missing-&gt;Count());@(Source-&gt;Metadata('Missing')-&gt;Count())" />
     <AnyResult Include="@(Source-&gt;AnyHaveMetadataValue('Kind', 'TRUE'));@(Missing-&gt;AnyHaveMetadataValue('Kind', 'x'))" />

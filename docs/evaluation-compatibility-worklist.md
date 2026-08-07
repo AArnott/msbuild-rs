@@ -105,9 +105,16 @@ and nonstandard runtime platform identifiers.
 - [x] Implement ordered evaluation-time `Exclude`, `Remove`, and `Update`,
   including item-expression/transform match inputs, per-item conditions,
   metadata predecessors, and current item-definition defaults on updates.
+- [x] Evaluate each item operation condition once before expanding its specs,
+  then evaluate all candidates and child metadata against the immutable
+  pre-operation item vector and batch-apply the result.
 - [x] Implement deterministic eager `*`, `?`, and recursive `**` item-glob
   expansion from the root project directory, per-Include excludes, recursive
   path metadata, escaped wildcard literals, and platform path/case rules.
+- [x] Use the MSBuild wildcard grammar and project-rooted lexical identity
+  matching (including absolute/relative and Windows drive/root-relative
+  equivalence), prune safely excluded recursive directory subtrees, and index
+  exact item mutations without resolving symlinks.
 
 Pipeline entries now distinguish retained source metadata, cleared metadata,
 and source-less scalars. This preserves empty transform correlation through

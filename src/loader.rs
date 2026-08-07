@@ -2,16 +2,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::{debug, warn};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::escaping::{
-    ItemSpecKind, classify_item_spec, escape, to_glob_pattern, tokenize_list, unescape_once,
-};
+use crate::escaping::{escape, tokenize_list, unescape_once};
 use crate::evaluation::{ActiveToolset, EvaluationContext};
 use crate::expression::{ExpressionEvaluator, ItemProvenance};
+use crate::item_glob::{ItemSpec, MsBuildGlob, normalized_identity_key};
 use crate::object_model::{
     Import, Item, ProjectModel, PropertyMap, Target, Task, is_well_known_metadata,
 };
@@ -34,6 +33,7 @@ struct EvaluationState {
     render_preprocessed: bool,
     sdk_root: Option<PathBuf>,
     item_glob_cache: HashMap<String, Arc<Vec<ItemGlobMatch>>>,
+    item_identity_index: HashMap<String, HashMap<String, Vec<usize>>>,
 }
 
 #[derive(Debug)]
@@ -113,106 +113,69 @@ struct SdkReference {
 
 struct ItemSpecMatcher {
     literals: HashSet<String>,
-    patterns: Vec<glob::Pattern>,
+    patterns: Vec<MsBuildGlob>,
+    fingerprint: String,
 }
 
 impl ItemSpecMatcher {
-    fn evaluate(model: &ProjectModel, current_file: &Path, expression: &str) -> Result<Self> {
+    fn empty() -> Self {
+        Self {
+            literals: HashSet::new(),
+            patterns: Vec::new(),
+            fingerprint: String::new(),
+        }
+    }
+
+    fn evaluate(
+        model: &ProjectModel,
+        current_file: &Path,
+        project_root: &Path,
+        expression: &str,
+    ) -> Result<Self> {
         let evaluated =
             ExpressionEvaluator::with_current_file(model, current_file).evaluate(expression)?;
         let mut literals = HashSet::new();
         let mut patterns = Vec::new();
         for spec in tokenize_list(&evaluated)? {
-            if classify_item_spec(spec) == ItemSpecKind::Glob {
-                patterns.push(
-                    glob::Pattern::new(&to_glob_pattern(&normalize_escaped_path(spec)))
-                        .with_context(|| format!("Invalid item match pattern '{spec}'"))?,
-                );
-            } else {
-                literals.insert(item_match_key(&unescape_once(spec)));
+            match ItemSpec::parse(project_root, spec)? {
+                ItemSpec::Literal { value } => {
+                    literals.insert(normalized_identity_key(project_root, &value));
+                }
+                ItemSpec::Glob(pattern) => patterns.push(pattern),
             }
         }
-        Ok(Self { literals, patterns })
+        Ok(Self {
+            literals,
+            patterns,
+            fingerprint: evaluated,
+        })
     }
 
-    fn matches(&self, identity: &str) -> bool {
-        let normalized = normalize_item_path(identity);
-        if self.literals.contains(&item_match_key(&normalized)) {
+    fn matches(&self, project_root: &Path, identity: &str) -> bool {
+        if self
+            .literals
+            .contains(&normalized_identity_key(project_root, identity))
+        {
             return true;
         }
-        let options = glob::MatchOptions {
-            case_sensitive: !cfg!(windows),
-            require_literal_separator: true,
-            require_literal_leading_dot: false,
-        };
         self.patterns
             .iter()
-            .any(|pattern| pattern.matches_path_with(Path::new(&normalized), options))
-    }
-}
-
-fn normalize_escaped_path(value: &str) -> String {
-    if std::path::MAIN_SEPARATOR == '\\' {
-        value.replace('/', "\\")
-    } else {
-        value.replace('\\', "/")
-    }
-}
-
-fn normalize_item_path(value: &str) -> String {
-    normalize_escaped_path(value)
-}
-
-fn item_match_key(value: &str) -> String {
-    let normalized = normalize_item_path(value);
-    if cfg!(windows) {
-        normalized.to_lowercase()
-    } else {
-        normalized
+            .any(|pattern| pattern.matches(identity))
     }
 }
 
 fn item_path_sort_key(escaped_identity: &str) -> (String, String) {
-    let identity = normalize_item_path(&unescape_once(escaped_identity));
+    let identity = if std::path::MAIN_SEPARATOR == '\\' {
+        unescape_once(escaped_identity).replace('/', "\\")
+    } else {
+        unescape_once(escaped_identity).replace('\\', "/")
+    };
     let folded = if cfg!(windows) {
         identity.to_lowercase()
     } else {
         identity.clone()
     };
     (folded, identity)
-}
-
-fn recursive_dir_for_glob(escaped_spec: &str, identity: &str) -> String {
-    let pattern_components = escaped_spec
-        .split(['/', '\\'])
-        .filter(|component| !component.is_empty() && *component != ".")
-        .collect::<Vec<_>>();
-    let Some(first_recursive) = pattern_components
-        .iter()
-        .position(|component| *component == "**")
-    else {
-        return String::new();
-    };
-    let last_recursive = pattern_components
-        .iter()
-        .rposition(|component| *component == "**")
-        .expect("a recursive component was already found");
-    let identity_components = identity
-        .split(['/', '\\'])
-        .filter(|component| !component.is_empty() && *component != ".")
-        .collect::<Vec<_>>();
-    let parent_count = identity_components.len().saturating_sub(1);
-    let suffix_directory_count = pattern_components.len().saturating_sub(last_recursive + 2);
-    let start = first_recursive.min(parent_count);
-    let end = parent_count
-        .saturating_sub(suffix_directory_count)
-        .max(start);
-    if start >= end {
-        return String::new();
-    }
-    let mut result = identity_components[start..end].join(std::path::MAIN_SEPARATOR_STR);
-    result.push(std::path::MAIN_SEPARATOR);
-    result
 }
 
 impl SdkReference {
@@ -247,6 +210,7 @@ pub(crate) fn load_project(
         toolset,
     )?;
     let body = state.evaluate_file(&project_path, true)?;
+    state.model.compact_inactive_items();
     let preprocessed = render_preprocessed.then(|| {
         normalize_output(&format!(
             "<!--\n{BOUNDARY}\n{}\n{BOUNDARY}\n-->\n{body}",
@@ -323,6 +287,7 @@ impl EvaluationState {
             render_preprocessed,
             sdk_root,
             item_glob_cache: HashMap::new(),
+            item_identity_index: HashMap::new(),
         })
     }
 
@@ -1037,7 +1002,19 @@ impl EvaluationState {
                 current_file.display()
             );
         }
+        if item.remove.is_some() && !item.metadata.is_empty() {
+            bail!(
+                "Remove operation for item '{}' cannot contain child metadata",
+                item.item_type
+            );
+        }
         if !group_eligible {
+            return Ok(());
+        }
+        if let Some(condition) = &item.condition
+            && !ExpressionEvaluator::with_current_file(&self.model, current_file)
+                .evaluate_condition(condition)?
+        {
             return Ok(());
         }
         if item.include.is_some() {
@@ -1056,11 +1033,16 @@ impl EvaluationState {
             .include
             .as_deref()
             .expect("include operation was selected");
-        let defaults = self.model.item_defaults(&item.item_type);
-        let evaluation_directory = self
+        let project_root = self
             .model
             .get_project_directory()
             .unwrap_or_else(|| PathBuf::from("."));
+        let excludes = item.exclude.as_ref().map_or_else(
+            || Ok(ItemSpecMatcher::empty()),
+            |exclude| ItemSpecMatcher::evaluate(&self.model, current_file, &project_root, exclude),
+        )?;
+        let defaults = self.model.item_defaults(&item.item_type);
+        let evaluation_directory = project_root.clone();
         let mut candidates = Vec::new();
         for fragment in tokenize_list(include)? {
             let evaluator = ExpressionEvaluator::with_current_file(&self.model, current_file);
@@ -1097,42 +1079,35 @@ impl EvaluationState {
 
             let evaluated = evaluator.evaluate(fragment)?;
             for identity in tokenize_list(&evaluated)? {
-                if classify_item_spec(identity) == ItemSpecKind::Glob {
-                    let matches = self.expand_item_glob(identity)?;
-                    candidates.extend(matches.iter().map(|matched| {
-                        Item::new(
-                            item.item_type.clone(),
-                            matched.escaped_identity.clone(),
-                            defaults.clone(),
-                            evaluation_directory.clone(),
-                            current_file.to_path_buf(),
-                        )
-                        .with_recursive_dir(matched.escaped_recursive_dir.clone())
-                    }));
-                } else {
-                    candidates.push(Item::new(
+                match ItemSpec::parse(&project_root, identity)? {
+                    ItemSpec::Glob(pattern) => {
+                        let matches = self.expand_item_glob(identity, &pattern, &excludes);
+                        candidates.extend(matches.iter().map(|matched| {
+                            Item::new(
+                                item.item_type.clone(),
+                                matched.escaped_identity.clone(),
+                                defaults.clone(),
+                                evaluation_directory.clone(),
+                                current_file.to_path_buf(),
+                            )
+                            .with_recursive_dir(matched.escaped_recursive_dir.clone())
+                        }));
+                    }
+                    ItemSpec::Literal { .. } => candidates.push(Item::new(
                         item.item_type.clone(),
                         identity.to_string(),
                         defaults.clone(),
                         evaluation_directory.clone(),
                         current_file.to_path_buf(),
-                    ));
+                    )),
                 }
             }
         }
 
-        if let Some(exclude) = &item.exclude {
-            let matcher = ItemSpecMatcher::evaluate(&self.model, current_file, exclude)?;
-            candidates.retain(|candidate| !matcher.matches(&candidate.name));
-        }
+        candidates.retain(|candidate| !excludes.matches(&project_root, &candidate.name));
 
+        let mut completed = Vec::with_capacity(candidates.len());
         for mut candidate in candidates {
-            if let Some(condition) = &item.condition
-                && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
-                    .evaluate_condition(condition)?
-            {
-                continue;
-            }
             for metadata in &item.metadata {
                 if let Some(condition) = &metadata.condition
                     && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
@@ -1144,82 +1119,79 @@ impl EvaluationState {
                     .evaluate(&metadata.value)?;
                 candidate.set_metadata(metadata.name.clone(), value);
             }
-            self.model.add_item(candidate);
+            completed.push(candidate);
+        }
+
+        for candidate in completed {
+            let item_type_key = candidate.item_type.to_ascii_lowercase();
+            let identity_key = self
+                .item_identity_index
+                .contains_key(&item_type_key)
+                .then(|| normalized_identity_key(&project_root, &candidate.name));
+            let index = self.model.add_item(candidate);
+            if let Some(identity_key) = identity_key {
+                self.item_identity_index
+                    .get_mut(&item_type_key)
+                    .expect("the identity index was checked before appending the item")
+                    .entry(identity_key)
+                    .or_default()
+                    .push(index);
+            }
         }
         Ok(())
     }
 
     fn remove_items(&mut self, item: PendingItem, current_file: &Path) -> Result<()> {
-        if !item.metadata.is_empty() {
-            bail!(
-                "Remove operation for item '{}' cannot contain child metadata",
-                item.item_type
-            );
-        }
+        let project_root = self
+            .model
+            .get_project_directory()
+            .unwrap_or_else(|| PathBuf::from("."));
         let matcher = ItemSpecMatcher::evaluate(
             &self.model,
             current_file,
+            &project_root,
             item.remove
                 .as_deref()
                 .expect("remove operation was selected"),
         )?;
-        let removals = self
-            .model
-            .get_items(&item.item_type)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|candidate| {
-                        if !matcher.matches(&candidate.name) {
-                            return Ok(false);
-                        }
-                        item.condition.as_ref().map_or(Ok(true), |condition| {
-                            ExpressionEvaluator::with_item(&self.model, current_file, candidate)
-                                .evaluate_condition(condition)
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let removals = self.matching_item_indices(&item.item_type, &matcher, &project_root);
         if let Some(items) = self.model.get_items_mut(&item.item_type) {
-            let mut index = 0usize;
-            items.retain(|_| {
-                let retain = !removals[index];
-                index += 1;
-                retain
-            });
+            for index in removals {
+                if let Some(candidate) = items.get_mut(index) {
+                    candidate.deactivate();
+                }
+            }
         }
         Ok(())
     }
 
     fn update_items(&mut self, item: PendingItem, current_file: &Path) -> Result<()> {
+        let project_root = self
+            .model
+            .get_project_directory()
+            .unwrap_or_else(|| PathBuf::from("."));
         let matcher = ItemSpecMatcher::evaluate(
             &self.model,
             current_file,
+            &project_root,
             item.update
                 .as_deref()
                 .expect("update operation was selected"),
         )?;
+        let indices = self.matching_item_indices(&item.item_type, &matcher, &project_root);
         let defaults = self.model.item_defaults(&item.item_type);
-        let item_count = self.model.get_items(&item.item_type).map_or(0, Vec::len);
-        for index in 0..item_count {
+        let mut updates = Vec::with_capacity(indices.len());
+        for index in indices {
             let Some(mut candidate) = self
                 .model
                 .get_items(&item.item_type)
                 .and_then(|items| items.get(index))
-                .filter(|candidate| matcher.matches(&candidate.name))
+                .filter(|candidate| candidate.is_active())
                 .cloned()
             else {
                 continue;
             };
             candidate.apply_update_defaults(Arc::clone(&defaults));
-            if let Some(condition) = &item.condition
-                && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
-                    .evaluate_condition(condition)?
-            {
-                continue;
-            }
             for metadata in &item.metadata {
                 if let Some(condition) = &metadata.condition
                     && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
@@ -1231,66 +1203,109 @@ impl EvaluationState {
                     .evaluate(&metadata.value)?;
                 candidate.set_metadata(metadata.name.clone(), value);
             }
-            self.model
-                .get_items_mut(&item.item_type)
-                .expect("the item list existed before the update")[index] = candidate;
+            updates.push((index, candidate));
+        }
+
+        if let Some(items) = self.model.get_items_mut(&item.item_type) {
+            for (index, candidate) in updates {
+                items[index] = candidate;
+            }
         }
         Ok(())
     }
 
-    fn expand_item_glob(&mut self, escaped_spec: &str) -> Result<Arc<Vec<ItemGlobMatch>>> {
-        let root = self
+    fn matching_item_indices(
+        &mut self,
+        item_type: &str,
+        matcher: &ItemSpecMatcher,
+        project_root: &Path,
+    ) -> Vec<usize> {
+        let mut matches = BTreeSet::new();
+        if !matcher.literals.is_empty() {
+            self.ensure_item_identity_index(item_type, project_root);
+            if let Some(index) = self
+                .item_identity_index
+                .get(&item_type.to_ascii_lowercase())
+            {
+                for literal in &matcher.literals {
+                    if let Some(indices) = index.get(literal) {
+                        matches.extend(indices.iter().copied().filter(|candidate_index| {
+                            self.model
+                                .get_items(item_type)
+                                .and_then(|items| items.get(*candidate_index))
+                                .is_some_and(Item::is_active)
+                        }));
+                    }
+                }
+            }
+        }
+
+        if !matcher.patterns.is_empty()
+            && let Some(items) = self.model.get_items(item_type)
+        {
+            for (index, candidate) in items.iter().enumerate() {
+                if candidate.is_active()
+                    && matcher
+                        .patterns
+                        .iter()
+                        .any(|pattern| pattern.matches(&candidate.name))
+                {
+                    matches.insert(index);
+                }
+            }
+        }
+        matches.into_iter().collect()
+    }
+
+    fn ensure_item_identity_index(&mut self, item_type: &str, project_root: &Path) {
+        let item_type_key = item_type.to_ascii_lowercase();
+        if self.item_identity_index.contains_key(&item_type_key) {
+            return;
+        }
+        let mut index = HashMap::<String, Vec<usize>>::new();
+        if let Some(items) = self.model.get_items(item_type) {
+            for (item_index, candidate) in items.iter().enumerate() {
+                if candidate.is_active() {
+                    index
+                        .entry(normalized_identity_key(project_root, &candidate.name))
+                        .or_default()
+                        .push(item_index);
+                }
+            }
+        }
+        self.item_identity_index.insert(item_type_key, index);
+    }
+
+    fn expand_item_glob(
+        &mut self,
+        escaped_spec: &str,
+        pattern: &MsBuildGlob,
+        excludes: &ItemSpecMatcher,
+    ) -> Arc<Vec<ItemGlobMatch>> {
+        let cache_key = format!("{escaped_spec}\u{1f}{}", excludes.fingerprint);
+        if let Some(matches) = self.item_glob_cache.get(&cache_key) {
+            return Arc::clone(matches);
+        }
+
+        let project_root = self
             .model
             .get_project_directory()
             .unwrap_or_else(|| PathBuf::from("."));
-        let native_spec = normalize_escaped_path(escaped_spec);
-        let decoded_spec = unescape_once(&native_spec);
-        let is_absolute = Path::new(&decoded_spec).is_absolute();
-        let relative_pattern = to_glob_pattern(&native_spec);
-        let glob_pattern = if is_absolute {
-            relative_pattern
-        } else {
-            format!(
-                "{}{}{}",
-                glob::Pattern::escape(&display_path(&root)),
-                std::path::MAIN_SEPARATOR,
-                relative_pattern
-            )
-        };
-        let cache_key = format!("{glob_pattern}\u{1f}{escaped_spec}");
-        if let Some(matches) = self.item_glob_cache.get(&cache_key) {
-            return Ok(Arc::clone(matches));
-        }
-
-        let options = glob::MatchOptions {
-            case_sensitive: !cfg!(windows),
-            require_literal_separator: true,
-            require_literal_leading_dot: false,
-        };
-        let mut matches = Vec::new();
-        for entry in glob::glob_with(&glob_pattern, options)
-            .with_context(|| format!("Invalid item glob '{escaped_spec}'"))?
-        {
-            let path =
-                entry.with_context(|| format!("Failed to enumerate item glob '{escaped_spec}'"))?;
-            if !path.is_file() {
-                continue;
-            }
-            let identity_path = if is_absolute {
-                path.as_path()
-            } else {
-                path.strip_prefix(&root).unwrap_or(path.as_path())
-            };
-            let identity = display_path(identity_path);
-            matches.push(ItemGlobMatch {
-                escaped_identity: escape(&identity),
-                escaped_recursive_dir: escape(&recursive_dir_for_glob(escaped_spec, &identity)),
-            });
-        }
+        let mut matches = pattern
+            .enumerate(&excludes.patterns)
+            .into_iter()
+            .filter_map(|matched| {
+                let identity = pattern.identity_for_path(&matched.path);
+                (!excludes.matches(&project_root, &identity)).then(|| ItemGlobMatch {
+                    escaped_identity: escape(&identity),
+                    escaped_recursive_dir: escape(&matched.recursive_dir),
+                })
+            })
+            .collect::<Vec<_>>();
         matches.sort_by_cached_key(|matched| item_path_sort_key(&matched.escaped_identity));
         let matches = Arc::new(matches);
         self.item_glob_cache.insert(cache_key, Arc::clone(&matches));
-        Ok(matches)
+        matches
     }
 
     fn add_item_definition(
@@ -1401,23 +1416,32 @@ impl EvaluationState {
                 importing_path.display()
             );
         }
-        let import_kind = classify_item_spec(&evaluated_project_escaped);
-        let evaluated_project = if import_kind == ItemSpecKind::Glob {
-            to_glob_pattern(&evaluated_project_escaped)
-        } else {
-            unescape_once(&evaluated_project_escaped)
+        let import_root = importing_path.parent().unwrap_or_else(|| Path::new(""));
+        let paths = match ItemSpec::parse(import_root, &evaluated_project_escaped)? {
+            ItemSpec::Literal { value } => {
+                let import_path = lexical_absolute(&import_root.join(value))?;
+                resolve_import_path(&import_path, importing_path)?
+            }
+            ItemSpec::Glob(pattern) => {
+                let mut paths = pattern
+                    .enumerate(&[])
+                    .into_iter()
+                    .map(|matched| matched.path)
+                    .collect::<Vec<_>>();
+                paths.sort_by_cached_key(|path| {
+                    (
+                        normalized_lexical_file_identity(path)
+                            .unwrap_or_else(|_| path.to_path_buf()),
+                        path.to_path_buf(),
+                    )
+                });
+                paths.dedup_by(|left, right| {
+                    normalized_lexical_file_identity(left).ok()
+                        == normalized_lexical_file_identity(right).ok()
+                });
+                paths
+            }
         };
-        let import_path = lexical_absolute(
-            &importing_path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(evaluated_project),
-        )?;
-        let paths = resolve_import_paths(
-            &import_path,
-            importing_path,
-            import_kind == ItemSpecKind::Glob,
-        )?;
         debug!(
             "Import '{}' from {} matched {} file(s)",
             import.project,
@@ -1811,29 +1835,7 @@ fn illegal_child<T>(name: &str, parent: &str, path: &Path) -> Result<T> {
     )
 }
 
-fn resolve_import_paths(
-    import_path: &Path,
-    importing_path: &Path,
-    expand_glob: bool,
-) -> Result<Vec<PathBuf>> {
-    let pattern = import_path.to_string_lossy();
-    if expand_glob {
-        let pattern = pattern.replace('\\', "/");
-        let mut paths = glob::glob(&pattern)?
-            .filter_map(Result::ok)
-            .filter(|path| path.is_file())
-            .filter_map(|path| lexical_absolute(&path).ok())
-            .collect::<Vec<_>>();
-        paths.sort();
-        let mut identities = HashSet::new();
-        paths.retain(|path| {
-            normalized_lexical_file_identity(path)
-                .map(|identity| identities.insert(identity))
-                .unwrap_or(false)
-        });
-        return Ok(paths);
-    }
-
+fn resolve_import_path(import_path: &Path, importing_path: &Path) -> Result<Vec<PathBuf>> {
     if !import_path.is_file() {
         bail!(
             "Imported project '{}' was not found from {}",

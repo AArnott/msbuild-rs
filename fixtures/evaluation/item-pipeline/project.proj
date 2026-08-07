@@ -31,29 +31,29 @@
       <M>x</M>
       <Custom>source</Custom>
     </I>
-    <EmptyTransformCount Include="@(I->'%(Missing)'->Count())" />
+    <EmptyTransformCount Include="@(I-&gt;'%(Missing)'-&gt;Count())" />
     <EmptyTransformMaterialized Include="@(I->'%(Missing)')" />
-    <CountCombine Include="@(I->Count()->Combine('x'))" />
-    <AnyCount Include="@(I->AnyHaveMetadataValue('M','x')->Count())" />
-    <PropertyArguments Include="@(I->WithMetadataValue($(Args)))" />
-    <NestedVectorArgument Include="@(I->HasMetadata(@(ArgText))->Count())" />
-    <EscapedCombine Include="@(I->Combine('%3B'))" />
-    <TransformMetadataIdentity Include="@(I->'%(Identity).changed'->Metadata('Identity'))" />
-    <TransformIdentityFunction Include="@(I->'%(Identity).changed'->Identity())" />
-    <ClearIdentityCount Include="@(I->ClearMetadata()->Metadata('Identity')->Count())" />
-    <CombineIdentityCount Include="@(I->Combine('x')->Metadata('Identity')->Count())" />
+    <CountCombine Include="@(I-&gt;Count()-&gt;Combine('x'))" />
+    <AnyCount Include="@(I-&gt;AnyHaveMetadataValue('M','x')-&gt;Count())" />
+    <PropertyArguments Include="@(I-&gt;WithMetadataValue($(Args)))" />
+    <NestedVectorArgument Include="@(I-&gt;HasMetadata(@(ArgText))-&gt;Count())" />
+    <EscapedCombine Include="@(I-&gt;Combine('%3B'))" />
+    <TransformMetadataIdentity Include="@(I-&gt;'%(Identity).changed'-&gt;Metadata('Identity'))" />
+    <TransformIdentityFunction Include="@(I-&gt;'%(Identity).changed'-&gt;Identity())" />
+    <ClearIdentityCount Include="@(I-&gt;ClearMetadata()-&gt;Metadata('Identity')-&gt;Count())" />
+    <CombineIdentityCount Include="@(I-&gt;Combine('x')-&gt;Metadata('Identity')-&gt;Count())" />
     <SemiSeparator Include="@(I, ';')" />
     <PipeSeparator Include="@(I, '|')" />
-    <AnySource Include="@(I->AnyHaveMetadataValue('M','x'))" />
-    <AnySeparated Include="@(I->AnyHaveMetadataValue('M','x'), '|')" />
-    <CountSeparated Include="@(I->Count(), '|')" />
+    <AnySource Include="@(I-&gt;AnyHaveMetadataValue('M','x'))" />
+    <AnySeparated Include="@(I-&gt;AnyHaveMetadataValue('M','x'), '|')" />
+    <CountSeparated Include="@(I-&gt;Count(), '|')" />
     <Escaped Include="%41;A;K;K;σ;ς" />
-    <DistinctEscaped Include="@(Escaped->Distinct())" />
-    <DistinctCaseEscaped Include="@(Escaped->DistinctWithCase())" />
+    <DistinctEscaped Include="@(Escaped-&gt;Distinct())" />
+    <DistinctCaseEscaped Include="@(Escaped-&gt;DistinctWithCase())" />
     <Copy Include="@(I)" />
     <Same Include="@(I->'%(Identity)')" />
     <Changed Include="@(I->'%(Identity).changed')" />
-    <Cleared Include="@(I->ClearMetadata())" />
+    <Cleared Include="@(I-&gt;ClearMetadata())" />
     <Glob Include="tree/**/*.txt">
       <Custom>glob</Custom>
     </Glob>

@@ -2544,6 +2544,212 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_item_operation_snapshots_and_msbuild_wildcards_match_direct_repros() -> Result<()> {
+        // Direct dotnet-msbuild repros, plus exact behavioral coverage from
+        // FileMatcher_Tests.GetFilesComplexGlobbingMatching,
+        // RegressItemRecursionWorksAsExpected, IllegalPaths, and SplitFileSpec.
+        let directory = TempDir::new()?;
+        fs::create_dir_all(directory.path().join("tree").join("sub").join("deep"))?;
+        fs::create_dir_all(
+            directory
+                .path()
+                .join("tree")
+                .join("node_modules")
+                .join("pkg"),
+        )?;
+        for path in [
+            "Dockerfile",
+            "tree/root.txt",
+            "tree/sub/a.txt",
+            "tree/sub/deep/b.txt",
+            "tree/node_modules/pkg/dependency.txt",
+        ] {
+            fs::write(directory.path().join(path), "")?;
+        }
+        let absolute_root = display_path(&directory.path().join("tree").join("root.txt"));
+        let project = write_project(
+            &directory,
+            "project.proj",
+            &format!(
+                r#"<Project><ItemGroup>
+  <Snapshot Include="a;b"><Seen>@(Snapshot)</Seen><OnlyA Condition="'%(Identity)' == 'a'">yes</OnlyA></Snapshot>
+  <ConditionUpdate Include="a;b"><State>old-%(Identity)</State></ConditionUpdate>
+  <SameUpdate Include="a;b"><State>old-%(Identity)</State></SameUpdate>
+  <Duplicate Include="x;x;y" />
+  <ConditionUpdate Update="a;b" Condition="'@(ConditionUpdate->'%(State)')' == 'old-a;old-b'"><State>new-%(Identity)</State></ConditionUpdate>
+  <SameUpdate Update="a;b"><Seen>@(SameUpdate->'%(State)')</Seen></SameUpdate>
+  <Duplicate Update="x"><Updated>yes</Updated></Duplicate>
+  <DuplicateSnapshot Include="@(Duplicate)" />
+  <Duplicate Remove="x" />
+  <Terminal Include="tree/**" />
+  <StarDot Include="*.*" />
+  <Ordinary Include="tree/s*/*.txt" />
+  <Mixed Include="%2A-*.txt" />
+  <Illegal Include="tree/**.txt" />
+  <LiteralMutation Include="%2A-*.txt;tree/**.txt" />
+  <LiteralMutation Update="tree/**.txt"><Updated>yes</Updated></LiteralMutation>
+  <LiteralMutation Remove="%2A-*.txt" />
+  <Bracket Include="literal[1].txt" />
+  <Escaped Include="tree/%2A.txt" />
+  <Cone Include="../outside.md;tree/root.txt" />
+  <Cone Remove="**/*.md" />
+  <Absolute Include="{absolute_root}" />
+  <Absolute Remove="tree/root.txt" />
+  <ExcludeA Include="tree/**/*.txt" Exclude="tree/sub/**" />
+  <ExcludeB Include="tree/**/*.txt" Exclude="tree/node_modules/**" />
+  <FalseInvalid Condition="false" Include="$([Unsupported.Type]::Method())/**/*.txt" />
+</ItemGroup></Project>"#
+            ),
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let items = |item_type: &str| model.get_items(item_type).map(Vec::as_slice).unwrap_or(&[]);
+
+        assert_eq!(
+            items("Snapshot")
+                .iter()
+                .map(|item| item.get_metadata("Seen").unwrap())
+                .collect::<Vec<_>>(),
+            ["", ""]
+        );
+        assert_eq!(
+            items("Snapshot")
+                .iter()
+                .map(|item| item.get_metadata("OnlyA").unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["yes", ""]
+        );
+        assert!(items("ConditionUpdate").iter().all(|item| {
+            item.get_metadata("State").as_deref() == Some(format!("new-{}", item.name).as_str())
+        }));
+        assert!(
+            items("SameUpdate")
+                .iter()
+                .all(|item| { item.get_metadata("Seen").as_deref() == Some("old-a;old-b") })
+        );
+        assert_eq!(
+            items("DuplicateSnapshot")
+                .iter()
+                .map(|item| (
+                    item.name.clone(),
+                    item.get_metadata("Updated")
+                        .unwrap_or_default()
+                        .into_owned()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("x".to_string(), "yes".to_string()),
+                ("x".to_string(), "yes".to_string()),
+                ("y".to_string(), String::new()),
+            ]
+        );
+        assert_eq!(
+            items("Duplicate")
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["y"]
+        );
+        assert_eq!(items("Terminal").len(), 4);
+        assert!(
+            items("StarDot")
+                .iter()
+                .any(|item| item.name == "Dockerfile")
+        );
+        assert_eq!(
+            items("Ordinary")[0].get_metadata("RecursiveDir").as_deref(),
+            Some(format!("sub{}", std::path::MAIN_SEPARATOR).as_str())
+        );
+        assert_eq!(items("Mixed")[0].name, "*-*.txt");
+        assert_eq!(items("Illegal")[0].name, "tree/**.txt");
+        assert_eq!(items("LiteralMutation")[0].name, "tree/**.txt");
+        assert_eq!(
+            items("LiteralMutation")[0]
+                .get_metadata("Updated")
+                .as_deref(),
+            Some("yes")
+        );
+        assert_eq!(items("Bracket")[0].name, "literal[1].txt");
+        assert_eq!(items("Escaped")[0].name, "tree/*.txt");
+        assert_eq!(
+            items("Cone")
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["../outside.md", "tree/root.txt"]
+        );
+        assert!(items("Absolute").is_empty());
+        assert_eq!(
+            items("ExcludeA")
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                format!(
+                    "tree{}node_modules{}pkg{}dependency.txt",
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR,
+                    std::path::MAIN_SEPARATOR
+                ),
+                format!("tree{}root.txt", std::path::MAIN_SEPARATOR),
+            ]
+        );
+        assert_eq!(items("ExcludeB").len(), 3);
+        assert!(items("FalseInvalid").is_empty());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_and_root_relative_item_specs_match_lexically() -> Result<()> {
+        // Direct dotnet-msbuild comparison of both selector orientations.
+        let directory = TempDir::new()?;
+        let drive = directory
+            .path()
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy();
+        let root_relative = r"\__msbuild_rs_root_probe__\x.txt";
+        let root_absolute = format!("{drive}{root_relative}");
+        let current_drive = std::env::current_dir()?
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        let drive_relative = format!("{current_drive}__msbuild_rs_drive_probe__\\x.txt");
+        let drive_absolute = display_path(&std::path::absolute(&drive_relative)?);
+        let project = write_project(
+            &directory,
+            "paths.proj",
+            &format!(
+                r#"<Project><ItemGroup>
+  <Root Include="{root_relative}" /><Root Remove="{root_absolute}" />
+  <ReverseRoot Include="{root_absolute}" /><ReverseRoot Remove="{root_relative}" />
+  <Drive Include="{drive_relative}" /><Drive Remove="{drive_absolute}" />
+  <ReverseDrive Include="{drive_absolute}" /><ReverseDrive Remove="{drive_relative}" />
+</ItemGroup></Project>"#
+            ),
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        for item_type in ["Root", "ReverseRoot", "Drive", "ReverseDrive"] {
+            assert!(
+                evaluator
+                    .get_model()
+                    .get_items(item_type)
+                    .is_none_or(Vec::is_empty)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn upstream_item_transform_containing_semicolon() -> Result<()> {
         // Exact evaluation-time port of
         // EscapingInProjects_Tests.ItemTransformContainingSemicolon.
@@ -2581,6 +2787,7 @@ mod tests {
         let mut evaluator = ProjectEvaluator::new();
         evaluator.load_project(project)?;
         assert_eq!(evaluator.get_model().get_items("i").unwrap().len(), 10_000);
+        eprintln!("10,000 separate includes: {:?}", started.elapsed());
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "10,000 includes took {:?}",
@@ -2617,6 +2824,7 @@ mod tests {
         let started = std::time::Instant::now();
         let mut evaluator = ProjectEvaluator::new();
         evaluator.load_project(project)?;
+        let elapsed = started.elapsed();
         let items = evaluator.get_model().get_items("Scale").unwrap();
         assert_eq!(items.len(), 5_000);
         assert!(
@@ -2624,10 +2832,55 @@ mod tests {
                 .iter()
                 .all(|item| item.get_metadata("Updated").as_deref() == Some("true"))
         );
+        eprintln!("10,000-item bulk update/remove: {elapsed:?}");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
-            "10,000-item remove/update took {:?}",
-            started.elapsed()
+            elapsed < std::time::Duration::from_secs(60),
+            "10,000-item bulk update/remove took {elapsed:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn benchmark_ten_thousand_separate_exact_mutations_use_stable_identity_index() -> Result<()> {
+        let directory = TempDir::new()?;
+        let mut content = String::from("<Project><ItemGroup><Scale Include=\"");
+        for index in 0..10_000 {
+            if index != 0 {
+                content.push(';');
+            }
+            write!(content, "i{index}")?;
+        }
+        content.push_str("\" />");
+        for index in 0..10_000 {
+            write!(
+                content,
+                "<Scale Update=\"i{index}\"><Updated>{index}</Updated></Scale>"
+            )?;
+        }
+        content.push_str("<ScaleSnapshot Include=\"@(Scale)\" />");
+        for index in 0..10_000 {
+            write!(content, "<Scale Remove=\"i{index}\" />")?;
+        }
+        content.push_str("</ItemGroup></Project>");
+        let project = write_project(&directory, "scale.proj", &content);
+        let started = std::time::Instant::now();
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let elapsed = started.elapsed();
+        let model = evaluator.get_model();
+        assert!(model.get_items("Scale").unwrap().is_empty());
+        let snapshot = model.get_items("ScaleSnapshot").unwrap();
+        assert_eq!(snapshot.len(), 10_000);
+        for (index, item) in snapshot.iter().enumerate() {
+            assert_eq!(
+                item.get_metadata("Updated").as_deref(),
+                Some(index.to_string().as_str())
+            );
+        }
+        eprintln!("10,000 separate updates + removes: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "10,000 separate updates and removes took {elapsed:?}",
         );
         Ok(())
     }

@@ -79,6 +79,12 @@ impl<V> CaseInsensitiveMap<V> {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &V)> {
         self.entries.values().map(|(name, value)| (name, value))
     }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut V)> {
+        self.entries
+            .values_mut()
+            .map(|(name, value)| (&*name, value))
+    }
 }
 
 impl<V> Default for CaseInsensitiveMap<V> {
@@ -222,6 +228,7 @@ pub struct Item {
     evaluation_directory: PathBuf,
     defining_project: PathBuf,
     escaped_recursive_dir: String,
+    active: bool,
 }
 
 impl Item {
@@ -243,6 +250,7 @@ impl Item {
             evaluation_directory,
             defining_project,
             escaped_recursive_dir: String::new(),
+            active: true,
         }
     }
 
@@ -259,6 +267,14 @@ impl Item {
         if !defaults.is_empty() {
             self.inherited_defaults.insert(0, defaults);
         }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub(crate) fn deactivate(&mut self) {
+        self.active = false;
     }
 
     pub fn copy_for_type(
@@ -634,11 +650,14 @@ impl ProjectModel {
         self.properties.get_escaped(name)
     }
 
-    pub fn add_item(&mut self, item: Item) {
+    pub fn add_item(&mut self, item: Item) -> usize {
         if let Some(items) = self.items.get_mut(&item.item_type) {
+            let index = items.len();
             items.push(item);
+            index
         } else {
             self.items.insert(item.item_type.clone(), vec![item]);
+            0
         }
     }
 
@@ -648,6 +667,20 @@ impl ProjectModel {
 
     pub(crate) fn get_items_mut(&mut self, item_type: &str) -> Option<&mut Vec<Item>> {
         self.items.get_mut(item_type)
+    }
+
+    pub(crate) fn iter_items<'a>(&'a self, item_type: &str) -> impl Iterator<Item = &'a Item> + 'a {
+        self.items
+            .get(item_type)
+            .into_iter()
+            .flat_map(|items| items.iter())
+            .filter(|item| item.is_active())
+    }
+
+    pub(crate) fn compact_inactive_items(&mut self) {
+        for (_, items) in self.items.iter_mut() {
+            items.retain(Item::is_active);
+        }
     }
 
     pub fn item_defaults(&self, item_type: &str) -> Arc<MetadataMap> {

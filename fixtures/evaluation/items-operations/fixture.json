@@ -114,6 +114,74 @@
     {
       "type": "TransformSemicolonResult",
       "metadata": []
+    },
+    {
+      "type": "OperationCondition",
+      "metadata": ["Seen", "OnlyA"]
+    },
+    {
+      "type": "ConditionUpdate",
+      "metadata": ["State"]
+    },
+    {
+      "type": "SameOperationUpdate",
+      "metadata": ["State", "Seen"]
+    },
+    {
+      "type": "DuplicateOperation",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "DuplicateOperationSnapshot",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "TerminalRecursive",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "StarDot",
+      "metadata": []
+    },
+    {
+      "type": "OrdinaryRecursiveDir",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "MixedEscapedWildcard",
+      "metadata": []
+    },
+    {
+      "type": "IllegalRecursiveWildcard",
+      "metadata": []
+    },
+    {
+      "type": "LiteralMutation",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "OutsideCone",
+      "metadata": []
+    },
+    {
+      "type": "AbsoluteEquivalent",
+      "metadata": []
+    },
+    {
+      "type": "PrunedExclude",
+      "metadata": []
+    },
+    {
+      "type": "ExcludeCacheA",
+      "metadata": []
+    },
+    {
+      "type": "ExcludeCacheB",
+      "metadata": []
+    },
+    {
+      "type": "FalseInvalidGlob",
+      "metadata": []
     }
   ]
 }

@@ -1,13 +1,35 @@
 {
   "name": "basic-properties-items-conditions-imports",
   "project": "project.proj",
+  "environment": {
+    "MSBuildExtensionsPath": "injected-environment-extensions"
+  },
+  "globalProperties": {
+    "GlobalChoice": "global-value"
+  },
   "properties": [
     "Configuration",
     "Base",
     "Derived",
     "ConditionalValue",
     "ImportedValue",
-    "ImportedDerived"
+    "ImportedDerived",
+    "AllEvaluated",
+    "SetToItself",
+    "UsedBeforeSet",
+    "ParentSeenByImport",
+    "ValueSeenAfterImport",
+    "ImportOrder",
+    "GlobalChoice",
+    "MSBuildExtensionsPath",
+    "MSBuildProjectDirectory",
+    "MSBuildProjectDirectoryNoRoot",
+    "MSBuildProjectFile",
+    "MSBuildProjectExtension",
+    "MSBuildProjectFullPath",
+    "MSBuildProjectName",
+    "RootThisFile",
+    "ImportedThisFile"
   ],
   "items": [
     {

@@ -86,6 +86,14 @@ $projectPath = (Resolve-Path (Join-Path $fixtureDirectory $fixtureDefinition.pro
 $rustPath = (Resolve-Path $RustExecutable -ErrorAction Stop).Path
 $outputPath = [System.IO.Path]::GetFullPath($OutputDirectory)
 [System.IO.Directory]::CreateDirectory($outputPath) | Out-Null
+$environmentBackups = @{}
+try {
+    if ($fixtureDefinition.PSObject.Properties["environment"]) {
+        foreach ($property in $fixtureDefinition.environment.PSObject.Properties) {
+            $environmentBackups[$property.Name] = [System.Environment]::GetEnvironmentVariable($property.Name)
+            [System.Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value)
+        }
+    }
 $dotnetSdkVersion = (& dotnet --version).Trim()
 $script:SdkPath = (& dotnet msbuild $projectPath -nologo -getProperty:MSBuildSDKsPath).Trim()
 if ($LASTEXITCODE -ne 0) {
@@ -102,6 +110,11 @@ if ($properties.Count -eq 0 -and $itemTypes.Count -eq 0) {
 }
 
 $dotnetArguments = @("msbuild", $projectPath, "-nologo")
+if ($fixtureDefinition.PSObject.Properties["globalProperties"]) {
+    foreach ($property in $fixtureDefinition.globalProperties.PSObject.Properties) {
+        $dotnetArguments += "-property:$($property.Name)=$($property.Value)"
+    }
+}
 if ($properties.Count -gt 0) {
     $dotnetProperties = @($properties)
     if ($itemTypes.Count -eq 0 -and $dotnetProperties.Count -eq 1) {
@@ -121,6 +134,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $rustArguments = @("--project", $projectPath)
+if ($fixtureDefinition.PSObject.Properties["globalProperties"]) {
+    foreach ($property in $fixtureDefinition.globalProperties.PSObject.Properties) {
+        $rustArguments += @("--property", "$($property.Name)=$($property.Value)")
+    }
+}
 foreach ($property in $properties) {
     $rustArguments += @("--get-property", $property)
 }
@@ -193,3 +211,9 @@ if ($dotnetJson -cne $rustJson) {
 Write-Host "Evaluation parity passed: $($fixtureDefinition.name)"
 Write-Host "Raw outputs: $dotnetRawPath, $rustRawPath"
 Write-Host "Normalized output: $dotnetJsonPath"
+}
+finally {
+    foreach ($name in $environmentBackups.Keys) {
+        [System.Environment]::SetEnvironmentVariable($name, $environmentBackups[$name])
+    }
+}

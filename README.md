@@ -39,6 +39,9 @@ msbuild-rs --project path/to/project.proj --preprocess out.xml
 
 # Query evaluated properties and item identities/metadata without executing targets
 msbuild-rs --project path/to/project.proj --get-property Configuration --get-item Compile
+
+# Supply immutable global properties (repeat --property as needed)
+msbuild-rs --project path/to/project.proj --property Configuration=Release --get-property Configuration
 ```
 
 ### Project File Format
@@ -142,9 +145,10 @@ The compatibility plan uses native Rust implementations for common type/method c
 
 ### Evaluation Order
 
-1. **Properties**: All properties are evaluated first, allowing forward references
-2. **Items**: Items are evaluated after properties and can reference properties
-3. **Targets**: Targets are executed based on dependency order and conditions
+1. **Properties and imports**: Evaluated in expanded XML document order. Each
+   assignment sees the state immediately before it; a before-set reference is empty.
+2. **Items**: Added at their source position using the property/item state then visible.
+3. **Targets**: Collected in document order and executed by dependency order.
 
 ## Building
 
@@ -187,8 +191,9 @@ The `sample_projects/` directory contains example MSBuild projects:
 
 The project is organized into several modules:
 
-- **`parser`** - XML parsing and project file loading
-- **`object_model`** - Data structures for properties, items, and targets
+- **`loader`** - Order-preserving XML/import/SDK evaluation and preprocessing
+- **`object_model`** - Finalized properties, items, and targets
+- **`properties`** - Indexed case-insensitive property and reserved-path support
 - **`expression`** - Property and item reference evaluation
 - **`evaluation`** - Project loading and target execution orchestration
 - **`tasks`** - Built-in task implementations

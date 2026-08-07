@@ -1,12 +1,17 @@
 use anyhow::{Context, Result, anyhow, bail};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use crate::object_model::ProjectModel;
+use crate::properties::this_file_property;
+
+const MAX_EXPRESSION_NESTING: usize = 128;
 
 pub struct ExpressionEvaluator<'a> {
     model: &'a ProjectModel,
     base_directory: PathBuf,
+    current_file: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,25 +207,36 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
 }
 
 impl<'a> ExpressionEvaluator<'a> {
+    #[allow(dead_code)] // Used by direct object-model consumers and tests.
     pub fn new(model: &'a ProjectModel) -> Self {
         Self {
             model,
             base_directory: model
                 .get_project_directory()
                 .unwrap_or_else(|| PathBuf::from(".")),
+            current_file: None,
         }
     }
 
-    pub fn with_base_directory<P: AsRef<Path>>(model: &'a ProjectModel, path: P) -> Self {
+    pub fn with_current_file(model: &'a ProjectModel, path: &'a Path) -> Self {
         Self {
             model,
-            base_directory: path.as_ref().to_path_buf(),
+            base_directory: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            current_file: Some(path),
         }
     }
 
     /// Evaluate a string that may contain property and item references
     pub fn evaluate(&self, input: &str) -> Result<String> {
-        self.expand(input)
+        self.evaluate_with_depth(input, 0)
+    }
+
+    fn evaluate_with_depth(&self, input: &str, depth: usize) -> Result<String> {
+        if depth > MAX_EXPRESSION_NESTING {
+            bail!("Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}");
+        }
+        ensure_bounded_nesting(input)?;
+        self.expand(input, depth)
     }
 
     /// Evaluate a condition expression
@@ -230,7 +246,7 @@ impl<'a> ExpressionEvaluator<'a> {
         ConditionParser::new(&evaluated)?.parse()
     }
 
-    fn expand(&self, input: &str) -> Result<String> {
+    fn expand(&self, input: &str, depth: usize) -> Result<String> {
         let mut output = String::with_capacity(input.len());
         let mut position = 0;
 
@@ -246,7 +262,7 @@ impl<'a> ExpressionEvaluator<'a> {
             let end = find_matching_parenthesis(input, start + 1)?;
             let body = &input[start + 2..end];
             let replacement = if input.as_bytes()[start] == b'$' {
-                self.evaluate_property_expression(body)?
+                self.evaluate_property_expression(body, depth)?
             } else {
                 self.evaluate_item_expression(body)?
             };
@@ -257,15 +273,18 @@ impl<'a> ExpressionEvaluator<'a> {
         Ok(output)
     }
 
-    fn evaluate_property_expression(&self, expression: &str) -> Result<String> {
+    fn evaluate_property_expression(&self, expression: &str, depth: usize) -> Result<String> {
         if let Some(function) = expression.strip_prefix('[') {
-            return self.evaluate_static_function(function);
+            return self.evaluate_static_function(function, depth);
         }
         if let Some((property, invocation)) = expression.split_once('.')
             && let Some((method, arguments)) = parse_invocation(invocation)
         {
-            let value = self.model.get_property(property).map_or("", String::as_str);
-            let arguments = split_arguments(arguments)?;
+            let value = self.property_value(property).unwrap_or(Cow::Borrowed(""));
+            let arguments = split_arguments(arguments)?
+                .into_iter()
+                .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
+                .collect::<Result<Vec<_>>>()?;
             let argument = arguments.first().map_or("", |value| value.as_str());
             if let Some(matched) =
                 match_ignore_ascii_case(method, &["Contains", "StartsWith", "EndsWith"])
@@ -308,14 +327,13 @@ impl<'a> ExpressionEvaluator<'a> {
             }
             bail!("Unsupported property method: {method}")
         }
-        self.model
-            .get_property(expression)
-            .map(|value| self.expand(value))
-            .transpose()
-            .map(Option::unwrap_or_default)
+        Ok(self
+            .property_value(expression)
+            .map(Cow::into_owned)
+            .unwrap_or_default())
     }
 
-    fn evaluate_static_function(&self, expression: &str) -> Result<String> {
+    fn evaluate_static_function(&self, expression: &str, depth: usize) -> Result<String> {
         let (type_name, invocation) = expression
             .split_once("]::")
             .ok_or_else(|| anyhow!("Malformed property function: $([{expression})"))?;
@@ -323,7 +341,7 @@ impl<'a> ExpressionEvaluator<'a> {
             .ok_or_else(|| anyhow!("Malformed property function invocation: {invocation}"))?;
         let arguments = split_arguments(arguments)?
             .into_iter()
-            .map(|argument| self.evaluate(&argument))
+            .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
             .collect::<Result<Vec<_>>>()?;
 
         if type_name.eq_ignore_ascii_case("MSBuild") {
@@ -533,6 +551,46 @@ impl<'a> ExpressionEvaluator<'a> {
         }
         Ok(output)
     }
+
+    fn property_value(&self, name: &str) -> Option<Cow<'a, str>> {
+        if let Some(path) = self.current_file
+            && let Some(value) = this_file_property(name, path)
+        {
+            return Some(Cow::Owned(value));
+        }
+        self.model
+            .get_property(name)
+            .map(|value| Cow::Borrowed(value.as_str()))
+    }
+}
+
+fn ensure_bounded_nesting(input: &str) -> Result<()> {
+    let mut depth = 0usize;
+    let mut maximum = 0usize;
+    let mut quote = None;
+    for character in input.chars() {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => {
+                depth += 1;
+                maximum = maximum.max(depth);
+                if maximum > MAX_EXPRESSION_NESTING {
+                    bail!(
+                        "Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}"
+                    );
+                }
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
@@ -760,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_property_substitution() {
+    fn externally_supplied_property_values_are_not_fixed_point_expanded() {
         let mut model = ProjectModel::new();
         model.set_property("Configuration".to_string(), "Debug".to_string());
         model.set_property("OutputPath".to_string(), "bin/$(Configuration)".to_string());
@@ -769,8 +827,35 @@ mod tests {
             ExpressionEvaluator::new(&model)
                 .evaluate("$(OutputPath)")
                 .unwrap(),
-            "bin/Debug"
+            "bin/$(Configuration)"
         );
+    }
+
+    #[test]
+    fn rejects_excessive_syntactic_nesting() {
+        let model = ProjectModel::new();
+        let input = format!(
+            "{}value{}",
+            "(".repeat(MAX_EXPRESSION_NESTING + 1),
+            ")".repeat(MAX_EXPRESSION_NESTING + 1)
+        );
+        let error = ExpressionEvaluator::new(&model)
+            .evaluate(&input)
+            .unwrap_err();
+        assert!(error.to_string().contains("nesting"));
+    }
+
+    #[test]
+    fn rejects_deeply_recursive_function_arguments_even_when_quoted() {
+        let model = ProjectModel::new();
+        let mut input = "value".to_string();
+        for _ in 0..=MAX_EXPRESSION_NESTING {
+            input = format!("$([System.IO.Path]::GetFileName('{input}'))");
+        }
+        let error = ExpressionEvaluator::new(&model)
+            .evaluate(&input)
+            .unwrap_err();
+        assert!(error.to_string().contains("nesting"));
     }
 
     #[test]

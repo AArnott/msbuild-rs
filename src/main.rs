@@ -1,9 +1,9 @@
 mod evaluation;
 mod expression;
+mod loader;
 mod logger;
 mod object_model;
-mod parser;
-mod preprocess;
+mod properties;
 mod tasks;
 mod tests;
 
@@ -40,6 +40,16 @@ struct Args {
     #[arg(long, value_name = "ITEM_TYPE", action = clap::ArgAction::Append)]
     get_item: Vec<String>,
 
+    /// Set a global property using the MSBuild Name=Value form
+    #[arg(
+        long = "property",
+        visible_alias = "global-property",
+        value_name = "NAME=VALUE",
+        value_parser = parse_global_property,
+        action = clap::ArgAction::Append
+    )]
+    properties: Vec<(String, String)>,
+
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -67,7 +77,14 @@ fn main() -> Result<()> {
     info!("Project: {}", project_path.display());
     info!("Target: {}", args.target);
 
-    let mut evaluator = ProjectEvaluator::new();
+    let mut evaluator = ProjectEvaluator::with_global_properties(args.properties);
+    if let Some(output_path) = args.preprocess
+        && args.get_property.is_empty()
+        && args.get_item.is_empty()
+    {
+        evaluator.load_project_and_write_preprocessed(&project_path, output_path)?;
+        return Ok(());
+    }
     evaluator.load_project(&project_path)?;
     if !args.get_property.is_empty() || !args.get_item.is_empty() {
         let result = evaluator.query_evaluation(&args.get_property, &args.get_item)?;
@@ -75,14 +92,21 @@ fn main() -> Result<()> {
         println!();
         return Ok(());
     }
-    if let Some(output_path) = args.preprocess {
-        evaluator.write_preprocessed_project(output_path)?;
-        return Ok(());
-    }
+
     evaluator.execute_target(&args.target)?;
 
     info!("Build completed successfully");
     Ok(())
+}
+
+fn parse_global_property(value: &str) -> std::result::Result<(String, String), String> {
+    let (name, value) = value
+        .split_once('=')
+        .ok_or_else(|| "global properties must use the Name=Value form".to_string())?;
+    if name.is_empty() {
+        return Err("global property names cannot be empty".to_string());
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
 fn run_sample_projects(_args: &Args) -> Result<()> {
@@ -147,4 +171,19 @@ fn run_sample_projects(_args: &Args) -> Result<()> {
 
     info!("\n=== Demonstration Complete ===");
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn global_property_uses_name_value_form_and_preserves_equals() {
+        assert_eq!(
+            parse_global_property("DefineConstants=A=B").unwrap(),
+            ("DefineConstants".to_string(), "A=B".to_string())
+        );
+        assert!(parse_global_property("MissingValueSeparator").is_err());
+        assert!(parse_global_property("=empty-name").is_err());
+    }
 }

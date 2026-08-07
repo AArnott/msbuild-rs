@@ -133,12 +133,17 @@ impl TaskRegistry {
         self.tasks.insert(name.to_string(), executor);
     }
 
-    pub fn execute_task(&self, task: &Task, model: &ProjectModel) -> Result<()> {
+    pub fn execute_task(
+        &self,
+        task: &Task,
+        model: &ProjectModel,
+        current_file: &Path,
+    ) -> Result<()> {
         if let Some(executor) = self.tasks.get(&task.name) {
             // Check task condition first
             if let Some(condition) = &task.condition {
                 use crate::expression::ExpressionEvaluator;
-                let evaluator = ExpressionEvaluator::new(model);
+                let evaluator = ExpressionEvaluator::with_current_file(model, current_file);
                 if !evaluator.evaluate_condition(condition)? {
                     return Ok(());
                 }
@@ -146,7 +151,7 @@ impl TaskRegistry {
 
             // Evaluate all attribute values before passing to task
             use crate::expression::ExpressionEvaluator;
-            let evaluator = ExpressionEvaluator::new(model);
+            let evaluator = ExpressionEvaluator::with_current_file(model, current_file);
             let mut evaluated_attributes = HashMap::new();
 
             for (key, value) in &task.attributes {
@@ -198,7 +203,7 @@ mod tests {
             condition: None,
         };
 
-        registry.execute_task(&task, &model)?;
+        registry.execute_task(&task, &model, Path::new("test.proj"))?;
 
         Ok(())
     }
@@ -214,6 +219,6 @@ mod tests {
             condition: Some("$([MSBuild]::VersionLessThan($(SdkVersion), 8.0))".to_string()),
         };
 
-        registry.execute_task(&task, &model)
+        registry.execute_task(&task, &model, Path::new("test.proj"))
     }
 }

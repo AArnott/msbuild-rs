@@ -27,10 +27,12 @@ Both implementations now preserve aggregated project source, including unevaluat
 ### Properties
 
 - [x] Basic `$(Property)` expansion.
-- [ ] Evaluate properties in document order with last assignment winning.
-- [ ] Recursively expand property values with cycle detection.
-- [ ] Implement global properties and command-line property precedence.
-- [ ] Implement environment and reserved properties such as `MSBuildProjectDirectory`.
+- [x] Evaluate properties in document order with last eligible assignment winning.
+- [x] Expand each assignment once against the preceding state, including self,
+  before-set, and mutual references; bound syntactically nested expressions.
+- [x] Implement global properties and `--property Name=Value` command-line precedence.
+- [x] Snapshot environment properties and provide the conventional project and
+  current-file reserved properties.
 - [x] Provide core project/current-file paths and active .NET SDK properties during preprocessing.
 - [ ] Implement property functions with an explicit allowlist matching MSBuild.
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
@@ -83,9 +85,9 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 ### Imports and Project Structure
 
 - [x] Resolve imports relative to the importing file.
-- [ ] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
+- [x] Evaluate imports in document order at their source location, including conditions based on the importing project's state.
 - [x] Support deterministic preprocessing of import globs and conditional imports.
-- [ ] Honor `ImportGroup` conditions.
+- [x] Honor `ImportGroup` conditions.
 - [ ] Detect duplicate and cyclic imports with compatible diagnostics.
 - [ ] Implement `Choose`, `When`, and `Otherwise`.
 - [x] Implement implicit `Sdk.props` and `Sdk.targets` imports for installed .NET SDKs.
@@ -108,3 +110,14 @@ This work is intentionally late in the compatibility plan. The parser, evaluatio
 
 The upstream-test mapping and fixture status are maintained in
 [the evaluation compatibility matrix](evaluation-compatibility-matrix.md).
+
+## Explicitly deferred property gaps
+
+- `TreatAsLocalProperty` is not implemented. Global properties are therefore
+  always immutable during project/import evaluation.
+- Root and ordinary local path semantics are covered. Edge UNC normalization
+  remains deferred.
+- Uninitialized-property warning emission is deferred; before-set reads already
+  produce the compatible empty value without recursive reevaluation.
+- Property lookup is indexed and case-insensitive. Broader item and metadata
+  case-insensitivity remains a later wave.

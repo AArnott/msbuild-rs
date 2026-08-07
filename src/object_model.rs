@@ -1,6 +1,89 @@
+use indexmap::Equivalent;
 use indexmap::IndexMap;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+
+/// An insertion-ordered map with O(1) ASCII case-insensitive lookup.
+///
+/// Both stored and borrowed keys use the same folded hash, avoiding an
+/// allocation on lookup while the spelling from the first definition remains
+/// stable.
+#[derive(Debug, Clone)]
+pub struct PropertyMap {
+    entries: IndexMap<PropertyKey, (String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PropertyKey(String);
+
+struct PropertyLookup<'a>(&'a str);
+
+impl Hash for PropertyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_property_name(&self.0, state);
+    }
+}
+
+impl Hash for PropertyLookup<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_property_name(self.0, state);
+    }
+}
+
+impl Equivalent<PropertyKey> for PropertyLookup<'_> {
+    fn equivalent(&self, key: &PropertyKey) -> bool {
+        self.0.eq_ignore_ascii_case(&key.0)
+    }
+}
+
+impl PropertyMap {
+    pub fn new() -> Self {
+        Self {
+            entries: IndexMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, name: String, value: String) -> Option<String> {
+        if let Some((_, existing_value)) = self.entries.get_mut(&PropertyLookup(&name)) {
+            return Some(std::mem::replace(existing_value, value));
+        }
+        self.entries
+            .insert(PropertyKey(name.clone()), (name, value));
+        None
+    }
+
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.entries
+            .get(&PropertyLookup(name))
+            .map(|(_, value)| value)
+    }
+
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.entries.contains_key(&PropertyLookup(name))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.entries.values().map(|(name, value)| (name, value))
+    }
+}
+
+impl Default for PropertyMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn hash_property_name<H: Hasher>(name: &str, state: &mut H) {
+    state.write_usize(name.len());
+    for byte in name.bytes() {
+        state.write_u8(byte.to_ascii_lowercase());
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Item {
@@ -16,6 +99,7 @@ pub struct Target {
     pub depends_on: Vec<String>,
     pub condition: Option<String>,
     pub tasks: Vec<Task>,
+    pub source_file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -27,13 +111,15 @@ pub struct Task {
 
 #[derive(Debug, Clone)]
 pub struct Import {
+    #[allow(dead_code)]
     pub project: String,
+    #[allow(dead_code)]
     pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct ProjectModel {
-    pub properties: IndexMap<String, String>,
+    pub properties: PropertyMap,
     pub items: IndexMap<String, Vec<Item>>,
     pub targets: IndexMap<String, Target>,
     pub imports: Vec<Import>,
@@ -51,12 +137,7 @@ impl ProjectModel {
     }
 
     pub fn get_property(&self, name: &str) -> Option<&String> {
-        self.properties.get(name).or_else(|| {
-            self.properties
-                .iter()
-                .find(|(property_name, _)| property_name.eq_ignore_ascii_case(name))
-                .map(|(_, value)| value)
-        })
+        self.properties.get(name)
     }
 
     pub fn add_item(&mut self, item: Item) {
@@ -123,10 +204,16 @@ mod tests {
     fn property_lookup_is_case_insensitive() {
         let mut model = ProjectModel::new();
         model.set_property("NETCoreSdkVersion".to_string(), "10.0.400".to_string());
+        model.set_property("netcoresdkversion".to_string(), "10.0.401".to_string());
 
         assert_eq!(
             model.get_property("NetCoreSdkVersion"),
-            Some(&"10.0.400".to_string())
+            Some(&"10.0.401".to_string())
+        );
+        assert_eq!(model.properties.len(), 1);
+        assert_eq!(
+            model.properties.iter().next().unwrap().0,
+            "NETCoreSdkVersion"
         );
     }
 }

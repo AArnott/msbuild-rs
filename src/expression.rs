@@ -19,24 +19,46 @@ pub struct ExpressionEvaluator<'a> {
     current_item_metadata_cleared: bool,
 }
 
-pub(crate) struct EvaluatedItemExpression<'a> {
-    pub source: Option<&'a Item>,
-    pub escaped_identity: String,
-    pub preserve_metadata: bool,
-    pub preserve_recursive_dir: bool,
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ItemProvenance<'a> {
+    SourceRetained(&'a Item),
+    MetadataCleared(&'a Item),
+    SourceLess,
 }
 
-enum ItemExpressionEvaluation<'a> {
-    Items {
-        values: Vec<EvaluatedItemExpression<'a>>,
-        separator: String,
-        preserves_items: bool,
-    },
-    Scalar {
-        escaped_value: String,
-        source: Option<&'a Item>,
-        preserve_metadata: bool,
-    },
+impl<'a> ItemProvenance<'a> {
+    fn source(self) -> Option<&'a Item> {
+        match self {
+            Self::SourceRetained(source) | Self::MetadataCleared(source) => Some(source),
+            Self::SourceLess => None,
+        }
+    }
+
+    fn retained_source(self) -> Option<&'a Item> {
+        match self {
+            Self::SourceRetained(source) => Some(source),
+            Self::MetadataCleared(_) | Self::SourceLess => None,
+        }
+    }
+
+    fn clear_metadata(self) -> Self {
+        match self {
+            Self::SourceRetained(source) | Self::MetadataCleared(source) => {
+                Self::MetadataCleared(source)
+            }
+            Self::SourceLess => Self::SourceLess,
+        }
+    }
+}
+
+pub(crate) struct EvaluatedItemExpression<'a> {
+    pub provenance: ItemProvenance<'a>,
+    pub escaped_identity: String,
+}
+
+struct ItemExpressionEvaluation<'a> {
+    values: Vec<EvaluatedItemExpression<'a>>,
+    separator: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -668,7 +690,34 @@ impl<'a> ExpressionEvaluator<'a> {
             let body = &input[start + 2..end];
             let replacement = match input.as_bytes()[start] {
                 b'$' => self.evaluate_property_expression(body, depth)?,
-                b'@' => self.evaluate_item_expression(body)?,
+                b'@' => self.evaluate_item_expression(body, depth)?,
+                b'%' => self.evaluate_metadata_expression(body),
+                _ => unreachable!(),
+            };
+            output.push_str(&replacement);
+            position = end + 1;
+        }
+        output.push_str(&input[position..]);
+        Ok(output)
+    }
+
+    fn expand_properties_and_metadata(&self, input: &str, depth: usize) -> Result<String> {
+        let mut output = String::with_capacity(input.len());
+        let mut position = 0;
+
+        while let Some(relative_start) = input[position..].find(['$', '%']) {
+            let start = position + relative_start;
+            output.push_str(&input[position..start]);
+            if input.as_bytes().get(start + 1) != Some(&b'(') {
+                output.push(input.as_bytes()[start] as char);
+                position = start + 1;
+                continue;
+            }
+
+            let end = find_matching_parenthesis(input, start + 1)?;
+            let body = &input[start + 2..end];
+            let replacement = match input.as_bytes()[start] {
+                b'$' => self.evaluate_property_expression(body, depth)?,
                 b'%' => self.evaluate_metadata_expression(body),
                 _ => unreachable!(),
             };
@@ -960,61 +1009,30 @@ impl<'a> ExpressionEvaluator<'a> {
         if end + 1 != input.len() {
             return Ok(None);
         }
-        match self.evaluate_item_pipeline(&input[2..end])? {
-            ItemExpressionEvaluation::Items {
-                values,
-                preserves_items: true,
-                ..
-            } => Ok(Some(values)),
-            ItemExpressionEvaluation::Scalar {
-                escaped_value,
-                source,
-                preserve_metadata,
-            } => Ok(Some(vec![EvaluatedItemExpression {
-                source,
-                escaped_identity: escaped_value,
-                preserve_metadata,
-                preserve_recursive_dir: false,
-            }])),
-            ItemExpressionEvaluation::Items {
-                values,
-                separator,
-                preserves_items: false,
-            } => {
-                let scalar = values
-                    .into_iter()
-                    .map(|value| value.escaped_identity)
-                    .collect::<Vec<_>>()
-                    .join(&separator);
-                Ok(Some(
-                    crate::escaping::tokenize_list(&scalar)?
-                        .into_iter()
-                        .map(|identity| EvaluatedItemExpression {
-                            source: None,
-                            escaped_identity: identity.to_string(),
-                            preserve_metadata: false,
-                            preserve_recursive_dir: false,
-                        })
-                        .collect(),
-                ))
-            }
-        }
-    }
-
-    fn evaluate_item_expression(&self, expression: &str) -> Result<String> {
-        match self.evaluate_item_pipeline(expression)? {
-            ItemExpressionEvaluation::Items {
-                values, separator, ..
-            } => Ok(values
+        Ok(Some(
+            self.evaluate_item_pipeline(&input[2..end], 0)?
+                .values
                 .into_iter()
-                .map(|value| value.escaped_identity)
-                .collect::<Vec<_>>()
-                .join(&separator)),
-            ItemExpressionEvaluation::Scalar { escaped_value, .. } => Ok(escaped_value),
-        }
+                .filter(|value| !value.escaped_identity.is_empty())
+                .collect(),
+        ))
     }
 
-    fn evaluate_item_pipeline(&self, expression: &str) -> Result<ItemExpressionEvaluation<'a>> {
+    fn evaluate_item_expression(&self, expression: &str, depth: usize) -> Result<String> {
+        let evaluation = self.evaluate_item_pipeline(expression, depth)?;
+        Ok(evaluation
+            .values
+            .into_iter()
+            .map(|value| value.escaped_identity)
+            .collect::<Vec<_>>()
+            .join(&evaluation.separator))
+    }
+
+    fn evaluate_item_pipeline(
+        &self,
+        expression: &str,
+        depth: usize,
+    ) -> Result<ItemExpressionEvaluation<'a>> {
         let (pipeline, separator) = split_item_separator(expression)?;
         let stages = split_item_pipeline(pipeline)?;
         let item_type = stages
@@ -1022,11 +1040,9 @@ impl<'a> ExpressionEvaluator<'a> {
             .map(|stage| stage.trim())
             .filter(|item_type| !item_type.is_empty())
             .ok_or_else(|| anyhow!("Item expression has no item type"))?;
-        let preserves_items = separator.is_none();
         let separator = separator
-            .map(|value| self.evaluate(&unquote(value.trim())))
-            .transpose()?
-            .unwrap_or_else(|| ";".to_string());
+            .map(|value| self.evaluate_with_depth(&unquote(value.trim()), depth + 1))
+            .transpose()?;
 
         let mut values = self
             .model
@@ -1034,133 +1050,142 @@ impl<'a> ExpressionEvaluator<'a> {
             .into_iter()
             .flatten()
             .map(|item| EvaluatedItemExpression {
-                source: Some(item),
+                provenance: ItemProvenance::SourceRetained(item),
                 escaped_identity: item.escaped_name.clone(),
-                preserve_metadata: true,
-                preserve_recursive_dir: true,
             })
             .collect::<Vec<_>>();
-        for (stage_index, stage) in stages[1..].iter().enumerate() {
+        for stage in &stages[1..] {
             let stage = stage.trim();
             if (stage.starts_with('\'') && stage.ends_with('\''))
                 || (stage.starts_with('"') && stage.ends_with('"'))
             {
                 let template = unquote(stage);
                 for value in &mut values {
-                    let source = value
-                        .source
-                        .expect("item pipelines retain source provenance");
-                    let evaluated = Self::with_item_expression(
-                        self.model,
-                        self.current_file_path(),
-                        source,
-                        &value.escaped_identity,
-                        !value.preserve_metadata,
-                    )
-                    .evaluate(&template)?;
-                    value.escaped_identity = EscapedString::new(evaluated)
-                        .decode()
-                        .into_escaped()
-                        .into_string();
-                    value.preserve_recursive_dir = false;
+                    if value.escaped_identity.is_empty() {
+                        continue;
+                    }
+                    value.escaped_identity = match value.provenance {
+                        ItemProvenance::SourceRetained(source) => Self::with_item_expression(
+                            self.model,
+                            self.current_file_path(),
+                            source,
+                            &value.escaped_identity,
+                            false,
+                        )
+                        .evaluate(&template)?,
+                        ItemProvenance::MetadataCleared(source) => Self::with_item_expression(
+                            self.model,
+                            self.current_file_path(),
+                            source,
+                            &value.escaped_identity,
+                            true,
+                        )
+                        .evaluate(&template)?,
+                        ItemProvenance::SourceLess => {
+                            Self::with_current_file(self.model, self.current_file_path())
+                                .evaluate(&template)?
+                        }
+                    };
                 }
-                values.retain(|value| !value.escaped_identity.is_empty());
                 continue;
             }
 
-            let (method, arguments) = parse_invocation(stage)
+            let (method, argument_expression) = parse_invocation(stage)
                 .ok_or_else(|| anyhow!("Malformed item function: {stage}"))?;
-            let arguments = split_arguments(arguments)?
-                .into_iter()
-                .map(|argument| self.evaluate(&argument).map(|value| unescape_once(&value)))
-                .collect::<Result<Vec<_>>>()?;
-            let is_last_stage = stage_index + 1 == stages.len() - 1;
+            let argument_expression =
+                self.expand_properties_and_metadata(argument_expression, depth + 1)?;
+            let arguments = split_arguments(&argument_expression)?;
             if method.eq_ignore_ascii_case("Metadata") {
                 require_arguments(method, &arguments, 1)?;
                 let mut transformed = Vec::new();
                 for value in values {
-                    let source = value
-                        .source
-                        .expect("item pipelines retain source provenance");
-                    let metadata = source
-                        .get_metadata_for_identity_escaped(
-                            &arguments[0],
-                            &value.escaped_identity,
-                            !value.preserve_metadata,
-                        )
+                    let metadata = value
+                        .provenance
+                        .retained_source()
+                        .and_then(|source| source.get_metadata_escaped(&arguments[0]))
                         .map(Cow::into_owned)
                         .unwrap_or_default();
                     for identity in crate::escaping::tokenize_list(&metadata)? {
                         transformed.push(EvaluatedItemExpression {
-                            source: value.source,
+                            provenance: value.provenance,
                             escaped_identity: identity.to_string(),
-                            preserve_metadata: value.preserve_metadata,
-                            preserve_recursive_dir: false,
                         });
                     }
                 }
                 values = transformed;
             } else if matches_ignore_ascii_case(method, ITEM_SPEC_MODIFIERS) {
                 require_arguments(method, &arguments, 0)?;
-                for value in &mut values {
-                    let source = value
-                        .source
-                        .expect("item pipelines retain source provenance");
-                    value.escaped_identity = source
-                        .get_metadata_for_identity_escaped(
-                            method,
-                            &value.escaped_identity,
-                            !value.preserve_metadata,
-                        )
-                        .map(Cow::into_owned)
-                        .unwrap_or_default();
-                    value.preserve_recursive_dir = false;
+                let mut transformed = Vec::with_capacity(values.len());
+                for mut value in values {
+                    if value.escaped_identity.is_empty() {
+                        continue;
+                    }
+                    value.escaped_identity = match value.provenance {
+                        ItemProvenance::SourceRetained(source) => source
+                            .get_metadata_for_identity_escaped(
+                                method,
+                                &value.escaped_identity,
+                                false,
+                            )
+                            .map(Cow::into_owned)
+                            .unwrap_or_default(),
+                        ItemProvenance::MetadataCleared(source) => source
+                            .get_metadata_for_identity_escaped(
+                                method,
+                                &value.escaped_identity,
+                                true,
+                            )
+                            .map(Cow::into_owned)
+                            .unwrap_or_default(),
+                        ItemProvenance::SourceLess if method.eq_ignore_ascii_case("Identity") => {
+                            value.escaped_identity.clone()
+                        }
+                        ItemProvenance::SourceLess => String::new(),
+                    };
+                    if !value.escaped_identity.is_empty() {
+                        transformed.push(value);
+                    }
                 }
-                values.retain(|value| !value.escaped_identity.is_empty());
+                values = transformed;
             } else if method.eq_ignore_ascii_case("Distinct") {
                 require_arguments(method, &arguments, 0)?;
                 let mut seen = std::collections::HashSet::new();
                 values.retain(|value| {
-                    seen.insert(unescape_once(&value.escaped_identity).to_lowercase())
+                    !value.escaped_identity.is_empty()
+                        && seen.insert(dotnet_ordinal_ignore_case_key(&value.escaped_identity))
                 });
             } else if method.eq_ignore_ascii_case("DistinctWithCase") {
                 require_arguments(method, &arguments, 0)?;
                 let mut seen = std::collections::HashSet::new();
-                values.retain(|value| seen.insert(unescape_once(&value.escaped_identity)));
+                values.retain(|value| {
+                    !value.escaped_identity.is_empty()
+                        && seen.insert(value.escaped_identity.clone())
+                });
             } else if method.eq_ignore_ascii_case("Reverse") {
                 require_arguments(method, &arguments, 0)?;
                 values.reverse();
             } else if method.eq_ignore_ascii_case("Count") {
                 require_arguments(method, &arguments, 0)?;
-                if !is_last_stage {
-                    bail!("Count must be the last item function in a pipeline");
-                }
-                return Ok(ItemExpressionEvaluation::Scalar {
-                    escaped_value: values.len().to_string(),
-                    source: None,
-                    preserve_metadata: false,
-                });
+                values = vec![EvaluatedItemExpression {
+                    provenance: ItemProvenance::SourceLess,
+                    escaped_identity: values.len().to_string(),
+                }];
             } else if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
                 require_arguments(method, &arguments, 2)?;
-                if !is_last_stage {
-                    bail!("AnyHaveMetadataValue must be the last item function in a pipeline");
-                }
                 let source_value = values.iter().find(|value| {
                     item_expression_metadata(value, &arguments[0])
-                        .map_or(arguments[1].is_empty(), |metadata| {
-                            ordinal_ignore_case(&metadata, &arguments[1])
-                        })
+                        .is_some_and(|metadata| ordinal_ignore_case(&metadata, &arguments[1]))
                 });
-                return Ok(ItemExpressionEvaluation::Scalar {
-                    escaped_value: if source_value.is_some() {
+                values = vec![EvaluatedItemExpression {
+                    provenance: source_value
+                        .map_or(ItemProvenance::SourceLess, |value| value.provenance),
+                    escaped_identity: if source_value.is_some() {
                         "true"
                     } else {
                         "false"
                     }
                     .to_string(),
-                    source: source_value.and_then(|value| value.source),
-                    preserve_metadata: source_value.is_some_and(|value| value.preserve_metadata),
-                });
+                }];
             } else if method.eq_ignore_ascii_case("HasMetadata") {
                 require_arguments(method, &arguments, 1)?;
                 values.retain(|value| {
@@ -1174,51 +1199,73 @@ impl<'a> ExpressionEvaluator<'a> {
                 let retain_matches = method.eq_ignore_ascii_case("WithMetadataValue");
                 values.retain(|value| {
                     let matches = item_expression_metadata(value, &arguments[0])
-                        .map_or(arguments[1].is_empty(), |metadata| {
-                            ordinal_ignore_case(&metadata, &arguments[1])
-                        });
+                        .is_some_and(|metadata| ordinal_ignore_case(&metadata, &arguments[1]));
                     matches == retain_matches
                 });
             } else if method.eq_ignore_ascii_case("ClearMetadata") {
                 require_arguments(method, &arguments, 0)?;
                 for value in &mut values {
-                    value.preserve_metadata = false;
-                    value.preserve_recursive_dir = false;
+                    value.provenance = value.provenance.clear_metadata();
                 }
             } else if method.eq_ignore_ascii_case("Exists") {
                 require_arguments(method, &arguments, 0)?;
                 values.retain(|value| {
-                    value
-                        .source
-                        .is_some_and(|source| source.identity_exists(&value.escaped_identity))
+                    !value.escaped_identity.is_empty()
+                        && value
+                            .provenance
+                            .source()
+                            .is_some_and(|source| source.identity_exists(&value.escaped_identity))
                 });
             } else if method.eq_ignore_ascii_case("DirectoryName") {
                 require_arguments(method, &arguments, 0)?;
-                for value in &mut values {
-                    let source = value
-                        .source
-                        .expect("item pipelines retain source provenance");
+                let mut transformed = Vec::with_capacity(values.len());
+                for mut value in values {
+                    if value.escaped_identity.is_empty() {
+                        continue;
+                    }
+                    let Some(source) = value.provenance.source() else {
+                        continue;
+                    };
                     value.escaped_identity = source.directory_name(&value.escaped_identity);
-                    value.preserve_recursive_dir = false;
+                    if !value.escaped_identity.is_empty() {
+                        transformed.push(value);
+                    }
                 }
-                values.retain(|value| !value.escaped_identity.is_empty());
+                values = transformed;
             } else if method.eq_ignore_ascii_case("Combine") {
                 require_arguments(method, &arguments, 1)?;
-                for value in &mut values {
+                let mut transformed = Vec::with_capacity(values.len());
+                for mut value in values {
+                    if value.escaped_identity.is_empty() {
+                        continue;
+                    }
                     let combined =
                         Path::new(&unescape_once(&value.escaped_identity)).join(&arguments[0]);
                     value.escaped_identity = escape(&display_path(&combined));
-                    value.preserve_metadata = false;
-                    value.preserve_recursive_dir = false;
+                    value.provenance = ItemProvenance::SourceLess;
+                    transformed.push(value);
                 }
+                values = transformed;
             } else {
                 bail!("Unsupported item function: {method}");
             }
         }
-        Ok(ItemExpressionEvaluation::Items {
+
+        if let Some(separator) = separator {
+            let escaped_identity = values
+                .into_iter()
+                .map(|value| value.escaped_identity)
+                .collect::<Vec<_>>()
+                .join(&separator);
+            values = vec![EvaluatedItemExpression {
+                provenance: ItemProvenance::SourceLess,
+                escaped_identity,
+            }];
+        }
+
+        Ok(ItemExpressionEvaluation {
             values,
-            separator,
-            preserves_items,
+            separator: ";".to_string(),
         })
     }
 
@@ -1276,17 +1323,35 @@ fn item_expression_metadata<'a>(
     value: &'a EvaluatedItemExpression<'a>,
     name: &str,
 ) -> Option<Cow<'a, str>> {
-    let source = value.source?;
-    source.get_metadata_for_identity(
-        name,
-        &unescape_once(&value.escaped_identity),
-        !value.preserve_metadata,
+    let source = value.provenance.retained_source()?;
+    Some(
+        source
+            .get_metadata_escaped(name)
+            .unwrap_or(Cow::Borrowed("")),
     )
 }
 
 fn ordinal_ignore_case(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-        || ((!left.is_ascii() || !right.is_ascii()) && left.to_lowercase() == right.to_lowercase())
+    dotnet_ordinal_ignore_case_key(left) == dotnet_ordinal_ignore_case_key(right)
+}
+
+fn dotnet_ordinal_ignore_case_key(value: &str) -> Vec<u16> {
+    let mut key = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        // .NET's ordinal comparer excludes these compatibility folds.
+        let folded = if matches!(character, '\u{131}' | '\u{17f}') {
+            character
+        } else {
+            let mut uppercase = character.to_uppercase();
+            match (uppercase.next(), uppercase.next()) {
+                (Some(single), None) => single,
+                _ => character,
+            }
+        };
+        let mut units = [0; 2];
+        key.extend_from_slice(folded.encode_utf16(&mut units));
+    }
+    key
 }
 
 fn is_os_platform(platform: &str) -> Result<bool> {
@@ -1654,6 +1719,71 @@ mod tests {
 
         let result = evaluator.evaluate("Files: @(Compile)").unwrap();
         assert_eq!(result, "Files: file1.cs;file2.cs");
+    }
+
+    #[test]
+    fn item_function_arguments_expand_properties_and_current_metadata_before_splitting() {
+        let mut model = ProjectModel::new();
+        model.set_property("Args".to_string(), "'M','x'".to_string());
+        for identity in ["a", "b"] {
+            let mut item = Item::new(
+                "I".to_string(),
+                identity.to_string(),
+                Arc::new(MetadataMap::new()),
+                PathBuf::from("."),
+                PathBuf::from("project.proj"),
+            );
+            item.set_metadata("M".to_string(), "x".to_string());
+            model.add_item(item);
+        }
+        model.add_item(Item::new(
+            "ArgText".to_string(),
+            "M".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
+            PathBuf::from("project.proj"),
+        ));
+        let mut outer = Item::new(
+            "Outer".to_string(),
+            "holder".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("."),
+            PathBuf::from("project.proj"),
+        );
+        outer.set_metadata("Args".to_string(), "'M','x'".to_string());
+        let evaluator = ExpressionEvaluator::with_item(&model, Path::new("project.proj"), &outer);
+
+        assert_eq!(
+            evaluator
+                .evaluate("@(I->WithMetadataValue($(Args)))")
+                .unwrap(),
+            "a;b"
+        );
+        assert_eq!(
+            evaluator
+                .evaluate("@(I->WithMetadataValue(%(Args)))")
+                .unwrap(),
+            "a;b"
+        );
+        assert_eq!(
+            evaluator
+                .evaluate("@(I->HasMetadata(@(ArgText))->Count())")
+                .unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn ordinal_ignore_case_key_matches_dotnet_utf16_edge_cases() {
+        assert!(ordinal_ignore_case("K", "k"));
+        assert!(!ordinal_ignore_case("K", "K"));
+        assert!(ordinal_ignore_case("σ", "ς"));
+        assert!(ordinal_ignore_case("σ", "Σ"));
+        assert!(ordinal_ignore_case("µ", "Μ"));
+        assert!(!ordinal_ignore_case("i", "ı"));
+        assert!(!ordinal_ignore_case("s", "ſ"));
+        assert!(!ordinal_ignore_case("ß", "ẞ"));
+        assert!(!ordinal_ignore_case("%41", "A"));
     }
 
     #[test]

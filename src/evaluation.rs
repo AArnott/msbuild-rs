@@ -2298,6 +2298,156 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_item_pipeline_semantics_match_direct_msbuild() -> Result<()> {
+        // Direct dotnet-msbuild repros for transform correlation, scalar chaining,
+        // intrinsic escaping, custom separators, provenance, and ordinal distinctness.
+        let directory = TempDir::new()?;
+        fs::create_dir_all(directory.path().join("tree").join("sub"))?;
+        fs::write(directory.path().join("tree").join("root.txt"), "")?;
+        fs::write(
+            directory.path().join("tree").join("sub").join("nested.txt"),
+            "",
+        )?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup><Args>'M','x'</Args></PropertyGroup>
+  <ItemDefinitionGroup>
+    <I><SourceDefault>source-default</SourceDefault><Overlap>source</Overlap></I>
+    <Copy><DestinationDefault>destination-default</DestinationDefault><Overlap>destination</Overlap></Copy>
+    <Same><DestinationDefault>destination-default</DestinationDefault><Overlap>destination</Overlap></Same>
+    <Changed><DestinationDefault>destination-default</DestinationDefault><Overlap>destination</Overlap></Changed>
+    <Cleared><DestinationDefault>destination-default</DestinationDefault></Cleared>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ArgText Include="M" />
+    <I Include="a;b"><M>x</M><Custom>source</Custom></I>
+    <EmptyTransformCount Include="@(I->'%(Missing)'->Count())" />
+    <EmptyTransformMaterialized Include="@(I->'%(Missing)')" />
+    <CountCombine Include="@(I->Count()->Combine('x'))" />
+    <AnyCount Include="@(I->AnyHaveMetadataValue('M','x')->Count())" />
+    <PropertyArguments Include="@(I->WithMetadataValue($(Args)))" />
+    <NestedVectorArgument Include="@(I->HasMetadata(@(ArgText))->Count())" />
+    <EscapedCombine Include="@(I->Combine('%3B'))" />
+    <TransformMetadataIdentity Include="@(I->'%(Identity).changed'->Metadata('Identity'))" />
+    <TransformIdentityFunction Include="@(I->'%(Identity).changed'->Identity())" />
+    <ClearIdentityCount Include="@(I->ClearMetadata()->Metadata('Identity')->Count())" />
+    <CombineIdentityCount Include="@(I->Combine('x')->Metadata('Identity')->Count())" />
+    <SemiSeparator Include="@(I, ';')" />
+    <PipeSeparator Include="@(I, '|')" />
+    <AnySource Include="@(I->AnyHaveMetadataValue('M','x'))" />
+    <AnySeparated Include="@(I->AnyHaveMetadataValue('M','x'), '|')" />
+    <CountSeparated Include="@(I->Count(), '|')" />
+    <Escaped Include="%41;A;K;K;σ;ς" />
+    <DistinctEscaped Include="@(Escaped->Distinct())" />
+    <DistinctCaseEscaped Include="@(Escaped->DistinctWithCase())" />
+    <Copy Include="@(I)" />
+    <Same Include="@(I->'%(Identity)')" />
+    <Changed Include="@(I->'%(Identity).changed')" />
+    <Cleared Include="@(I->ClearMetadata())" />
+    <Glob Include="tree/**/*.txt"><Custom>glob</Custom></Glob>
+    <GlobCopy Include="@(Glob)" />
+    <GlobSame Include="@(Glob->'%(Identity)')" />
+    <GlobChanged Include="@(Glob->'%(Identity).changed')" />
+  </ItemGroup>
+</Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let identities = |item_type: &str| {
+            model
+                .get_items(item_type)
+                .into_iter()
+                .flatten()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(identities("EmptyTransformCount"), ["2"]);
+        assert!(
+            model
+                .get_items("EmptyTransformMaterialized")
+                .is_none_or(Vec::is_empty)
+        );
+        assert_eq!(
+            identities("CountCombine"),
+            [format!("2{}x", std::path::MAIN_SEPARATOR)]
+        );
+        assert_eq!(identities("AnyCount"), ["1"]);
+        assert_eq!(identities("PropertyArguments"), ["a", "b"]);
+        assert_eq!(identities("NestedVectorArgument"), ["0"]);
+        assert_eq!(
+            identities("EscapedCombine"),
+            [
+                format!("a{}%3B", std::path::MAIN_SEPARATOR),
+                format!("b{}%3B", std::path::MAIN_SEPARATOR),
+            ]
+        );
+        assert_eq!(identities("TransformMetadataIdentity"), ["a", "b"]);
+        assert_eq!(
+            identities("TransformIdentityFunction"),
+            ["a.changed", "b.changed"]
+        );
+        assert_eq!(identities("ClearIdentityCount"), ["0"]);
+        assert_eq!(identities("CombineIdentityCount"), ["0"]);
+        assert_eq!(identities("SemiSeparator"), ["a;b"]);
+        assert_eq!(identities("PipeSeparator"), ["a|b"]);
+        assert_eq!(identities("CountSeparated"), ["2"]);
+        assert_eq!(identities("DistinctEscaped"), ["A", "A", "K", "K", "σ"]);
+        assert_eq!(
+            identities("DistinctCaseEscaped"),
+            ["A", "A", "K", "K", "σ", "ς"]
+        );
+
+        let any_source = &model.get_items("AnySource").unwrap()[0];
+        assert_eq!(any_source.get_metadata("M").as_deref(), Some("x"));
+        for item_type in [
+            "AnySeparated",
+            "CountSeparated",
+            "SemiSeparator",
+            "PipeSeparator",
+        ] {
+            assert!(
+                model.get_items(item_type).unwrap()[0]
+                    .get_metadata("M")
+                    .is_none()
+            );
+        }
+
+        for item_type in ["Copy", "Same", "Changed"] {
+            assert!(model.get_items(item_type).unwrap().iter().all(|item| {
+                item.get_metadata("M").as_deref() == Some("x")
+                    && item.get_metadata("SourceDefault").as_deref() == Some("source-default")
+                    && item.get_metadata("DestinationDefault").as_deref()
+                        == Some("destination-default")
+                    && item.get_metadata("Overlap").as_deref() == Some("source")
+            }));
+        }
+        assert!(model.get_items("Cleared").unwrap().iter().all(|item| {
+            item.get_metadata("M").is_none()
+                && item.get_metadata("SourceDefault").is_none()
+                && item.get_metadata("DestinationDefault").as_deref() == Some("destination-default")
+        }));
+
+        for item_type in ["GlobCopy", "GlobSame"] {
+            assert_eq!(
+                model.get_items(item_type).unwrap()[1]
+                    .get_metadata("RecursiveDir")
+                    .as_deref(),
+                Some(format!("sub{}", std::path::MAIN_SEPARATOR).as_str())
+            );
+        }
+        assert!(model.get_items("GlobChanged").unwrap().iter().all(|item| {
+            item.get_metadata("RecursiveDir").as_deref() == Some("")
+                && item.get_metadata("Custom").as_deref() == Some("glob")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn upstream_different_excludes_and_recursive_glob_metadata() -> Result<()> {
         // Exact project-data port of ItemEvaluation_Tests.
         // DifferentExcludesOnSameWildcardProduceDifferentResults, extended with

@@ -11,7 +11,7 @@ use crate::escaping::{
     ItemSpecKind, classify_item_spec, escape, to_glob_pattern, tokenize_list, unescape_once,
 };
 use crate::evaluation::{ActiveToolset, EvaluationContext};
-use crate::expression::ExpressionEvaluator;
+use crate::expression::{ExpressionEvaluator, ItemProvenance};
 use crate::object_model::{
     Import, Item, ProjectModel, PropertyMap, Target, Task, is_well_known_metadata,
 };
@@ -1066,35 +1066,31 @@ impl EvaluationState {
             let evaluator = ExpressionEvaluator::with_current_file(&self.model, current_file);
             if let Some(results) = evaluator.evaluate_item_expression_items(fragment)? {
                 for result in results {
-                    for identity in tokenize_list(&result.escaped_identity)? {
-                        let candidate = if let Some(source) = result.source {
-                            if result.preserve_metadata {
-                                source.copy_for_type(
-                                    item.item_type.clone(),
-                                    identity.to_string(),
-                                    defaults.clone(),
-                                    current_file.to_path_buf(),
-                                    result.preserve_recursive_dir,
-                                )
-                            } else {
-                                source.copy_for_type_without_metadata(
-                                    item.item_type.clone(),
-                                    identity.to_string(),
-                                    defaults.clone(),
-                                    current_file.to_path_buf(),
-                                )
-                            }
-                        } else {
-                            Item::new(
+                    let identity = result.escaped_identity;
+                    let candidate = match result.provenance {
+                        ItemProvenance::SourceRetained(source) => source.copy_for_type(
+                            item.item_type.clone(),
+                            identity.clone(),
+                            defaults.clone(),
+                            current_file.to_path_buf(),
+                            identity == source.escaped_name,
+                        ),
+                        ItemProvenance::MetadataCleared(source) => source
+                            .copy_for_type_without_metadata(
                                 item.item_type.clone(),
-                                identity.to_string(),
+                                identity,
                                 defaults.clone(),
-                                evaluation_directory.clone(),
                                 current_file.to_path_buf(),
-                            )
-                        };
-                        candidates.push(candidate);
-                    }
+                            ),
+                        ItemProvenance::SourceLess => Item::new(
+                            item.item_type.clone(),
+                            identity,
+                            defaults.clone(),
+                            evaluation_directory.clone(),
+                            current_file.to_path_buf(),
+                        ),
+                    };
+                    candidates.push(candidate);
                 }
                 continue;
             }

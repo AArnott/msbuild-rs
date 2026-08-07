@@ -108,6 +108,12 @@ and nonstandard runtime platform identifiers.
 - [x] Implement deterministic eager `*`, `?`, and recursive `**` item-glob
   expansion from the root project directory, per-Include excludes, recursive
   path metadata, escaped wildcard literals, and platform path/case rules.
+
+Pipeline entries now distinguish retained source metadata, cleared metadata,
+and source-less scalars. This preserves empty transform correlation through
+chained functions, makes explicit separators atomic, and matches escaped
+ordinal distinctness without changing the still-open remaining-item-function
+checkbox above.
 - [x] Preserve escaped wildcard/list syntax until classification so `%2A`, `%3F`,
   `%3B`, and `%25NN` are not reinterpreted; only unescaped `*` and `?` classify
   a specification as a wildcard (`[` is literal).

@@ -3,7 +3,8 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::object_model::ProjectModel;
+use crate::escaping::{escape, unescape_once};
+use crate::object_model::{Item, ProjectModel};
 use crate::properties::this_file_property;
 
 const MAX_EXPRESSION_NESTING: usize = 128;
@@ -12,6 +13,8 @@ pub struct ExpressionEvaluator<'a> {
     model: &'a ProjectModel,
     base_directory: PathBuf,
     current_file: Option<&'a Path>,
+    current_item: Option<&'a Item>,
+    current_item_type: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,7 +452,7 @@ impl ConditionExpression {
     fn evaluate_bool(&self, evaluator: &ExpressionEvaluator<'_>) -> Result<bool> {
         match self {
             Self::Value(value) => {
-                let value = evaluator.evaluate(value)?;
+                let value = unescape_once(&evaluator.evaluate(value)?);
                 parse_condition_bool(&value).ok_or_else(|| {
                     anyhow!("Expected a boolean value or comparison, found '{value}'")
                 })
@@ -510,7 +513,9 @@ impl ConditionExpression {
 
     fn evaluate_operand(&self, evaluator: &ExpressionEvaluator<'_>) -> Result<ConditionOperand> {
         match self {
-            Self::Value(value) => Ok(ConditionOperand::Text(evaluator.evaluate(value)?)),
+            Self::Value(value) => Ok(ConditionOperand::Text(unescape_once(
+                &evaluator.evaluate(value)?,
+            ))),
             _ => Ok(ConditionOperand::Boolean(self.evaluate_bool(evaluator)?)),
         }
     }
@@ -540,6 +545,8 @@ impl<'a> ExpressionEvaluator<'a> {
                 .get_project_directory()
                 .unwrap_or_else(|| PathBuf::from(".")),
             current_file: None,
+            current_item: None,
+            current_item_type: None,
         }
     }
 
@@ -548,6 +555,32 @@ impl<'a> ExpressionEvaluator<'a> {
             model,
             base_directory: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
             current_file: Some(path),
+            current_item: None,
+            current_item_type: None,
+        }
+    }
+
+    pub fn with_item(model: &'a ProjectModel, path: &'a Path, item: &'a Item) -> Self {
+        Self {
+            model,
+            base_directory: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            current_file: Some(path),
+            current_item: Some(item),
+            current_item_type: Some(&item.item_type),
+        }
+    }
+
+    pub fn with_item_definition(
+        model: &'a ProjectModel,
+        path: &'a Path,
+        item_type: &'a str,
+    ) -> Self {
+        Self {
+            model,
+            base_directory: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
+            current_file: Some(path),
+            current_item: None,
+            current_item_type: Some(item_type),
         }
     }
 
@@ -574,7 +607,7 @@ impl<'a> ExpressionEvaluator<'a> {
         let mut output = String::with_capacity(input.len());
         let mut position = 0;
 
-        while let Some(relative_start) = input[position..].find(['$', '@']) {
+        while let Some(relative_start) = input[position..].find(['$', '@', '%']) {
             let start = position + relative_start;
             output.push_str(&input[position..start]);
             if input.as_bytes().get(start + 1) != Some(&b'(') {
@@ -585,10 +618,11 @@ impl<'a> ExpressionEvaluator<'a> {
 
             let end = find_matching_parenthesis(input, start + 1)?;
             let body = &input[start + 2..end];
-            let replacement = if input.as_bytes()[start] == b'$' {
-                self.evaluate_property_expression(body, depth)?
-            } else {
-                self.evaluate_item_expression(body)?
+            let replacement = match input.as_bytes()[start] {
+                b'$' => self.evaluate_property_expression(body, depth)?,
+                b'@' => self.evaluate_item_expression(body)?,
+                b'%' => self.evaluate_metadata_expression(body),
+                _ => unreachable!(),
             };
             output.push_str(&replacement);
             position = end + 1;
@@ -601,6 +635,7 @@ impl<'a> ExpressionEvaluator<'a> {
         if let Some(function) = expression.strip_prefix('[') {
             return self.evaluate_static_function(function, depth);
         }
+
         if let Some((property, invocation)) = expression.split_once('.')
             && let Some((method, arguments)) = parse_invocation(invocation)
         {
@@ -655,6 +690,34 @@ impl<'a> ExpressionEvaluator<'a> {
             .property_value(expression)
             .map(Cow::into_owned)
             .unwrap_or_default())
+    }
+
+    fn evaluate_metadata_expression(&self, expression: &str) -> String {
+        let (qualifier, name) = expression
+            .split_once('.')
+            .map_or((None, expression), |(qualifier, name)| {
+                (Some(qualifier), name)
+            });
+        if let Some(qualifier) = qualifier
+            && self
+                .current_item_type
+                .is_none_or(|item_type| !qualifier.eq_ignore_ascii_case(item_type))
+        {
+            return String::new();
+        }
+        if let Some(item) = self.current_item {
+            return item
+                .get_metadata_escaped(name)
+                .map(Cow::into_owned)
+                .unwrap_or_default();
+        }
+        self.current_item_type
+            .and_then(|item_type| {
+                self.model
+                    .get_item_definition_metadata_escaped(item_type, name)
+            })
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn evaluate_static_function(&self, expression: &str, depth: usize) -> Result<String> {
@@ -809,49 +872,99 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 
     fn evaluate_item_expression(&self, expression: &str) -> Result<String> {
-        if let Some((item_type, invocation)) = expression.split_once("->") {
-            let (method, arguments) = parse_invocation(invocation)
-                .ok_or_else(|| anyhow!("Malformed item function: {invocation}"))?;
+        let (pipeline, separator) = split_item_separator(expression)?;
+        let stages = split_item_pipeline(pipeline)?;
+        let item_type = stages
+            .first()
+            .map(|stage| stage.trim())
+            .filter(|item_type| !item_type.is_empty())
+            .ok_or_else(|| anyhow!("Item expression has no item type"))?;
+        let separator = separator
+            .map(|value| self.evaluate(&unquote(value.trim())))
+            .transpose()?
+            .unwrap_or_else(|| ";".to_string());
+
+        let items = self.model.get_items(item_type);
+        if stages.len() == 1 {
+            return Ok(items
+                .into_iter()
+                .flatten()
+                .map(|item| item.escaped_name.as_str())
+                .collect::<Vec<_>>()
+                .join(&separator));
+        }
+
+        if stages.len() == 2
+            && let Some((method, arguments)) = parse_invocation(stages[1].trim())
+        {
             let arguments = split_arguments(arguments)?;
             if method.eq_ignore_ascii_case("AnyHaveMetadataValue") {
                 require_arguments(method, &arguments, 2)?;
-                return Ok(self
-                    .model
-                    .get_items(item_type)
+                return Ok(items
                     .is_some_and(|items| {
                         items.iter().any(|item| {
-                            item.metadata.iter().any(|(name, value)| {
-                                name.eq_ignore_ascii_case(&arguments[0])
-                                    && value.eq_ignore_ascii_case(&arguments[1])
-                            })
+                            item.get_metadata(&arguments[0])
+                                .is_some_and(|value| value.eq_ignore_ascii_case(&arguments[1]))
                         })
                     })
                     .to_string());
             }
-            if method.eq_ignore_ascii_case("Distinct") {
+        }
+
+        let mut values = items
+            .into_iter()
+            .flatten()
+            .map(|item| (item, item.escaped_name.clone()))
+            .collect::<Vec<_>>();
+        for stage in &stages[1..] {
+            let stage = stage.trim();
+            if (stage.starts_with('\'') && stage.ends_with('\''))
+                || (stage.starts_with('"') && stage.ends_with('"'))
+            {
+                let template = unquote(stage);
+                for (item, value) in &mut values {
+                    let evaluated = Self::with_item(self.model, self.current_file_path(), item)
+                        .evaluate(&template)?;
+                    *value = escape(&unescape_once(&evaluated));
+                }
+                continue;
+            }
+
+            let (method, arguments) = parse_invocation(stage)
+                .ok_or_else(|| anyhow!("Malformed item function: {stage}"))?;
+            let arguments = split_arguments(arguments)?;
+            if method.eq_ignore_ascii_case("Metadata") {
+                require_arguments(method, &arguments, 1)?;
+                for (item, value) in &mut values {
+                    *value = item
+                        .get_metadata_escaped(&arguments[0])
+                        .map(Cow::into_owned)
+                        .unwrap_or_default();
+                }
+            } else if matches_ignore_ascii_case(method, &["Directory", "Filename", "Extension"]) {
+                require_arguments(method, &arguments, 0)?;
+                for (_, value) in &mut values {
+                    *value = item_spec_modifier(value, method);
+                }
+            } else if method.eq_ignore_ascii_case("Distinct") {
                 require_arguments(method, &arguments, 0)?;
                 let mut seen = std::collections::HashSet::new();
-                return Ok(self
-                    .model
-                    .get_items(item_type)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| {
-                        seen.insert(item.name.to_ascii_lowercase())
-                            .then_some(item.name.as_str())
-                    })
-                    .collect::<Vec<_>>()
-                    .join(";"));
+                values.retain(|(_, value)| seen.insert(unescape_once(value).to_ascii_lowercase()));
+            } else {
+                bail!("Unsupported item function: {method}");
             }
-            bail!("Unsupported item function: {method}")
         }
-        Ok(self.model.get_all_item_names(expression))
+        Ok(values
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>()
+            .join(&separator))
     }
 
     fn evaluate_condition_function(&self, name: &str, arguments: &[String]) -> Result<bool> {
         let arguments = arguments
             .iter()
-            .map(|argument| self.evaluate(argument))
+            .map(|argument| self.evaluate(argument).map(|value| unescape_once(&value)))
             .collect::<Result<Vec<_>>>()?;
         if name.eq_ignore_ascii_case("Exists") {
             require_arguments(name, &arguments, 1)?;
@@ -875,9 +988,11 @@ impl<'a> ExpressionEvaluator<'a> {
         {
             return Some(Cow::Owned(value));
         }
-        self.model
-            .get_property(name)
-            .map(|value| Cow::Borrowed(value.as_str()))
+        self.model.get_property_escaped(name).map(Cow::Borrowed)
+    }
+
+    fn current_file_path(&self) -> &'a Path {
+        self.current_file.unwrap_or_else(|| Path::new(""))
     }
 }
 
@@ -934,6 +1049,70 @@ fn parse_invocation(input: &str) -> Option<(&str, &str)> {
         .then(|| (&input[..opening], &input[opening + 1..input.len() - 1]))
 }
 
+fn split_item_separator(input: &str) -> Result<(&str, Option<&str>)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (position, character) in input.char_indices() {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => return Ok((&input[..position], Some(&input[position + 1..]))),
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        bail!("Malformed item expression: {input}");
+    }
+    Ok((input, None))
+}
+
+fn split_item_pipeline(input: &str) -> Result<Vec<&str>> {
+    let mut stages = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut start = 0;
+    let bytes = input.as_bytes();
+    let mut position = 0;
+    while position < bytes.len() {
+        let character = input[position..]
+            .chars()
+            .next()
+            .expect("position must be a character boundary");
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            position += character.len_utf8();
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            '-' if depth == 0 && bytes.get(position + 1) == Some(&b'>') => {
+                stages.push(&input[start..position]);
+                position += 2;
+                start = position;
+                continue;
+            }
+            _ => {}
+        }
+        position += character.len_utf8();
+    }
+    if quote.is_some() || depth != 0 {
+        bail!("Malformed item expression: {input}");
+    }
+    stages.push(&input[start..]);
+    Ok(stages)
+}
+
 fn split_arguments(input: &str) -> Result<Vec<String>> {
     if input.trim().is_empty() {
         return Ok(Vec::new());
@@ -972,6 +1151,46 @@ fn split_arguments(input: &str) -> Result<Vec<String>> {
     }
     arguments.push(unquote(input[start..].trim()));
     Ok(arguments)
+}
+
+fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
+    options
+        .iter()
+        .any(|option| value.eq_ignore_ascii_case(option))
+}
+
+fn item_spec_modifier(escaped_value: &str, modifier: &str) -> String {
+    let value = unescape_once(escaped_value);
+    let normalized = if std::path::MAIN_SEPARATOR == '\\' {
+        PathBuf::from(value.replace('/', "\\"))
+    } else {
+        PathBuf::from(value.replace('\\', "/"))
+    };
+    let result = if modifier.eq_ignore_ascii_case("Directory") {
+        normalized
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(display_path)
+            .map(|mut directory| {
+                if !directory.ends_with(['/', '\\']) {
+                    directory.push(std::path::MAIN_SEPARATOR);
+                }
+                directory
+            })
+            .unwrap_or_default()
+    } else if modifier.eq_ignore_ascii_case("Filename") {
+        normalized
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        normalized
+            .extension()
+            .map(|extension| format!(".{}", extension.to_string_lossy()))
+            .unwrap_or_default()
+    };
+    escape(&result)
 }
 
 fn unquote(value: &str) -> String {
@@ -1085,9 +1304,9 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_model::{Item, ProjectModel};
-    use std::collections::HashMap;
+    use crate::object_model::{Item, MetadataMap, ProjectModel};
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -1149,17 +1368,19 @@ mod tests {
     fn test_item_substitution() {
         let mut model = ProjectModel::new();
 
-        let item1 = Item {
-            item_type: "Compile".to_string(),
-            name: "file1.cs".to_string(),
-            metadata: HashMap::new(),
-        };
+        let item1 = Item::new(
+            "Compile".to_string(),
+            "file1.cs".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("project.proj"),
+        );
 
-        let item2 = Item {
-            item_type: "Compile".to_string(),
-            name: "file2.cs".to_string(),
-            metadata: HashMap::new(),
-        };
+        let item2 = Item::new(
+            "Compile".to_string(),
+            "file2.cs".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("project.proj"),
+        );
 
         model.add_item(item1);
         model.add_item(item2);

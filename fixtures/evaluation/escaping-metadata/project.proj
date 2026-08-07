@@ -1,0 +1,35 @@
+<Project>
+  <PropertyGroup>
+    <EscapedSemicolon>left%3Bright</EscapedSemicolon>
+    <PercentRoundTrip>value%2512</PercentRoundTrip>
+    <XmlEntity>  A&amp;B  </XmlEntity>
+    <XmlCData><![CDATA[  C&D%3BE  ]]></XmlCData>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <Asset>
+      <Earlier>base</Earlier>
+      <DefaultValue>%(Earlier)-default</DefaultValue>
+    </Asset>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <asset>
+      <DefaultValue>%(DEFAULTVALUE)-later</DefaultValue>
+    </asset>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <Asset Include="dir/a%3Bb.txt;%2A.literal">
+      <BeforeExplicit>%(asset.defaultvalue)|%(FILENAME)</BeforeExplicit>
+      <DefaultValue>explicit-%(defaultvalue)</DefaultValue>
+      <AfterExplicit Condition="'%(EARLIER)' == 'base'">%(ASSET.DEFAULTVALUE)</AfterExplicit>
+      <EntityMetadata>A&amp;B%3BC</EntityMetadata>
+      <CDataMetadata><![CDATA[X&Y%2512]]></CDataMetadata>
+    </Asset>
+    <Names Include="@(ASSET->'%(Filename)')" />
+    <Joined Include="@(Asset, '|')" />
+    <Copied Include="@(ASSET)">
+      <CopiedValue>%(defaultvalue)|%(filename)</CopiedValue>
+    </Copied>
+  </ItemGroup>
+</Project>

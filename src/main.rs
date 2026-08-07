@@ -1,3 +1,4 @@
+mod escaping;
 mod evaluation;
 mod expression;
 mod loader;

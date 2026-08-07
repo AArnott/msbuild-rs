@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::escaping::{ItemSpecKind, classify_item_spec, tokenize_list, unescape_once};
 use crate::evaluation::{ActiveToolset, EvaluationContext};
 use crate::expression::ExpressionEvaluator;
 use crate::object_model::{Import, Item, ProjectModel, PropertyMap, Target, Task};
@@ -41,7 +42,21 @@ struct PendingItem {
     item_type: String,
     include: Option<String>,
     condition: Option<String>,
-    metadata: HashMap<String, String>,
+    metadata: Vec<PendingMetadata>,
+}
+
+#[derive(Debug)]
+struct PendingItemDefinition {
+    item_type: String,
+    condition: Option<String>,
+    metadata: Vec<PendingMetadata>,
+}
+
+#[derive(Debug)]
+struct PendingMetadata {
+    name: String,
+    value: String,
+    condition: Option<String>,
 }
 
 #[derive(Debug)]
@@ -136,9 +151,9 @@ impl EvaluationState {
         let mut model = ProjectModel::new();
         model.set_project_file_path(project_path.to_path_buf());
 
-        for (name, value) in context.environment().iter() {
+        for (name, value) in context.environment().iter_escaped() {
             if !is_reserved_property(name) {
-                model.set_property(name.clone(), value.clone());
+                model.set_property(name.clone(), value.to_string());
             }
         }
 
@@ -173,11 +188,11 @@ impl EvaluationState {
         set_reserved_project_properties(&mut model, project_path);
 
         let mut global_properties = PropertyMap::new();
-        for (name, value) in context.global_properties().iter() {
+        for (name, value) in context.global_properties().iter_escaped() {
             if is_reserved_property(name) {
                 bail!("MSB4177: Invalid property. The \"{name}\" property name is reserved.");
             }
-            model.set_property(name.clone(), value.clone());
+            model.set_property(name.clone(), value.to_string());
             global_properties.insert(name.clone(), String::new());
         }
 
@@ -254,11 +269,13 @@ impl EvaluationState {
         let mut cursor = content_start;
         let mut property_group = None;
         let mut item_group = None;
+        let mut item_definition_group = None;
         let mut import_group = None;
         let mut import_group_indentation: Option<String> = None;
         let mut current_property: Option<PendingProperty> = None;
         let mut current_item: Option<PendingItem> = None;
-        let mut current_metadata: Option<(String, String)> = None;
+        let mut current_item_definition: Option<PendingItemDefinition> = None;
+        let mut current_metadata: Option<PendingMetadata> = None;
         let mut current_target: Option<Target> = None;
         let mut current_task: Option<Task> = None;
         let mut nonempty_import: Option<(usize, ImportAttributes, bool)> = None;
@@ -360,6 +377,19 @@ impl EvaluationState {
                     );
                 }
                 Event::Start(element)
+                    if element.name().as_ref() == b"ItemDefinitionGroup"
+                        && current_target.is_none() =>
+                {
+                    item_definition_group = Some(
+                        Self::choose_content_active(&choices)
+                            && self.evaluate_optional_condition(
+                                &element,
+                                &reader,
+                                &lexical_path,
+                            )?,
+                    );
+                }
+                Event::Start(element)
                     if element.name().as_ref() == b"ImportGroup" && current_target.is_none() =>
                 {
                     import_group = Some(
@@ -407,13 +437,11 @@ impl EvaluationState {
                         depends_on: attributes
                             .get("DependsOnTargets")
                             .map(|value| {
-                                value
-                                    .split(';')
-                                    .map(str::trim)
-                                    .filter(|value| !value.is_empty())
-                                    .map(str::to_string)
-                                    .collect()
+                                tokenize_list(value).map(|values| {
+                                    values.into_iter().map(unescape_once).collect::<Vec<_>>()
+                                })
                             })
+                            .transpose()?
                             .unwrap_or_default(),
                         condition: attributes.get("Condition").cloned(),
                         tasks: Vec::new(),
@@ -454,7 +482,11 @@ impl EvaluationState {
                         && current_item.is_some()
                         && current_metadata.is_none() =>
                 {
-                    current_metadata = Some((xml_name(&element), String::new()));
+                    current_metadata = Some(PendingMetadata {
+                        name: xml_name(&element),
+                        value: String::new(),
+                        condition: attribute_value(&element, &reader, b"Condition")?,
+                    });
                 }
                 Event::Start(element) if item_group.is_some() => {
                     let attributes = parse_attributes(&element, &reader)?;
@@ -462,7 +494,25 @@ impl EvaluationState {
                         item_type: xml_name(&element),
                         include: attributes.get("Include").cloned(),
                         condition: attributes.get("Condition").cloned(),
-                        metadata: HashMap::new(),
+                        metadata: Vec::new(),
+                    });
+                }
+                Event::Start(element)
+                    if item_definition_group.is_some()
+                        && current_item_definition.is_some()
+                        && current_metadata.is_none() =>
+                {
+                    current_metadata = Some(PendingMetadata {
+                        name: xml_name(&element),
+                        value: String::new(),
+                        condition: attribute_value(&element, &reader, b"Condition")?,
+                    });
+                }
+                Event::Start(element) if item_definition_group.is_some() => {
+                    current_item_definition = Some(PendingItemDefinition {
+                        item_type: xml_name(&element),
+                        condition: attribute_value(&element, &reader, b"Condition")?,
+                        metadata: Vec::new(),
                     });
                 }
                 Event::Empty(element)
@@ -506,6 +556,15 @@ impl EvaluationState {
                         self.assign_property(xml_name(&element), "", &lexical_path)?;
                     }
                 }
+                Event::Empty(element) if item_group.is_some() && current_item.is_some() => {
+                    if let Some(item) = &mut current_item {
+                        item.metadata.push(PendingMetadata {
+                            name: xml_name(&element),
+                            value: String::new(),
+                            condition: attribute_value(&element, &reader, b"Condition")?,
+                        });
+                    }
+                }
                 Event::Empty(element) if item_group.is_some() => {
                     let attributes = parse_attributes(&element, &reader)?;
                     self.add_item(
@@ -513,9 +572,31 @@ impl EvaluationState {
                             item_type: xml_name(&element),
                             include: attributes.get("Include").cloned(),
                             condition: attributes.get("Condition").cloned(),
-                            metadata: HashMap::new(),
+                            metadata: Vec::new(),
                         },
                         item_group.unwrap_or(false),
+                        &lexical_path,
+                    )?;
+                }
+                Event::Empty(element)
+                    if item_definition_group.is_some() && current_item_definition.is_some() =>
+                {
+                    if let Some(definition) = &mut current_item_definition {
+                        definition.metadata.push(PendingMetadata {
+                            name: xml_name(&element),
+                            value: String::new(),
+                            condition: attribute_value(&element, &reader, b"Condition")?,
+                        });
+                    }
+                }
+                Event::Empty(element) if item_definition_group.is_some() => {
+                    self.add_item_definition(
+                        PendingItemDefinition {
+                            item_type: xml_name(&element),
+                            condition: attribute_value(&element, &reader, b"Condition")?,
+                            metadata: Vec::new(),
+                        },
+                        item_definition_group.unwrap_or(false),
                         &lexical_path,
                     )?;
                 }
@@ -523,7 +604,7 @@ impl EvaluationState {
                     current_metadata
                         .as_mut()
                         .unwrap()
-                        .1
+                        .value
                         .push_str(&text.decode()?);
                 }
                 Event::Text(text) if current_property.is_some() => {
@@ -538,7 +619,7 @@ impl EvaluationState {
                     current_metadata
                         .as_mut()
                         .unwrap()
-                        .1
+                        .value
                         .push_str(&quick_xml::escape::unescape(&encoded)?);
                 }
                 Event::GeneralRef(reference) if current_property.is_some() => {
@@ -553,7 +634,7 @@ impl EvaluationState {
                     current_metadata
                         .as_mut()
                         .unwrap()
-                        .1
+                        .value
                         .push_str(&data.decode()?);
                 }
                 Event::CData(data) if current_property.is_some() => {
@@ -584,6 +665,9 @@ impl EvaluationState {
                 }
                 Event::End(element) if element.name().as_ref() == b"ItemGroup" => {
                     item_group = None;
+                }
+                Event::End(element) if element.name().as_ref() == b"ItemDefinitionGroup" => {
+                    item_definition_group = None;
                 }
                 Event::End(element) if element.name().as_ref() == b"ImportGroup" => {
                     if self.render_preprocessed {
@@ -636,17 +720,19 @@ impl EvaluationState {
                 {
                     let property = current_property.take().unwrap();
                     if property.eligible {
-                        self.assign_property(property.name, property.value.trim(), &lexical_path)?;
+                        self.assign_property(property.name, &property.value, &lexical_path)?;
                     }
                 }
                 Event::End(element)
-                    if current_metadata
-                        .as_ref()
-                        .is_some_and(|(name, _)| name.as_bytes() == element.name().as_ref()) =>
+                    if current_metadata.as_ref().is_some_and(|metadata| {
+                        metadata.name.as_bytes() == element.name().as_ref()
+                    }) =>
                 {
-                    let (name, value) = current_metadata.take().unwrap();
+                    let metadata = current_metadata.take().unwrap();
                     if let Some(item) = &mut current_item {
-                        item.metadata.insert(name, value.trim().to_string());
+                        item.metadata.push(metadata);
+                    } else if let Some(definition) = &mut current_item_definition {
+                        definition.metadata.push(metadata);
                     }
                 }
                 Event::End(element)
@@ -656,6 +742,18 @@ impl EvaluationState {
                 {
                     let item = current_item.take().unwrap();
                     self.add_item(item, item_group.unwrap_or(false), &lexical_path)?;
+                }
+                Event::End(element)
+                    if current_item_definition.as_ref().is_some_and(|definition| {
+                        definition.item_type.as_bytes() == element.name().as_ref()
+                    }) =>
+                {
+                    let definition = current_item_definition.take().unwrap();
+                    self.add_item_definition(
+                        definition,
+                        item_definition_group.unwrap_or(false),
+                        &lexical_path,
+                    )?;
                 }
                 Event::Eof => break,
                 _ => {}
@@ -793,27 +891,105 @@ impl EvaluationState {
         if !group_eligible {
             return Ok(());
         }
-        let evaluator = ExpressionEvaluator::with_current_file(&self.model, current_file);
-        if let Some(condition) = &item.condition
-            && !evaluator.evaluate_condition(condition)?
-        {
-            return Ok(());
-        }
         let Some(include) = item.include else {
             return Ok(());
         };
-        let include = evaluator.evaluate(&include)?;
-        let metadata = item
-            .metadata
-            .into_iter()
-            .map(|(name, value)| Ok((name, evaluator.evaluate(&value)?)))
-            .collect::<Result<HashMap<_, _>>>()?;
-        for identity in include.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            self.model.add_item(Item {
-                item_type: item.item_type.clone(),
-                name: identity.to_string(),
-                metadata: metadata.clone(),
-            });
+
+        let defaults = self.model.item_defaults(&item.item_type);
+        let mut candidates = Vec::new();
+        for fragment in tokenize_list(&include)? {
+            if let Some(source_type) = simple_item_reference(fragment) {
+                let source_items = self
+                    .model
+                    .get_items(source_type)
+                    .cloned()
+                    .unwrap_or_default();
+                candidates.extend(source_items.into_iter().map(|source| {
+                    source.copy_for_type(
+                        item.item_type.clone(),
+                        defaults.clone(),
+                        current_file.to_path_buf(),
+                    )
+                }));
+                continue;
+            }
+
+            let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
+                .evaluate(fragment)?;
+            for identity in tokenize_list(&evaluated)? {
+                candidates.push(Item::new(
+                    item.item_type.clone(),
+                    identity.to_string(),
+                    defaults.clone(),
+                    current_file.to_path_buf(),
+                ));
+            }
+        }
+
+        for mut candidate in candidates {
+            if let Some(condition) = &item.condition
+                && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
+                    .evaluate_condition(condition)?
+            {
+                continue;
+            }
+            for metadata in &item.metadata {
+                if let Some(condition) = &metadata.condition
+                    && !ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
+                        .evaluate_condition(condition)?
+                {
+                    continue;
+                }
+                let value = ExpressionEvaluator::with_item(&self.model, current_file, &candidate)
+                    .evaluate(&metadata.value)?;
+                candidate.set_metadata(metadata.name.clone(), value);
+            }
+            self.model.add_item(candidate);
+        }
+        Ok(())
+    }
+
+    fn add_item_definition(
+        &mut self,
+        definition: PendingItemDefinition,
+        group_eligible: bool,
+        current_file: &Path,
+    ) -> Result<()> {
+        if !group_eligible {
+            return Ok(());
+        }
+        if let Some(condition) = &definition.condition
+            && !ExpressionEvaluator::with_item_definition(
+                &self.model,
+                current_file,
+                &definition.item_type,
+            )
+            .evaluate_condition(condition)?
+        {
+            return Ok(());
+        }
+        for metadata in definition.metadata {
+            if let Some(condition) = &metadata.condition
+                && !ExpressionEvaluator::with_item_definition(
+                    &self.model,
+                    current_file,
+                    &definition.item_type,
+                )
+                .evaluate_condition(condition)?
+            {
+                continue;
+            }
+            let value = ExpressionEvaluator::with_item_definition(
+                &self.model,
+                current_file,
+                &definition.item_type,
+            )
+            .evaluate(&metadata.value)?;
+            self.model.set_item_definition_metadata(
+                definition.item_type.clone(),
+                metadata.name,
+                value,
+            );
         }
         Ok(())
     }
@@ -873,20 +1049,26 @@ impl EvaluationState {
             return Ok(());
         }
 
-        let evaluated_project = evaluator.evaluate(&import.project)?;
-        if evaluated_project.contains("$(") || evaluated_project.contains("@(") {
+        let evaluated_project_escaped = evaluator.evaluate(&import.project)?;
+        if evaluated_project_escaped.contains("$(") || evaluated_project_escaped.contains("@(") {
             bail!(
-                "Import path '{evaluated_project}' contains an unexpanded expression in {}",
+                "Import path '{evaluated_project_escaped}' contains an unexpanded expression in {}",
                 importing_path.display()
             );
         }
+        let import_kind = classify_item_spec(&evaluated_project_escaped);
+        let evaluated_project = unescape_once(&evaluated_project_escaped);
         let import_path = lexical_absolute(
             &importing_path
                 .parent()
                 .unwrap_or_else(|| Path::new(""))
                 .join(evaluated_project),
         )?;
-        let paths = resolve_import_paths(&import_path, importing_path)?;
+        let paths = resolve_import_paths(
+            &import_path,
+            importing_path,
+            import_kind == ItemSpecKind::Glob,
+        )?;
         debug!(
             "Import '{}' from {} matched {} file(s)",
             import.project,
@@ -1015,6 +1197,15 @@ fn with_trailing_separator(mut value: String) -> String {
     value
 }
 
+fn simple_item_reference(expression: &str) -> Option<&str> {
+    let body = expression.strip_prefix("@(")?.strip_suffix(')')?.trim();
+    (!body.is_empty()
+        && !body.contains("->")
+        && !body.contains(',')
+        && !body.contains(['(', ')', '\'', '"']))
+    .then_some(body)
+}
+
 fn parse_import(element: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<ImportAttributes> {
     Ok(ImportAttributes {
         project: attribute_value(element, reader, b"Project")?
@@ -1080,6 +1271,12 @@ fn validate_project_structure(source: &str, path: &Path) -> Result<()> {
 
     loop {
         match reader.read_event()? {
+            Event::DocType(_) => {
+                bail!(
+                    "DTD declarations and external entities are disabled in {}",
+                    path.display()
+                );
+            }
             Event::Start(element) => {
                 let frame =
                     validate_structural_element(&element, &reader, path, &mut stack, root_seen)?;
@@ -1260,9 +1457,13 @@ fn illegal_child<T>(name: &str, parent: &str, path: &Path) -> Result<T> {
     )
 }
 
-fn resolve_import_paths(import_path: &Path, importing_path: &Path) -> Result<Vec<PathBuf>> {
+fn resolve_import_paths(
+    import_path: &Path,
+    importing_path: &Path,
+    expand_glob: bool,
+) -> Result<Vec<PathBuf>> {
     let pattern = import_path.to_string_lossy();
-    if pattern.contains(['*', '?', '[']) {
+    if expand_glob {
         let pattern = pattern.replace('\\', "/");
         let mut paths = glob::glob(&pattern)?
             .filter_map(Result::ok)
@@ -1383,11 +1584,12 @@ fn append_project_sdk_attribute(
     reader: &Reader<&[u8]>,
 ) -> Result<()> {
     if let Some(sdks) = attribute_value(element, reader, b"Sdk")? {
-        for specification in sdks.split(';').map(str::trim).filter(|sdk| !sdk.is_empty()) {
+        for specification in tokenize_list(&sdks)? {
+            let specification = unescape_once(specification);
             let (name, version) = specification
                 .split_once('/')
                 .map(|(name, version)| (name, Some(version.to_string())))
-                .unwrap_or((specification, None));
+                .unwrap_or((specification.as_str(), None));
             references.push(SdkReference {
                 name: name.to_string(),
                 version,

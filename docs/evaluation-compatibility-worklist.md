@@ -86,12 +86,19 @@ and nonstandard runtime platform identifiers.
 
 - [x] Basic item includes and `@(ItemType)` expansion.
 - [ ] Implement item transforms, including `@(Item->'%(Metadata)')`.
-- [ ] Implement custom and well-known item metadata.
-- [ ] Implement custom separators in item expressions.
+- [x] Implement indexed, case-insensitive custom metadata and the `Identity`,
+  `FullPath`, `RootDir`, `Filename`, `Extension`, `RelativeDir`, `Directory`,
+  `RecursiveDir`, and defining-project well-known metadata.
+- [ ] Implement timestamp well-known metadata (`ModifiedTime`, `CreatedTime`,
+  and `AccessedTime`).
+- [x] Implement custom separators in item expressions.
 - [ ] Implement `Exclude`, `Remove`, and `Update` operations.
 - [ ] Implement wildcard and recursive glob expansion with MSBuild escaping rules.
+- [x] Preserve escaped wildcard/list syntax until classification so `%2A`, `%3F`,
+  `%3B`, and `%25NN` are not reinterpreted.
 - [ ] Implement item functions and item-expression chaining.
-- [ ] Evaluate item definitions and metadata in MSBuild document order.
+- [x] Evaluate item definitions and child metadata/conditions in document order,
+  with immutable layered defaults and explicit metadata precedence.
 
 ### Imports and Project Structure
 
@@ -115,10 +122,13 @@ and nonstandard runtime platform identifiers.
 
 ### Escaping and Parsing
 
-- [ ] Implement MSBuild percent escaping and unescaping.
-- [ ] Preserve XML text and attribute semantics, including CDATA and entities.
-- [ ] Match case-insensitive property, item, metadata, and function lookup.
-- [ ] Match semicolon splitting and empty-value behavior.
+- [x] Implement exactly-once MSBuild percent escaping and unescaping while
+  retaining escaped syntax through list and wildcard classification.
+- [x] Preserve XML attribute/property/metadata text semantics, including
+  entities, CDATA, and whitespace, while rejecting DTD/external entities.
+- [x] Match indexed case-insensitive property, item, metadata, and function
+  lookup without changing authored order/casing.
+- [x] Match expression-aware semicolon splitting and empty/whitespace behavior.
 
 ## Parity Fixtures
 
@@ -142,8 +152,12 @@ The upstream-test mapping and fixture status are maintained in
   deferred.
 - Uninitialized-property warning emission is deferred; before-set reads already
   produce the compatible empty value without recursive reevaluation.
-- Property lookup is indexed and case-insensitive. Broader item and metadata
-  case-insensitivity remains a later wave.
+- Property, item-type, and metadata lookup are indexed and case-insensitive.
+- Timestamp well-known metadata is deferred; all non-timestamp well-known
+  metadata listed above is available.
+- Wildcard execution, recursive glob enumeration, and `GetAllGlobs` reporting
+  are deferred. Escaped wildcard classification and lossless pattern storage
+  are complete.
 - Import suppression uses normalized lexical full paths (case-insensitive on
   Windows and case-sensitive elsewhere) and deliberately does not resolve
   symlinks. A Windows symlink test is skipped when the process lacks the

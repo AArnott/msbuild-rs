@@ -2,7 +2,7 @@
 mod integration_tests {
     use anyhow::Result;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     use crate::evaluation::ProjectEvaluator;
@@ -106,20 +106,22 @@ mod integration_tests {
         let mut model = ProjectModel::new();
 
         // Add some items
-        use crate::object_model::Item;
-        use std::collections::HashMap;
+        use crate::object_model::{Item, MetadataMap};
+        use std::sync::Arc;
 
-        let item1 = Item {
-            item_type: "Source".to_string(),
-            name: "file1.cs".to_string(),
-            metadata: HashMap::new(),
-        };
+        let item1 = Item::new(
+            "Source".to_string(),
+            "file1.cs".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("project.proj"),
+        );
 
-        let item2 = Item {
-            item_type: "Source".to_string(),
-            name: "file2.cs".to_string(),
-            metadata: HashMap::new(),
-        };
+        let item2 = Item::new(
+            "Source".to_string(),
+            "file2.cs".to_string(),
+            Arc::new(MetadataMap::new()),
+            PathBuf::from("project.proj"),
+        );
 
         model.add_item(item1);
         model.add_item(item2);

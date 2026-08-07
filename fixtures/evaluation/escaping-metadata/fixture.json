@@ -1,0 +1,58 @@
+{
+  "name": "escaping-xml-item-metadata-definitions-case-insensitivity",
+  "project": "project.proj",
+  "properties": [
+    "EscapedSemicolon",
+    "PercentRoundTrip",
+    "XmlEntity",
+    "XmlCData"
+  ],
+  "items": [
+    {
+      "type": "Asset",
+      "metadata": [
+        "Earlier",
+        "DefaultValue",
+        "BeforeExplicit",
+        "AfterExplicit",
+        "EntityMetadata",
+        "CDataMetadata",
+        "Identity",
+        "FullPath",
+        "RootDir",
+        "Filename",
+        "Extension",
+        "RelativeDir",
+        "Directory",
+        "RecursiveDir",
+        "DefiningProjectFullPath",
+        "DefiningProjectDirectory",
+        "DefiningProjectName",
+        "DefiningProjectExtension"
+      ]
+    },
+    {
+      "type": "Names",
+      "metadata": [
+        "Filename"
+      ]
+    },
+    {
+      "type": "Joined",
+      "metadata": [
+        "Filename"
+      ]
+    },
+    {
+      "type": "Copied",
+      "metadata": [
+        "Earlier",
+        "DefaultValue",
+        "BeforeExplicit",
+        "AfterExplicit",
+        "CopiedValue",
+        "Filename"
+      ]
+    }
+  ]
+}

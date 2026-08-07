@@ -268,7 +268,7 @@ impl ProjectEvaluator {
                         .map(|item| EvaluationQueryItem {
                             identity: item.name.clone(),
                             metadata: item
-                                .metadata
+                                .evaluated_metadata()
                                 .iter()
                                 .map(|(name, value)| (name.clone(), value.clone()))
                                 .collect(),
@@ -1327,6 +1327,359 @@ mod tests {
         assert!(body < one_targets);
         assert!(one_targets < two_targets);
         assert!(output.contains("Sdk=\"Top.Two/1.2.3\""));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_escaping_projects_preserves_semicolon_items() -> Result<()> {
+        // Exact project-data port of
+        // EscapingInProjects_Tests.CanGetCorrectListOfItemsWithSemicolonsInThem.
+        let directory = TempDir::new()?;
+        let escaped = write_project(
+            &directory,
+            "escaped.proj",
+            r#"<Project>
+  <PropertyGroup><MyUserMacro>foo%3bbar</MyUserMacro></PropertyGroup>
+  <ItemGroup>
+    <DifferentList Include="a" />
+    <DifferentList Include="b%3bc" />
+    <DifferentList Include="$(MyUserMacro)" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(escaped)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_items("DifferentList")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b;c", "foo;bar"]
+        );
+
+        // Exact project-data port of
+        // EscapingInProjects_Tests.CanGetCorrectListOfItemsWithSemicolonsInThem2.
+        let unescaped = write_project(
+            &directory,
+            "unescaped.proj",
+            r#"<Project>
+  <PropertyGroup><MyUserMacro>foo;bar</MyUserMacro></PropertyGroup>
+  <ItemGroup>
+    <DifferentList Include="a" />
+    <DifferentList Include="b%3bc" />
+    <DifferentList Include="$(MyUserMacro)" />
+  </ItemGroup>
+</Project>"#,
+        );
+        evaluator.load_project(unescaped)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_items("DifferentList")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b;c", "foo", "bar"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn percent_patterns_round_trip_once_and_escaped_wildcards_stay_literal() -> Result<()> {
+        // Classification port of EscapingInProjects_Tests.
+        // EscapedWildcardsShouldNotBeExpanded and escaping-focused port of
+        // ItemGlobs_Tests.PatternsWithPercentEncodingRoundTripAndMatchGetAllGlobs
+        // plus PatternContainingSemicolonIsRecoverableFromEscapedMetadata.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup><RoundTrip>a%2512b</RoundTrip></PropertyGroup>
+  <ItemGroup>
+    <Pattern Include="$(RoundTrip)_%2A.cs;a%3Bb/%3F.cs" />
+    <ActualGlob Include="*.cs" />
+    <Source Include="x"><PatternMetadata>a;b</PatternMetadata></Source>
+    <FromMetadata Include="@(Source->'%(PatternMetadata)')" />
+    <FromTemplate Include="@(Source->'%(PatternMetadata);x')" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(model.get_property("RoundTrip").unwrap(), "a%12b");
+        assert_eq!(
+            model
+                .get_items("Pattern")
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a%12b_*.cs", "a;b/?.cs"]
+        );
+        assert!(
+            model
+                .get_items("Pattern")
+                .unwrap()
+                .iter()
+                .all(|item| item.spec_kind == crate::escaping::ItemSpecKind::Literal)
+        );
+        assert_eq!(
+            model.get_items("ActualGlob").unwrap()[0].spec_kind,
+            crate::escaping::ItemSpecKind::Glob
+        );
+        assert_eq!(
+            model.get_items("Pattern").unwrap()[1].escaped_name,
+            "a%3Bb/%3F.cs"
+        );
+        assert_eq!(model.get_items("FromMetadata").unwrap().len(), 1);
+        assert_eq!(model.get_items("FromMetadata").unwrap()[0].name, "a;b");
+        assert_eq!(model.get_items("FromTemplate").unwrap().len(), 1);
+        assert_eq!(model.get_items("FromTemplate").unwrap()[0].name, "a;b;x");
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_item_and_metadata_case_changes_find_predecessors() -> Result<()> {
+        // Behavioral port of Evaluator_Tests.ItemPredecessorToItemWithCaseChange.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <ItemGroup>
+    <item_with_lowercase_name Include="h1"><m>1</m></item_with_lowercase_name>
+    <i Include="@(ITEM_WITH_LOWERCASE_NAME)">
+      <m>2;%(m)</m>
+      <Qualified>%(I.M)</Qualified>
+      <CaseInsensitive>%(i.qualified)</CaseInsensitive>
+    </i>
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let item = &evaluator.get_model().get_items("I").unwrap()[0];
+        assert_eq!(item.get_metadata("M").as_deref(), Some("2;1"));
+        assert_eq!(item.get_metadata("qualified").as_deref(), Some("2;1"));
+        assert_eq!(item.get_metadata("CASEINSENSITIVE").as_deref(), Some("2;1"));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_item_definition_predecessor_and_all_evaluated_metadata() -> Result<()> {
+        // Ports Evaluator_Tests.ItemDefinitionPredecessorToItemDefinition,
+        // ItemDefinitionPredecessorToItem, and AllEvaluatedItemDefinitionMetadata.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <ItemDefinitionGroup>
+    <i>
+      <m>1</m>
+      <n>2</n>
+    </i>
+  </ItemDefinitionGroup>
+  <ItemGroup><i Include="before" /></ItemGroup>
+  <ItemDefinitionGroup>
+    <I>
+      <m>1</m>
+      <m Condition="false">3</m>
+      <m>%(m);2</m>
+    </I>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <i Include="one"><m>item;%(m)</m></i>
+    <i Include="two" />
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(model.get_item_definition_metadata("I", "M"), Some("1;2"));
+        let evaluated = model.all_evaluated_item_definition_metadata();
+        assert_eq!(evaluated.len(), 4);
+        assert_eq!(
+            evaluated
+                .iter()
+                .map(|metadata| (
+                    metadata.item_type.as_str(),
+                    metadata.name.as_str(),
+                    metadata.value.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("i", "m", "1"),
+                ("i", "n", "2"),
+                ("I", "m", "1"),
+                ("I", "m", "1;2"),
+            ]
+        );
+        let items = model.get_items("i").unwrap();
+        assert_eq!(items[0].get_metadata("m").as_deref(), Some("1"));
+        assert_eq!(items[1].get_metadata("m").as_deref(), Some("item;1;2"));
+        assert_eq!(items[2].get_metadata("M").as_deref(), Some("1;2"));
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_metadata_and_well_known_references_are_case_insensitive() -> Result<()> {
+        // Ports Expander_Tests.DirectItemMetadataReferenceShouldBeCaseInsensitive
+        // and WellKnownMetadataReferenceShouldBeCaseInsensitive in item context.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "sample.proj",
+            r#"<Project><ItemGroup>
+  <Foo Include="dir/Foo.cs">
+    <SENSITIVE>X</SENSITIVE>
+    <QualifiedNotMatchCase>%(Foo.sensitive)</QualifiedNotMatchCase>
+    <QualifiedMatchCase>%(Foo.SENSITIVE)</QualifiedMatchCase>
+    <UnqualifiedNotMatchCase>%(sensitive)</UnqualifiedNotMatchCase>
+    <UnqualifiedMatchCase>%(SENSITIVE)</UnqualifiedMatchCase>
+    <WellKnownNotMatchCase>%(Foo.FILENAME)</WellKnownNotMatchCase>
+    <WellKnownMatchCase>%(filename)</WellKnownMatchCase>
+  </Foo>
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let item = &evaluator.get_model().get_items("fOO").unwrap()[0];
+        for name in [
+            "QualifiedNotMatchCase",
+            "QualifiedMatchCase",
+            "UnqualifiedNotMatchCase",
+            "UnqualifiedMatchCase",
+        ] {
+            assert_eq!(item.get_metadata(name).as_deref(), Some("X"));
+        }
+        assert_eq!(
+            item.get_metadata("WellKnownNotMatchCase").as_deref(),
+            Some("Foo")
+        );
+        assert_eq!(
+            item.get_metadata("WellKnownMatchCase").as_deref(),
+            Some("Foo")
+        );
+        assert!(
+            item.get_metadata("fullpath")
+                .unwrap()
+                .ends_with(&format!("dir{}Foo.cs", std::path::MAIN_SEPARATOR))
+        );
+        assert_eq!(item.get_metadata("EXTENSION").as_deref(), Some(".cs"));
+        assert_eq!(
+            item.get_metadata("relativeDIR").as_deref(),
+            Some(format!("dir{}", std::path::MAIN_SEPARATOR).as_str())
+        );
+        assert_eq!(
+            item.get_metadata("DefiningProjectName").as_deref(),
+            Some("sample")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_expand_item_vector_functions_item_spec_modifier() -> Result<()> {
+        // Applicable pipeline port of
+        // Expander_Tests.ExpandItemVectorFunctionsItemSpecModifier.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <i Include="i0"><Meta0>firstdirectory/seconddirectory/file0.ext</Meta0></i>
+  <DirectoryResult Include="@(i->Metadata('Meta0')->Directory())" />
+  <FilenameResult Include="@(i->Metadata('Meta0')->Filename())" />
+  <ExtensionResult Include="@(i->Metadata('Meta0')->Extension())" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model.get_items("DirectoryResult").unwrap()[0].name,
+            format!(
+                "firstdirectory{}seconddirectory{}",
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            )
+        );
+        assert_eq!(model.get_items("FilenameResult").unwrap()[0].name, "file0");
+        assert_eq!(model.get_items("ExtensionResult").unwrap()[0].name, ".ext");
+        Ok(())
+    }
+
+    #[test]
+    fn xml_entities_cdata_and_whitespace_decode_once_and_dtd_is_rejected() -> Result<()> {
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup>
+    <Entity>  A&amp;B%3BC  </Entity>
+    <CData><![CDATA[  x&y%2512  ]]></CData>
+  </PropertyGroup>
+  <ItemGroup>
+    <X Include="a&amp;b%3Bc"><M><![CDATA[  m&n%3Bo  ]]></M></X>
+  </ItemGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(model.get_property("Entity").unwrap(), "  A&B;C  ");
+        assert_eq!(model.get_property("CData").unwrap(), "  x&y%12  ");
+        let item = &model.get_items("X").unwrap()[0];
+        assert_eq!(item.name, "a&b;c");
+        assert_eq!(item.get_metadata("M").as_deref(), Some("  m&n;o  "));
+
+        // Security-focused port of Evaluator_Tests.VerifyDTDProcessingIsDisabled:
+        // no DTD or external entity is parsed or resolved.
+        let dtd = write_project(
+            &directory,
+            "dtd.proj",
+            r#"<?xml version="1.0"?>
+<!DOCTYPE Project [<!ENTITY external SYSTEM "file:///must-not-be-read">]>
+<Project><PropertyGroup><P>&external;</P></PropertyGroup></Project>"#,
+        );
+        let error = evaluator.load_project(dtd).unwrap_err().to_string();
+        assert!(error.contains("DTD declarations and external entities are disabled"));
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_item_and_metadata_lookup_scales_without_default_clones() -> Result<()> {
+        let directory = TempDir::new()?;
+        let mut project = String::from(
+            "<Project><ItemDefinitionGroup><Scale><Default>base</Default></Scale></ItemDefinitionGroup><ItemGroup>",
+        );
+        for index in 0..1_000 {
+            write!(
+                project,
+                "<Scale Include=\"file{index}.txt\"><M{index}>value{index}</M{index}></Scale>"
+            )?;
+        }
+        project.push_str("</ItemGroup></Project>");
+        let project = write_project(&directory, "scale.proj", &project);
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let items = evaluator.get_model().get_items("sCaLe").unwrap();
+        assert_eq!(items.len(), 1_000);
+        for (index, item) in items.iter().enumerate() {
+            assert_eq!(item.get_metadata("DEFAULT").as_deref(), Some("base"));
+            assert_eq!(
+                item.get_metadata(&format!("m{index}")).as_deref(),
+                Some(format!("value{index}").as_str())
+            );
+        }
         Ok(())
     }
 }

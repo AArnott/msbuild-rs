@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::expression::ExpressionEvaluator;
 use crate::object_model::ProjectModel;
 use crate::parser::ProjectParser;
+use crate::preprocess::ProjectPreprocessor;
 use crate::tasks::TaskRegistry;
 
 pub struct ProjectEvaluator {
@@ -67,6 +68,10 @@ impl ProjectEvaluator {
 
         let mut executed_targets = HashSet::new();
         self.execute_target_recursive(target_name, &mut executed_targets)
+    }
+
+    pub fn write_preprocessed_project<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        ProjectPreprocessor::new(&self.model).write(path)
     }
 
     fn execute_target_recursive(

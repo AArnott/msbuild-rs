@@ -21,10 +21,12 @@ impl ProjectParser {
     }
 
     pub fn parse_file<P: AsRef<Path>>(&mut self, path: P) -> Result<ProjectModel> {
+        self.model
+            .set_project_file_path(path.as_ref().to_path_buf());
         let file = File::open(&path)?;
         let buf_reader = BufReader::new(file);
         let mut reader = Reader::from_reader(buf_reader);
-        reader.config_mut().trim_text(true);
+        reader.config_mut().trim_text(false);
 
         let mut buf = Vec::new();
         let mut current_target: Option<Target> = None;
@@ -32,6 +34,7 @@ impl ProjectParser {
         let mut in_property_group = false;
         let mut in_item_group = false;
         let mut current_property_name: Option<String> = None;
+        let mut current_property_value = String::new();
         let mut current_item_type: Option<String> = None;
         let mut current_item_include: Option<String> = None;
         let mut current_item_metadata: HashMap<String, String> = HashMap::new();
@@ -106,6 +109,7 @@ impl ProjectParser {
                             && self.should_process_conditional(&attributes)? =>
                         {
                             current_property_name = Some(property_name.to_string());
+                            current_property_value.clear();
                         }
                         item_type if in_item_group => {
                             current_item_type = Some(item_type.to_string());
@@ -169,7 +173,12 @@ impl ProjectParser {
                                 && current_property_name.as_ref()
                                     == Some(&property_name.to_string()) =>
                         {
-                            current_property_name = None;
+                            let property_name = current_property_name.take().unwrap();
+                            self.model.set_property(
+                                property_name,
+                                current_property_value.trim().to_string(),
+                            );
+                            current_property_value.clear();
                         }
                         item_type
                             if in_item_group
@@ -191,14 +200,15 @@ impl ProjectParser {
                         _ => {}
                     }
                 }
-                Ok(Event::Text(e)) => {
-                    let text = e.decode()?.trim().to_string();
-                    if !text.is_empty()
-                        && let Some(ref prop_name) = current_property_name
-                    {
-                        // Store the raw property value, don't evaluate yet
-                        self.model.set_property(prop_name.clone(), text);
-                    }
+                Ok(Event::Text(e)) if current_property_name.is_some() => {
+                    current_property_value.push_str(&e.decode()?);
+                }
+                Ok(Event::GeneralRef(reference)) if current_property_name.is_some() => {
+                    let encoded = format!("&{};", reference.decode()?);
+                    current_property_value.push_str(&quick_xml::escape::unescape(&encoded)?);
+                }
+                Ok(Event::CData(data)) if current_property_name.is_some() => {
+                    current_property_value.push_str(&data.decode()?);
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(anyhow!("Error parsing XML: {}", e)),
@@ -301,6 +311,28 @@ mod tests {
 
         assert!(model.get_target("Build").is_some());
 
+        Ok(())
+    }
+
+    #[test]
+    fn evaluates_shared_condition_functions_relative_to_project() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        std::fs::write(directory.path().join("present.props"), "<Project />")?;
+        let project_path = directory.path().join("main.proj");
+        std::fs::write(
+            &project_path,
+            r#"<Project>
+  <PropertyGroup Condition="Exists('present.props') And HasTrailingSlash('dir/')">
+    <WasEvaluated>true</WasEvaluated>
+  </PropertyGroup>
+</Project>"#,
+        )?;
+
+        let model = ProjectParser::new().parse_file(&project_path)?;
+        assert_eq!(
+            model.get_property("WasEvaluated").map(String::as_str),
+            Some("true")
+        );
         Ok(())
     }
 }

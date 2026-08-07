@@ -33,6 +33,9 @@ msbuild-rs --project path/to/project.proj --target Build --verbose
 
 # Run demonstration with sample projects
 msbuild-rs --demo
+
+# Load and write an evaluated project without executing targets
+msbuild-rs --project path/to/project.proj --preprocess out.xml
 ```
 
 ### Project File Format
@@ -126,6 +129,14 @@ Built-in tasks for common operations:
 - **Item References**: `@(ItemType)` - Expands to semicolon-separated list of item names
 - **Conditions**: Support basic equality comparisons like `'$(Prop)' == 'Value'`
 
+MSBuild also permits property functions that reference .NET types, such as:
+
+```xml
+$([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'))
+```
+
+The compatibility plan uses native Rust implementations for common type/method combinations and, later, an in-process CoreCLR fallback for legal MSBuild property functions that have no native implementation. CoreCLR will load lazily so the managed runtime does not affect projects that stay on native fast paths.
+
 ### Evaluation Order
 
 1. **Properties**: All properties are evaluated first, allowing forward references
@@ -143,6 +154,10 @@ cargo test
 
 # Run with sample projects
 cargo run -- --demo
+
+# Compare preprocessing startup and evaluation performance
+cargo build --release
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
 ```
 
 ## Sample Projects

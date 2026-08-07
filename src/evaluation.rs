@@ -1,13 +1,12 @@
 use anyhow::{Result, anyhow};
 use log::{debug, info, warn};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::expression::ExpressionEvaluator;
 use crate::object_model::ProjectModel;
 use crate::parser::ProjectParser;
+use crate::preprocess::ProjectPreprocessor;
 use crate::tasks::TaskRegistry;
 
 pub struct ProjectEvaluator {
@@ -72,75 +71,7 @@ impl ProjectEvaluator {
     }
 
     pub fn write_preprocessed_project<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-
-        writeln!(writer, r#"<?xml version="1.0" encoding="utf-8"?>"#)?;
-        writeln!(writer, "<Project>")?;
-
-        if !self.model.properties.is_empty() {
-            writeln!(writer, "  <PropertyGroup>")?;
-            for (name, value) in &self.model.properties {
-                writeln!(
-                    writer,
-                    "    <{name}>{}</{name}>",
-                    quick_xml::escape::escape(value)
-                )?;
-            }
-            writeln!(writer, "  </PropertyGroup>")?;
-        }
-
-        if !self.model.items.is_empty() {
-            writeln!(writer, "  <ItemGroup>")?;
-            for (item_type, items) in &self.model.items {
-                for item in items {
-                    writeln!(
-                        writer,
-                        "    <{item_type} Include=\"{}\" />",
-                        quick_xml::escape::escape(&item.name)
-                    )?;
-                }
-            }
-            writeln!(writer, "  </ItemGroup>")?;
-        }
-
-        for target in self.model.targets.values() {
-            write!(
-                writer,
-                "  <Target Name=\"{}\"",
-                quick_xml::escape::escape(&target.name)
-            )?;
-            if !target.depends_on.is_empty() {
-                write!(
-                    writer,
-                    " DependsOnTargets=\"{}\"",
-                    quick_xml::escape::escape(target.depends_on.join(";"))
-                )?;
-            }
-            if let Some(condition) = &target.condition {
-                write!(
-                    writer,
-                    " Condition=\"{}\"",
-                    quick_xml::escape::escape(condition)
-                )?;
-            }
-            writeln!(writer, ">")?;
-
-            for task in &target.tasks {
-                write!(writer, "    <{}", task.name)?;
-                let mut attributes: Vec<_> = task.attributes.iter().collect();
-                attributes.sort_unstable_by_key(|(name, _)| *name);
-                for (name, value) in attributes {
-                    write!(writer, " {name}=\"{}\"", quick_xml::escape::escape(value))?;
-                }
-                writeln!(writer, " />")?;
-            }
-            writeln!(writer, "  </Target>")?;
-        }
-
-        writeln!(writer, "</Project>")?;
-        writer.flush()?;
-        Ok(())
+        ProjectPreprocessor::new(&self.model).write(path)
     }
 
     fn execute_target_recursive(
@@ -227,7 +158,6 @@ impl ProjectEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quick_xml::Reader;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -260,41 +190,6 @@ mod tests {
         let mut evaluator = ProjectEvaluator::new();
         evaluator.load_project(temp_file.path())?;
         evaluator.execute_target("Build")?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn writes_preprocessed_project_as_valid_xml() -> Result<()> {
-        let xml_content = r#"<Project>
-  <PropertyGroup><Greeting>A &amp; B</Greeting></PropertyGroup>
-  <ItemGroup><Compile Include="one.cs;two.cs" /></ItemGroup>
-  <Target Name="Build"><Message Text="$(Greeting): @(Compile)" /></Target>
-</Project>"#;
-        let mut input = NamedTempFile::new()?;
-        input.write_all(xml_content.as_bytes())?;
-        let output = NamedTempFile::new()?;
-
-        let mut evaluator = ProjectEvaluator::new();
-        evaluator.load_project(input.path())?;
-        evaluator.write_preprocessed_project(output.path())?;
-
-        let output_text = std::fs::read_to_string(output.path())?;
-        assert!(
-            output_text.contains("<Greeting>A &amp; B</Greeting>"),
-            "unexpected output:\n{output_text}"
-        );
-        assert!(output_text.contains("<Compile Include=\"one.cs\" />"));
-        assert!(output_text.contains("<Compile Include=\"two.cs\" />"));
-
-        let mut reader = Reader::from_str(&output_text);
-        loop {
-            match reader.read_event() {
-                Ok(quick_xml::events::Event::Eof) => break,
-                Ok(_) => {}
-                Err(error) => panic!("preprocessed output is invalid XML: {error}"),
-            }
-        }
 
         Ok(())
     }

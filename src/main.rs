@@ -3,6 +3,7 @@ mod expression;
 mod logger;
 mod object_model;
 mod parser;
+mod preprocess;
 mod tasks;
 mod tests;
 

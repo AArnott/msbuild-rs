@@ -17,7 +17,7 @@ Run the current baseline after `cargo build --release`:
 ./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
 ```
 
-The current outputs are not semantically identical: conventional `/pp` preserves the aggregated project source, while MSBuild-RS writes its evaluated model. Use the harness for directional measurements until the compatibility items below are complete.
+Both implementations now preserve aggregated project source, including unevaluated expressions and source-boundary comments around inlined imports. Semantic compatibility still depends on the evaluation items below.
 
 ## Evaluation Semantics
 
@@ -59,7 +59,7 @@ The current outputs are not semantically identical: conventional `/pp` preserves
 - [ ] Detect duplicate and cyclic imports with compatible diagnostics.
 - [ ] Implement `Choose`, `When`, and `Otherwise`.
 - [ ] Implement SDK implicit imports and `Sdk` resolution.
-- [ ] Preserve an aggregated source representation equivalent to `/pp`.
+- [x] Preserve an aggregated source representation equivalent to `/pp`.
 
 ### Escaping and Parsing
 

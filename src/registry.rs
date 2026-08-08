@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 
+#[cfg(windows)]
 use crate::escaping::escape;
 #[cfg(windows)]
 use crate::escaping::unescape_once;
@@ -57,6 +58,7 @@ impl RegistryView {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RegistryData {
     String(String),
@@ -67,6 +69,7 @@ pub(crate) enum RegistryData {
 }
 
 impl RegistryData {
+    #[cfg(windows)]
     fn into_scalar_escaped_string(self) -> String {
         match self {
             Self::String(value) => value,
@@ -87,6 +90,7 @@ impl RegistryData {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RegistryReadResult {
     KeyMissing,
@@ -107,7 +111,7 @@ pub(crate) fn expand_registry_property(expression: &str) -> Result<String> {
     #[cfg(not(windows))]
     {
         let _ = expression;
-        return Ok(String::new());
+        Ok(String::new())
     }
 
     #[cfg(windows)]

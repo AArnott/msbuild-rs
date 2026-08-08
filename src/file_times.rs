@@ -155,8 +155,9 @@ mod platform {
                 }
             }
         };
-        let Ok(timestamp) = libc::time_t::try_from(seconds) else {
-            return String::new();
+        let timestamp = match libc::time_t::try_from(seconds) {
+            Ok(timestamp) => timestamp,
+            Err(_) => return String::new(),
         };
         let mut local: libc::tm = unsafe { zeroed() };
         if unsafe { libc::localtime_r(&timestamp, &mut local) }.is_null() {

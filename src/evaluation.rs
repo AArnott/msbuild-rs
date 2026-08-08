@@ -582,6 +582,124 @@ mod tests {
     }
 
     #[test]
+    fn upstream_treat_as_local_property_import_affects_only_subsequent_assignments() -> Result<()> {
+        // Ports Evaluator_Tests.VerifyTreatAsLocalPropertyInImportDoesntAffectParentProjectAboveIt
+        // and VerifyTreatAsLocalPropertyInImportAffectsParentProjectBelowIt.
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "local.props",
+            r#"<Project TreatAsLocalProperty="Foo" />"#,
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup>
+    <Foo>before-import</Foo>
+    <SeenAbove>$(Foo)</SeenAbove>
+  </PropertyGroup>
+  <Import Project="local.props" />
+  <PropertyGroup>
+    <Foo>$(Foo)-below-import</Foo>
+    <SeenBelow>$(Foo)</SeenBelow>
+  </PropertyGroup>
+</Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::with_global_properties([("fOO", "global")]);
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+
+        assert_eq!(
+            model.get_property("SeenAbove").map(String::as_str),
+            Some("global")
+        );
+        assert_eq!(
+            model.get_property("SeenBelow").map(String::as_str),
+            Some("global-below-import")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_treat_as_local_property_expands_lists_and_unions_imports() -> Result<()> {
+        // Ports VerifyTreatAsLocalPropertySpecificationWorksIfSpecificationIsItselfAProperty,
+        // VerifyTreatAsLocalPropertyUnionBetweenImports, and VerifyDuplicateTreatAsLocalProperty.
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "local.props",
+            r#"<Project TreatAsLocalProperty="BAR; baz ;fOo">
+  <PropertyGroup>
+    <Foo>$(Foo)-import</Foo>
+    <Bar>$(Bar)-import</Bar>
+    <Baz>$(Baz)-import</Baz>
+  </PropertyGroup>
+</Project>"#,
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project TreatAsLocalProperty="$(LocalNames); foo ;;;">
+  <PropertyGroup>
+    <Foo>$(Foo)-root</Foo>
+    <Bar>ignored-before-import</Bar>
+    <Untouched>ignored</Untouched>
+  </PropertyGroup>
+  <Import Project="local.props" />
+</Project>"#,
+        );
+        let context = EvaluationContext::with_environment_and_global_properties(
+            Vec::<(String, String)>::new(),
+            [
+                ("LocalNames", "Foo"),
+                ("Foo", "global-foo"),
+                ("Bar", "global-bar"),
+                ("Baz", "global-baz"),
+                ("Untouched", "global-untouched"),
+            ],
+        );
+        let mut evaluator = ProjectEvaluator::with_context(context);
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+
+        assert_eq!(
+            model.get_property("Foo").map(String::as_str),
+            Some("global-foo-root-import")
+        );
+        assert_eq!(
+            model.get_property("Bar").map(String::as_str),
+            Some("global-bar-import")
+        );
+        assert_eq!(
+            model.get_property("Baz").map(String::as_str),
+            Some("global-baz-import")
+        );
+        assert_eq!(
+            model.get_property("Untouched").map(String::as_str),
+            Some("global-untouched")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_invalid_treat_as_local_property_is_rejected() -> Result<()> {
+        // Port of Evaluator_Tests.VerifyInvalidTreatAsLocalProperty.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project TreatAsLocalProperty="||Bar;Foo" />"#,
+        );
+        let error = ProjectEvaluator::with_global_properties([("Foo", "global")])
+            .load_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB5016"), "{error}");
+        Ok(())
+    }
+
+    #[test]
     fn upstream_reserved_project_properties_and_current_file_properties() -> Result<()> {
         // Port of Evaluator_Tests.ReservedProjectProperties and
         // MSBuildThisFileProperties.
@@ -2421,6 +2539,194 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|item| Path::new(&item.name).is_absolute())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_get_paths_of_all_directories_above_returns_unique_canonical_paths() -> Result<()> {
+        // Ports Expander_Tests.ExpandItemVectorFunctions_GetPathsOfAllDirectoriesAbove
+        // and ExpandItemVectorFunctions_GetPathsOfAllDirectoriesAbove_ReturnCanonicalPaths.
+        let directory = TempDir::new()?;
+        let alpha = directory.path().join("alpha");
+        let beta = alpha.join("beta");
+        let gamma = directory.path().join("gamma");
+        fs::create_dir_all(&beta)?;
+        fs::create_dir_all(&gamma)?;
+        let project = alpha.join("project.proj");
+        fs::write(
+            &project,
+            r#"<Project>
+  <ItemGroup>
+    <Compile Include="One.cs;beta/Two.cs;beta/Three.cs;../gamma/Four.cs" />
+    <MyDirectories Include="@(Compile->GetPathsOfAllDirectoriesAbove())" />
+  </ItemGroup>
+</Project>"#,
+        )?;
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let directories = evaluator
+            .get_model()
+            .get_items("MyDirectories")
+            .unwrap()
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            directories
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            directories.len()
+        );
+        for expected in [
+            directory.path(),
+            alpha.as_path(),
+            beta.as_path(),
+            gamma.as_path(),
+        ] {
+            let expected = display_path(expected);
+            assert!(
+                directories.iter().any(|actual| actual == &expected),
+                "{expected:?} not found in {directories:?}"
+            );
+        }
+        assert!(
+            !directories
+                .iter()
+                .any(|actual| actual.ends_with("gamma/Four.cs")
+                    || actual.ends_with("gamma\\Four.cs"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_and_sdk_per_item_string_functions_use_deterministic_allowlist() -> Result<()> {
+        // Ports Expander_Tests.ExpandItemVectorFunctionsItemSpecModifier2's Substring
+        // case and the Trim/TrimStart/Replace forms used by the .NET 10 SDK.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <I Include="  Ab.c%3Bd  ;.NETCoreApp,Version=v8.0;abcdef" />
+  <Trimmed Include="@(I->Trim())" />
+  <TrimStartChars Include="@(I->TrimStart('.NETCoreApp,Version=v'))" />
+  <Replaced Include="@(I->Replace('.', '_'))" />
+  <Substring Include="@(I->Substring(2, 3))" />
+  <UpperInvariant Include="@(I->ToUpperInvariant())" />
+  <LowerInvariant Include="@(I->ToLowerInvariant())" />
+  <Contains Include="@(I->Contains('b'))" />
+  <Equals Include="@(I->Equals('abcdef'))" />
+  <Length Include="@(I->get_Length())" />
+  <Spaced Include="%20%20abc%20%20" />
+  <TrimEmptySet Include="@(Spaced->Trim(''))" />
+  <TrimCharsSource Include="xxabcxx" />
+  <TrimChars Include="@(TrimCharsSource->Trim('x'))" />
+  <TrimEndChars Include="@(TrimCharsSource->TrimEnd('x'))" />
+</ItemGroup></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let identities = |item_type: &str| {
+            model
+                .get_items(item_type)
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            identities("Trimmed"),
+            ["Ab.c;d", ".NETCoreApp,Version=v8.0", "abcdef"]
+        );
+        assert_eq!(identities("TrimStartChars"), ["b.c;d", "8.0", "abcdef"]);
+        assert_eq!(
+            identities("Replaced"),
+            ["Ab_c;d", "_NETCoreApp,Version=v8_0", "abcdef"]
+        );
+        assert_eq!(identities("Substring"), [".c;", "ETC", "cde"]);
+        assert_eq!(
+            identities("UpperInvariant"),
+            ["AB.C;D", ".NETCOREAPP,VERSION=V8.0", "ABCDEF"]
+        );
+        assert_eq!(
+            identities("LowerInvariant"),
+            ["ab.c;d", ".netcoreapp,version=v8.0", "abcdef"]
+        );
+        assert_eq!(identities("Contains"), ["True", "False", "True"]);
+        assert_eq!(identities("Equals"), ["False", "False", "True"]);
+        assert_eq!(identities("Length"), ["6", "24", "6"]);
+        assert_eq!(identities("TrimEmptySet"), ["abc"]);
+        assert_eq!(identities("TrimChars"), ["abc"]);
+        assert_eq!(identities("TrimEndChars"), ["xxabc"]);
+        Ok(())
+    }
+
+    #[test]
+    fn culture_sensitive_per_item_string_functions_are_pruned() -> Result<()> {
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <I Include="i" />
+  <Rejected Include="@(I->ToUpper())" />
+</ItemGroup></Project>"#,
+        );
+        let error = ProjectEvaluator::new()
+            .load_project(project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("deterministic allowlist"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_metadata_covers_literal_missing_directory_glob_and_transform_items() -> Result<()>
+    {
+        let directory = TempDir::new()?;
+        fs::write(directory.path().join("literal.txt"), "literal")?;
+        fs::write(directory.path().join("glob.txt"), "glob")?;
+        fs::create_dir(directory.path().join("folder"))?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project>
+  <PropertyGroup><Root>$(MSBuildThisFileDirectory)</Root></PropertyGroup>
+  <ItemGroup>
+    <Literal Include="$(Root)literal.txt;$(Root)missing.txt;$(Root)folder" />
+    <Globbed Include="$(Root)*.txt" />
+    <ModifiedProjection Include="@(Literal->ModifiedTime())" />
+  </ItemGroup>
+</Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let literal = model.get_items("Literal").unwrap();
+        for name in ["ModifiedTime", "CreatedTime", "AccessedTime"] {
+            let value = literal[0].get_metadata(name).unwrap();
+            assert_eq!(value.len(), 27, "{name}={value}");
+            assert_eq!(literal[1].get_metadata(name).as_deref(), Some(""));
+            assert_eq!(literal[2].get_metadata(name).as_deref(), Some(""));
+        }
+
+        let globbed = model.get_items("Globbed").unwrap();
+        assert_eq!(globbed.len(), 2);
+        assert!(globbed.iter().all(|item| {
+            item.get_metadata("ModifiedTime")
+                .is_some_and(|value| value.len() == 27)
+        }));
+        assert_eq!(
+            model.get_items("ModifiedProjection").unwrap()[0].name,
+            literal[0].get_metadata("ModifiedTime").unwrap()
         );
         Ok(())
     }

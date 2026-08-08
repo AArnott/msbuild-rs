@@ -65,10 +65,7 @@ jobs:
         shell: pwsh
         run: |
           $executable = if ($IsWindows) { "target/debug/msbuild-rs.exe" } else { "target/debug/msbuild-rs" }
-          Get-ChildItem fixtures/evaluation -Recurse -Filter fixture.json |
-            ForEach-Object {
-              ./scripts/compare-evaluation.ps1 -Fixture $_.FullName -RustExecutable $executable
-            }
+          ./scripts/run-compatibility-fixtures.ps1 -RustExecutable $executable
 
       - name: Test path normalization
         shell: pwsh

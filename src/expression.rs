@@ -1,15 +1,17 @@
 use anyhow::{Result, anyhow, bail};
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::escaping::{DecodedString, EscapedString, escape, unescape_once};
 use crate::native_functions::{
     ArgumentRule, IntrinsicArgument, IntrinsicContext, IntrinsicValue, InvocationKind, ResultRule,
-    dotnet_ordinal_ignore_case_key, invoke, is_allowed, resolve,
+    dotnet_ordinal_ignore_case_key, invoke, invoke_item_string_function, is_allowed, resolve,
+    resolve_item_string_function,
 };
 use crate::object_model::{Item, ProjectModel};
-use crate::properties::this_file_property;
+use crate::properties::{lexical_absolute, this_file_property};
 use crate::registry::{expand_registry_property, missing_registry_prefix};
 
 const MAX_EXPRESSION_NESTING: usize = 128;
@@ -684,6 +686,25 @@ impl<'a> ExpressionEvaluator<'a> {
         self.evaluate_with_depth(input, 0)
     }
 
+    pub(crate) fn evaluate_properties_only(&self, input: &str) -> Result<String> {
+        let mut output = String::with_capacity(input.len());
+        let mut position = 0;
+        while let Some(relative_start) = input[position..].find('$') {
+            let start = position + relative_start;
+            output.push_str(&input[position..start]);
+            if input.as_bytes().get(start + 1) != Some(&b'(') {
+                output.push('$');
+                position = start + 1;
+                continue;
+            }
+            let end = find_matching_parenthesis(input, start + 1)?;
+            output.push_str(&self.evaluate_property_expression(&input[start + 2..end], 0)?);
+            position = end + 1;
+        }
+        output.push_str(&input[position..]);
+        Ok(output)
+    }
+
     fn evaluate_with_depth(&self, input: &str, depth: usize) -> Result<String> {
         if depth > MAX_EXPRESSION_NESTING {
             bail!("Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}");
@@ -1267,6 +1288,38 @@ impl<'a> ExpressionEvaluator<'a> {
                     }
                 }
                 values = transformed;
+            } else if method.eq_ignore_ascii_case("GetPathsOfAllDirectoriesAbove") {
+                require_arguments(method, &arguments, 0)?;
+                let mut directories = BTreeMap::<Vec<u16>, String>::new();
+                for value in &values {
+                    if value.escaped_identity.is_empty() {
+                        continue;
+                    }
+                    let identity = normalized_item_path(&unescape_once(&value.escaped_identity));
+                    let rooted = if identity.is_absolute() {
+                        lexical_absolute(&identity)
+                    } else {
+                        let directory = value
+                            .provenance
+                            .source()
+                            .map(Item::evaluation_directory)
+                            .unwrap_or(&self.base_directory);
+                        lexical_absolute(&directory.join(identity))
+                    }?;
+                    for ancestor in rooted.parent().into_iter().flat_map(Path::ancestors) {
+                        let directory = display_path(ancestor);
+                        directories
+                            .entry(dotnet_ordinal_ignore_case_key(&directory))
+                            .or_insert(directory);
+                    }
+                }
+                values = directories
+                    .into_values()
+                    .map(|directory| EvaluatedItemExpression {
+                        provenance: ItemProvenance::SourceLess,
+                        escaped_identity: escape(&directory),
+                    })
+                    .collect();
             } else if method.eq_ignore_ascii_case("Combine") {
                 require_arguments(method, &arguments, 1)?;
                 let mut transformed = Vec::with_capacity(values.len());
@@ -1281,8 +1334,21 @@ impl<'a> ExpressionEvaluator<'a> {
                     transformed.push(value);
                 }
                 values = transformed;
+            } else if let Some(item_string_function) = resolve_item_string_function(method) {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| unescape_once(argument))
+                    .collect::<Vec<_>>();
+                for value in &mut values {
+                    let receiver = unescape_once(&value.escaped_identity);
+                    let result =
+                        invoke_item_string_function(item_string_function, &receiver, &arguments)?;
+                    value.escaped_identity = escape(&result);
+                }
             } else {
-                bail!("Unsupported item function: {method}");
+                bail!(
+                    "Unsupported item function: {method}. Per-item System.String calls are restricted to the deterministic allowlist"
+                );
             }
         }
 
@@ -1351,11 +1417,22 @@ const ITEM_SPEC_MODIFIERS: &[&str] = &[
     "RelativeDir",
     "Directory",
     "RecursiveDir",
+    "ModifiedTime",
+    "CreatedTime",
+    "AccessedTime",
     "DefiningProjectFullPath",
     "DefiningProjectDirectory",
     "DefiningProjectName",
     "DefiningProjectExtension",
 ];
+
+fn normalized_item_path(value: &str) -> PathBuf {
+    if std::path::MAIN_SEPARATOR == '\\' {
+        PathBuf::from(value.replace('/', "\\"))
+    } else {
+        PathBuf::from(value.replace('\\', "/"))
+    }
+}
 
 fn item_expression_metadata<'a>(
     value: &'a EvaluatedItemExpression<'a>,

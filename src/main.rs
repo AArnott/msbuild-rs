@@ -1,6 +1,7 @@
 mod escaping;
 mod evaluation;
 mod expression;
+mod file_times;
 mod item_glob;
 mod loader;
 mod logger;

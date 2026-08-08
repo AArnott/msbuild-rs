@@ -1,0 +1,9 @@
+{
+  "name": "duplicate-and-circular-imports",
+  "project": "project.proj",
+  "properties": [
+    "ImportOrder",
+    "ReachedAfterCycle"
+  ],
+  "items": []
+}

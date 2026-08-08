@@ -1,0 +1,14 @@
+<Project TreatAsLocalProperty="$(LocalNames); fOo ;;;">
+  <PropertyGroup>
+    <Foo>$(Foo)-root</Foo>
+    <FromExpandedList>$(FromExpandedList)-root</FromExpandedList>
+    <LateLocal>ignored-above-import</LateLocal>
+    <LateLocalAboveImport>$(LateLocal)</LateLocalAboveImport>
+    <Untouched>ignored</Untouched>
+  </PropertyGroup>
+  <Import Project="local.props" />
+  <PropertyGroup>
+    <LateLocal>$(LateLocal)-parent</LateLocal>
+    <ImportedLocal>$(ImportedLocal)-parent</ImportedLocal>
+  </PropertyGroup>
+</Project>

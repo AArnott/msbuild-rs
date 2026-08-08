@@ -1,0 +1,10 @@
+{
+  "name": "reserved-property-assignment-rejection",
+  "project": "project.proj",
+  "properties": [],
+  "items": [],
+  "expectedFailure": {
+    "dotnetPattern": "MSB4004",
+    "rustPattern": "MSB4004"
+  }
+}

@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <ImportOrder>root</ImportOrder>
+  </PropertyGroup>
+  <Import Project="a.props" />
+  <Import Project="./a.props" />
+  <PropertyGroup>
+    <ReachedAfterCycle>true</ReachedAfterCycle>
+  </PropertyGroup>
+</Project>

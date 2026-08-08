@@ -42,9 +42,12 @@ msbuild-rs --project path/to/project.proj --preprocess out.xml
 # Query evaluated properties and item identities/metadata without executing targets
 msbuild-rs --project path/to/project.proj --get-property Configuration --get-item Compile
 
-# Supply immutable global properties (repeat --property as needed)
+# Supply global properties (repeat --property as needed)
 msbuild-rs --project path/to/project.proj --property Configuration=Release --get-property Configuration
 ```
+
+Global properties are immutable unless a root project or source-position import
+lists them in `TreatAsLocalProperty`, matching MSBuild's cumulative semantics.
 
 ### Project File Format
 
@@ -189,12 +192,16 @@ cargo build --release
 # Compare a semantic evaluation fixture with dotnet msbuild without running targets
 cargo build
 ./scripts/compare-evaluation.ps1 -Fixture ./fixtures/evaluation/basic/fixture.json
+
+# Discover and run every semantic and preprocess compatibility fixture
+./scripts/run-compatibility-fixtures.ps1
 ```
 
 `global.json` pins the .NET SDK used by the comparison scripts and CI. The
 semantic runner writes raw tool output and deterministic, path-normalized JSON
 to `benchmark-results/evaluation`; fixtures with `expectedFailure` compare
 controlled rejection diagnostics and require both evaluators to fail.
+The all-fixture runner is also the cross-platform CI entry point.
 
 ## Sample Projects
 

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <ImportedFile>$(MSBuildThisFile)</ImportedFile>
+    <ImportedFullPath>$(MSBuildThisFileFullPath)</ImportedFullPath>
+  </PropertyGroup>
+</Project>

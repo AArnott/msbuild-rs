@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <ImportOrder>$(ImportOrder);a</ImportOrder>
+  </PropertyGroup>
+  <Import Project="b.props" />
+</Project>

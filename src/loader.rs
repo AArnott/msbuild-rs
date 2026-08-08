@@ -29,10 +29,12 @@ pub(crate) struct LoadOutput {
 struct EvaluationState {
     model: ProjectModel,
     global_properties: PropertyMap,
+    local_properties: PropertyMap,
     active_import_stack: Vec<ActiveImport>,
     completed_imports: HashSet<PathBuf>,
     render_preprocessed: bool,
     sdk_root: Option<PathBuf>,
+    filesystem_directory: PathBuf,
     item_glob_cache: HashMap<String, Arc<Vec<ItemGlobMatch>>>,
     item_identity_index: HashMap<String, HashMap<String, Vec<usize>>>,
 }
@@ -370,10 +372,13 @@ impl EvaluationState {
         Ok(Self {
             model,
             global_properties,
+            local_properties: PropertyMap::new(),
             active_import_stack: Vec::new(),
             completed_imports: HashSet::new(),
             render_preprocessed,
             sdk_root,
+            filesystem_directory: std::env::current_dir()
+                .context("Failed to determine the process working directory")?,
             item_glob_cache: HashMap::new(),
             item_identity_index: HashMap::new(),
         })
@@ -419,6 +424,7 @@ impl EvaluationState {
         validate_project_structure(&source, &lexical_path)?;
         let (content_start, content_end) =
             project_content_bounds(&source, include_project_element)?;
+        self.evaluate_treat_as_local_property(&source, &lexical_path)?;
         let sdk_references = project_sdks(&source)?;
         let mut sdk_imports = Vec::with_capacity(sdk_references.len());
         for sdk in sdk_references {
@@ -1046,7 +1052,8 @@ impl EvaluationState {
                 current_file.display()
             );
         }
-        if self.global_properties.contains_key(&name) {
+        if self.global_properties.contains_key(&name) && !self.local_properties.contains_key(&name)
+        {
             return Ok(());
         }
         let value = ExpressionEvaluator::with_current_file(&self.model, current_file)
@@ -1058,6 +1065,35 @@ impl EvaluationState {
                 )
             })?;
         self.model.set_property(name, value);
+        Ok(())
+    }
+
+    fn evaluate_treat_as_local_property(
+        &mut self,
+        source: &str,
+        current_file: &Path,
+    ) -> Result<()> {
+        let Some(expression) = project_treat_as_local_property(source)? else {
+            return Ok(());
+        };
+        let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
+            .evaluate_properties_only(&expression)
+            .with_context(|| {
+                format!(
+                    "Failed to evaluate TreatAsLocalProperty in {}",
+                    current_file.display()
+                )
+            })?;
+        for name in tokenize_list(&evaluated)? {
+            let name = unescape_once(name);
+            if !is_valid_xml_name(&name) {
+                bail!(
+                    "MSB5016: The name \"{name}\" contains an invalid character in {}.",
+                    current_file.display()
+                );
+            }
+            self.local_properties.insert(name, String::new());
+        }
         Ok(())
     }
 
@@ -1141,6 +1177,7 @@ impl EvaluationState {
         )?;
         let defaults = self.model.item_defaults(&item.item_type);
         let evaluation_directory = project_root.clone();
+        let filesystem_directory = self.filesystem_directory.clone();
         let mut candidates = Vec::new();
         for fragment in tokenize_list(include)? {
             let evaluator = ExpressionEvaluator::with_current_file(&self.model, current_file);
@@ -1168,7 +1205,8 @@ impl EvaluationState {
                             defaults.clone(),
                             evaluation_directory.clone(),
                             current_file.to_path_buf(),
-                        ),
+                        )
+                        .with_filesystem_directory(filesystem_directory.clone()),
                     };
                     candidates.push(candidate);
                 }
@@ -1188,16 +1226,20 @@ impl EvaluationState {
                                 evaluation_directory.clone(),
                                 current_file.to_path_buf(),
                             )
+                            .with_filesystem_directory(filesystem_directory.clone())
                             .with_recursive_dir(matched.escaped_recursive_dir.clone())
                         }));
                     }
-                    ItemSpec::Literal { .. } => candidates.push(Item::new(
-                        item.item_type.clone(),
-                        identity.to_string(),
-                        defaults.clone(),
-                        evaluation_directory.clone(),
-                        current_file.to_path_buf(),
-                    )),
+                    ItemSpec::Literal { .. } => candidates.push(
+                        Item::new(
+                            item.item_type.clone(),
+                            identity.to_string(),
+                            defaults.clone(),
+                            evaluation_directory.clone(),
+                            current_file.to_path_buf(),
+                        )
+                        .with_filesystem_directory(filesystem_directory.clone()),
+                    ),
                 }
             }
         }
@@ -2061,6 +2103,49 @@ fn project_content_bounds(source: &str, include_project_element: bool) -> Result
             _ => {}
         }
     }
+}
+
+fn project_treat_as_local_property(source: &str) -> Result<Option<String>> {
+    let mut reader = Reader::from_str(source);
+    loop {
+        match reader.read_event()? {
+            Event::Start(element) | Event::Empty(element)
+                if element.name().as_ref() == b"Project" =>
+            {
+                return attribute_value(&element, &reader, b"TreatAsLocalProperty");
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+fn is_valid_xml_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters.next().is_some_and(is_xml_name_start)
+        && characters.all(|character| {
+            is_xml_name_start(character)
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '.' | '\u{b7}')
+                || ('\u{300}'..='\u{36f}').contains(&character)
+                || ('\u{203f}'..='\u{2040}').contains(&character)
+        })
+}
+
+fn is_xml_name_start(character: char) -> bool {
+    matches!(character, ':' | '_' | 'A'..='Z' | 'a'..='z')
+        || ('\u{c0}'..='\u{d6}').contains(&character)
+        || ('\u{d8}'..='\u{f6}').contains(&character)
+        || ('\u{f8}'..='\u{2ff}').contains(&character)
+        || ('\u{370}'..='\u{37d}').contains(&character)
+        || ('\u{37f}'..='\u{1fff}').contains(&character)
+        || ('\u{200c}'..='\u{200d}').contains(&character)
+        || ('\u{2070}'..='\u{218f}').contains(&character)
+        || ('\u{2c00}'..='\u{2fef}').contains(&character)
+        || ('\u{3001}'..='\u{d7ff}').contains(&character)
+        || ('\u{f900}'..='\u{fdcf}').contains(&character)
+        || ('\u{fdf0}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{effff}').contains(&character)
 }
 
 fn project_sdks(source: &str) -> Result<Vec<SdkReference>> {

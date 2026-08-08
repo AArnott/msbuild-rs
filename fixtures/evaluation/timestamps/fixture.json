@@ -1,0 +1,35 @@
+{
+  "name": "timestamp-well-known-metadata",
+  "project": "project.proj",
+  "properties": [],
+  "items": [
+    {
+      "type": "Literal",
+      "metadata": [
+        "ModifiedTime",
+        "CreatedTime",
+        "AccessedTime"
+      ]
+    },
+    {
+      "type": "Globbed",
+      "metadata": [
+        "ModifiedTime",
+        "CreatedTime",
+        "AccessedTime"
+      ]
+    },
+    {
+      "type": "ModifiedProjection",
+      "metadata": []
+    },
+    {
+      "type": "CreatedProjection",
+      "metadata": []
+    },
+    {
+      "type": "AccessedProjection",
+      "metadata": []
+    }
+  ]
+}

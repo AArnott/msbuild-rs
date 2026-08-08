@@ -2064,6 +2064,102 @@ pub(crate) fn invoke(
     })
 }
 
+const ITEM_STRING_FUNCTIONS: &[&str] = &[
+    "Contains",
+    "Equals",
+    "Substring",
+    "ToLowerInvariant",
+    "ToUpperInvariant",
+    "Trim",
+    "TrimStart",
+    "TrimEnd",
+    "Replace",
+    "get_Length",
+];
+
+pub(crate) fn resolve_item_string_function(member: &str) -> Option<&'static str> {
+    ITEM_STRING_FUNCTIONS
+        .iter()
+        .copied()
+        .find(|candidate| member.eq_ignore_ascii_case(candidate))
+}
+
+pub(crate) fn invoke_item_string_function(
+    member: &str,
+    receiver: &str,
+    arguments: &[String],
+) -> Result<String> {
+    debug_assert!(ITEM_STRING_FUNCTIONS.contains(&member));
+    if member.eq_ignore_ascii_case("get_Length") {
+        if !arguments.is_empty() {
+            bail!("{member} expects 0 argument(s), found {}", arguments.len());
+        }
+        return Ok(receiver.encode_utf16().count().to_string());
+    }
+
+    if matches_ignore_ascii_case(member, &["Trim", "TrimStart", "TrimEnd"]) && arguments.len() == 1
+    {
+        return trim_utf16(receiver, &arguments[0], member);
+    }
+
+    let descriptor = resolve(
+        "System.String",
+        member,
+        InvocationKind::InstanceMethod,
+        arguments.len(),
+    )?;
+    let receiver = IntrinsicValue::String(receiver.to_string());
+    let arguments = arguments
+        .iter()
+        .map(|argument| IntrinsicArgument {
+            value: IntrinsicValue::String(argument.clone()),
+        })
+        .collect::<Vec<_>>();
+    let context = IntrinsicContext {
+        tools_directory: None,
+        environment: None,
+        disable_features_from_version: None,
+        runtime_type: None,
+    };
+    invoke(descriptor, &context, Some(&receiver), &arguments)
+        .and_then(|value| value.to_msbuild_string())
+}
+
+fn trim_utf16(receiver: &str, characters: &str, member: &str) -> Result<String> {
+    if characters.is_empty() {
+        return Ok(if member.eq_ignore_ascii_case("TrimStart") {
+            receiver.trim_start_matches(char::is_whitespace)
+        } else if member.eq_ignore_ascii_case("TrimEnd") {
+            receiver.trim_end_matches(char::is_whitespace)
+        } else {
+            receiver.trim_matches(char::is_whitespace)
+        }
+        .to_string());
+    }
+    let receiver = receiver.encode_utf16().collect::<Vec<_>>();
+    let characters = characters.encode_utf16().collect::<Vec<_>>();
+    let mut start = 0;
+    let mut end = receiver.len();
+    if !member.eq_ignore_ascii_case("TrimEnd") {
+        while start < end && characters.contains(&receiver[start]) {
+            start += 1;
+        }
+    }
+    if !member.eq_ignore_ascii_case("TrimStart") {
+        while end > start && characters.contains(&receiver[end - 1]) {
+            end -= 1;
+        }
+    }
+    String::from_utf16(&receiver[start..end])
+        .map_err(|_| anyhow!("{member} produced a lone UTF-16 surrogate"))
+}
+
+fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
+}
+
 fn select_and_coerce_overload(
     descriptor: &IntrinsicDescriptor,
     arguments: &[IntrinsicArgument],

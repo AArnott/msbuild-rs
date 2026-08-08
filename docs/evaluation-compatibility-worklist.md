@@ -1,6 +1,9 @@
 # MSBuild Evaluation Compatibility Worklist
 
-This worklist tracks the behavior needed before preprocessing performance can be considered an apples-to-apples comparison with conventional MSBuild. A feature is complete only when focused unit tests and a parity fixture pass against both `dotnet build /pp` and `msbuild-rs --preprocess`.
+This worklist tracks the behavior needed before preprocessing performance can
+be considered an apples-to-apples comparison with conventional MSBuild. A
+feature is complete only when focused unit tests and a minimal semantic and/or
+normalized preprocess fixture pass against dotnet MSBuild and msbuild-rs.
 
 ## Benchmark Baseline
 
@@ -11,6 +14,9 @@ This worklist tracks the behavior needed before preprocessing performance can be
 - [ ] Add larger generated fixtures for properties, items, conditions, and import graphs.
 - [x] Report wall-clock distribution.
 - [ ] Report peak working set.
+
+The two unchecked benchmark items are the subsequent performance-finalization
+wave, not evaluation-semantic gaps.
 
 Run the current baseline after `cargo build --release`:
 
@@ -31,7 +37,9 @@ Both implementations now preserve aggregated project source, including unevaluat
 - [x] Expand each assignment once against the preceding state, including self,
   before-set, and mutual references; bound actual expression/function nesting
   without interpreting parentheses in literal text.
-- [x] Implement global properties and `--property Name=Value` command-line precedence.
+- [x] Implement global properties and `--property Name=Value` command-line
+  precedence, including source-position `TreatAsLocalProperty` union semantics
+  across the root project and imports.
 - [x] Snapshot environment properties, protect the conventional reserved-name
   set, and synthesize current-file properties only from active evaluation context.
 - [x] Preserve lexical project/current-file paths and provide host-resolved
@@ -44,6 +52,13 @@ Both implementations now preserve aggregated project source, including unevaluat
   `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`, using host-specific
   lexical .NET path rules rather than filesystem canonicalization.
 - [x] Implement read-only registry properties where supported.
+
+`TreatAsLocalProperty` is expanded and split when each project/import root is
+entered, before that file's implicit top SDK imports. Names are validated,
+trimmed, accumulated case-insensitively, and never retroactive: a declaration
+in an import permits assignments in that import and subsequent parent content,
+but cannot revive a parent assignment skipped above the import. The original
+global-property dictionary/value remains the expansion predecessor.
 
 The native registry is initialized once and indexed by normalized type, member,
 and invocation kind. Overload arity, parameter/params coercion, and per-overload
@@ -197,13 +212,13 @@ and nonstandard runtime platform identifiers.
   `WithMetadataValue`, `WithoutMetadataValue`, `AnyHaveMetadataValue`,
   `ClearMetadata`, `Exists`, `DirectoryName`, `Combine`, and the non-timestamp
   well-known item-spec modifiers.
-- [ ] Implement the remaining obscure item-function surface:
+- [x] Implement the remaining evaluation-time item-function surface:
   `GetPathsOfAllDirectoriesAbove` and a deliberately allowlisted subset of
   per-item `System.String` methods/properties.
 - [x] Implement indexed, case-insensitive custom metadata and the `Identity`,
   `FullPath`, `RootDir`, `Filename`, `Extension`, `RelativeDir`, `Directory`,
   `RecursiveDir`, and defining-project well-known metadata.
-- [ ] Implement timestamp well-known metadata (`ModifiedTime`, `CreatedTime`,
+- [x] Implement timestamp well-known metadata (`ModifiedTime`, `CreatedTime`,
   and `AccessedTime`).
 - [x] Implement custom separators in item expressions.
 - [x] Implement ordered evaluation-time `Exclude`, `Remove`, and `Update`,
@@ -245,6 +260,26 @@ without changing the still-open remaining-item-function checkbox above.
 - [x] Reject attempts to define reserved well-known metadata on items or item
   definitions, using case-insensitive `MSB4033` diagnostics.
 
+`GetPathsOfAllDirectoriesAbove` normalizes each source item against its project
+directory, deduplicates with .NET ordinal-ignore-case semantics, and returns the
+sorted ancestor union. Per-item string dispatch is a static allowlist:
+`Trim()`, `Trim/TrimStart/TrimEnd(string-as-char-set)`, `Replace`,
+`Substring`, `Contains`, ordinal `Equals`, `ToLowerInvariant`,
+`ToUpperInvariant`, and `get_Length`. This includes the `Trim`, `TrimStart`,
+and `Replace` forms present in the pinned .NET 10 SDK. Current-culture members
+are deliberately rejected.
+
+Timestamp metadata follows MSBuild's unusual filesystem rooting: relative item
+identities are probed from the process working directory, not the root or
+defining project directory; absolute identities are probed directly.
+Nonexistent paths and directories return empty values. Values use local host
+time in `yyyy-MM-dd HH:mm:ss.fffffff` form. Windows uses creation/write/access
+file times; macOS uses birth/modify/access times; Linux uses filesystem birth
+time when reported and otherwise, like .NET, synthesizes creation as the older
+of change and modification time. Host access-time mount policy is preserved.
+Each immutable item lazily caches one metadata/stat result shared by all three
+timestamp names; no filesystem call occurs unless timestamp metadata is read.
+
 ### Imports and Project Structure
 
 - [x] Resolve imports relative to the importing file.
@@ -282,7 +317,7 @@ without changing the still-open remaining-item-function checkbox above.
 
 ## Parity Fixtures
 
-- [ ] Each completed feature has a minimal standalone project fixture.
+- [x] Each completed feature has a minimal standalone project fixture.
 - [x] Capture queried properties and items from conventional MSBuild for semantic comparison.
 - [x] Normalize machine-specific paths before comparing outputs.
 - [x] Cover Windows and a non-Windows platform in CI.
@@ -290,11 +325,11 @@ without changing the still-open remaining-item-function checkbox above.
 
 The upstream-test mapping and fixture status are maintained in
 [the evaluation compatibility matrix](evaluation-compatibility-matrix.md).
+`scripts/run-compatibility-fixtures.ps1` discovers every semantic and
+preprocess manifest; CI runs that same entry point on Windows, Linux, and macOS.
 
 ## Explicitly deferred gaps
 
-- `TreatAsLocalProperty` is not implemented. Global properties are therefore
-  always immutable during project/import evaluation.
 - Lexical absolute local paths, including Windows spelling, are covered. Edge
   UNC normalization remains deferred.
 - Version syntax on top-level SDK declarations is retained for installed/custom
@@ -302,17 +337,14 @@ The upstream-test mapping and fixture status are maintained in
   deferred.
 - Uninitialized-property warning emission is deferred; before-set reads already
   produce the compatible empty value without recursive reevaluation.
-- Property, item-type, and metadata lookup are indexed and case-insensitive.
-- Timestamp well-known metadata (`ModifiedTime`, `CreatedTime`, and
-  `AccessedTime`) remains deferred; all listed non-timestamp metadata is
-  available in transforms.
 - Item wildcards are intentionally eager. MSBuild's opt-in
   `MsBuildSkipEagerWildCardEvaluationRegexes` lazy representation, synthetic
   `MSBuildItemGlob` items, and `GetAllGlobs` reporting remain deferred. Repeated
   identical eager patterns are cached within one evaluation.
-- `GetPathsOfAllDirectoriesAbove` and arbitrary per-item .NET string
-  functions remain deferred. String methods will require an explicit safe
-  allowlist rather than unrestricted dispatch.
+- Per-item .NET string functions intentionally expose only the deterministic
+  allowlist documented above. Culture-sensitive `ToUpper`, `ToLower`,
+  comparison/search overloads, and every unlisted member remain pruned rather
+  than being approximated.
 - Native property functions deliberately remain a supported subset of
   MSBuild's legal .NET receiver surface. Regex, URI/culture/time-span,
   directory/file enumeration, ToolLocationHelper, broad numeric/enum

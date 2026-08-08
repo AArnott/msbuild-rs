@@ -76,7 +76,9 @@
     "DefaultNull",
     "UnescapeNull",
     "NestedEscapedString",
-    "RelativeFileAbove"
+    "RelativeFileAbove",
+    "RegistryPrefixMissing",
+    "RegistryViewMissingDefault"
   ],
   "items": [
     { "type": "SplitItem", "metadata": [] },

@@ -3,9 +3,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::escaping::{EscapedString, ItemSpecKind, classify_item_spec, escape, unescape_once};
+use crate::file_times::FileTimes;
 use crate::properties::{display_path, lexical_absolute};
 
 /// An insertion-ordered map with O(1) ASCII case-insensitive lookup.
@@ -226,8 +227,10 @@ pub struct Item {
     defaults: Arc<MetadataMap>,
     inherited_defaults: Vec<Arc<MetadataMap>>,
     evaluation_directory: PathBuf,
+    filesystem_directory: PathBuf,
     defining_project: PathBuf,
     escaped_recursive_dir: String,
+    file_times: OnceLock<FileTimes>,
     active: bool,
 }
 
@@ -247,11 +250,18 @@ impl Item {
             metadata: MetadataMap::new(),
             defaults,
             inherited_defaults: Vec::new(),
+            filesystem_directory: evaluation_directory.clone(),
             evaluation_directory,
             defining_project,
             escaped_recursive_dir: String::new(),
+            file_times: OnceLock::new(),
             active: true,
         }
+    }
+
+    pub(crate) fn with_filesystem_directory(mut self, directory: PathBuf) -> Self {
+        self.filesystem_directory = directory;
+        self
     }
 
     pub(crate) fn with_recursive_dir(mut self, escaped_recursive_dir: String) -> Self {
@@ -306,6 +316,7 @@ impl Item {
         copy.metadata = self.metadata.clone();
         copy.inherited_defaults = self.inherited_defaults.clone();
         copy.inherited_defaults.push(Arc::clone(&self.defaults));
+        copy.filesystem_directory = self.filesystem_directory.clone();
         if preserve_recursive_dir {
             copy.escaped_recursive_dir = self.escaped_recursive_dir.clone();
         }
@@ -319,13 +330,15 @@ impl Item {
         defaults: Arc<MetadataMap>,
         defining_project: PathBuf,
     ) -> Self {
-        Self::new(
+        let mut copy = Self::new(
             item_type,
             escaped_name,
             defaults,
             self.evaluation_directory.clone(),
             defining_project,
-        )
+        );
+        copy.filesystem_directory = self.filesystem_directory.clone();
+        copy
     }
 
     #[allow(dead_code)] // Public object-model query.
@@ -526,6 +539,31 @@ impl Item {
                     .unwrap_or_default(),
             );
         }
+        if name.eq_ignore_ascii_case("ModifiedTime")
+            || name.eq_ignore_ascii_case("CreatedTime")
+            || name.eq_ignore_ascii_case("AccessedTime")
+        {
+            if identity == self.name {
+                let times = self
+                    .file_times
+                    .get_or_init(|| self.read_file_times(identity));
+                return Some(if name.eq_ignore_ascii_case("ModifiedTime") {
+                    times.modified.clone()
+                } else if name.eq_ignore_ascii_case("CreatedTime") {
+                    times.created.clone()
+                } else {
+                    times.accessed.clone()
+                });
+            }
+            let times = self.read_file_times(identity);
+            return Some(if name.eq_ignore_ascii_case("ModifiedTime") {
+                times.modified
+            } else if name.eq_ignore_ascii_case("CreatedTime") {
+                times.created
+            } else {
+                times.accessed
+            });
+        }
         if name.eq_ignore_ascii_case("DefiningProjectFullPath") {
             return Some(display_path(&self.defining_project));
         }
@@ -556,6 +594,20 @@ impl Item {
             );
         }
         None
+    }
+
+    fn read_file_times(&self, identity: &str) -> FileTimes {
+        let item_path = normalized_item_path(identity);
+        let path = if item_path.is_absolute() {
+            item_path
+        } else {
+            self.filesystem_directory.join(item_path)
+        };
+        FileTimes::read(&path)
+    }
+
+    pub(crate) fn evaluation_directory(&self) -> &Path {
+        &self.evaluation_directory
     }
 }
 
@@ -805,6 +857,9 @@ impl ProjectModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_times::{reset_stat_calls, stat_calls};
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn property_lookup_is_case_insensitive_and_decodes_once() {
@@ -835,5 +890,65 @@ mod tests {
 
         assert_eq!(metadata.get("SeNsItIvE"), Some("second"));
         assert_eq!(metadata.iter().next().unwrap().0, "SENSITIVE");
+    }
+
+    #[test]
+    fn timestamp_metadata_is_lazy_and_uses_one_cached_stat_per_item() -> anyhow::Result<()> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("timestamp.txt");
+        fs::write(&path, "timestamp")?;
+        let item = Item::new(
+            "I".to_string(),
+            "timestamp.txt".to_string(),
+            Arc::new(MetadataMap::new()),
+            directory.path().join("project-root-is-not-the-time-root"),
+            directory.path().join("imports").join("child.props"),
+        )
+        .with_filesystem_directory(directory.path().to_path_buf());
+
+        reset_stat_calls();
+        assert_eq!(item.get_metadata("Filename").as_deref(), Some("timestamp"));
+        assert_eq!(stat_calls(), 0);
+
+        let modified = item.get_metadata("ModifiedTime").unwrap();
+        assert_eq!(stat_calls(), 1);
+        assert_file_time_format(&modified);
+        assert_file_time_format(&item.get_metadata("CreatedTime").unwrap());
+        assert_file_time_format(&item.get_metadata("AccessedTime").unwrap());
+        assert_eq!(stat_calls(), 1);
+
+        let missing = Item::new(
+            "I".to_string(),
+            "missing.txt".to_string(),
+            Arc::new(MetadataMap::new()),
+            directory.path().join("different-project-root"),
+            directory.path().join("project.proj"),
+        )
+        .with_filesystem_directory(directory.path().to_path_buf());
+        assert_eq!(missing.get_metadata("ModifiedTime").as_deref(), Some(""));
+        assert_eq!(missing.get_metadata("CreatedTime").as_deref(), Some(""));
+        assert_eq!(missing.get_metadata("AccessedTime").as_deref(), Some(""));
+        assert_eq!(stat_calls(), 2);
+        Ok(())
+    }
+
+    fn assert_file_time_format(value: &str) {
+        assert_eq!(value.len(), 27, "{value}");
+        for index in [4, 7] {
+            assert_eq!(value.as_bytes()[index], b'-', "{value}");
+        }
+        assert_eq!(value.as_bytes()[10], b' ', "{value}");
+        for index in [13, 16] {
+            assert_eq!(value.as_bytes()[index], b':', "{value}");
+        }
+        assert_eq!(value.as_bytes()[19], b'.', "{value}");
+        assert!(
+            value
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| [4, 7, 10, 13, 16, 19].contains(&index)
+                    || byte.is_ascii_digit()),
+            "{value}"
+        );
     }
 }

@@ -77,6 +77,8 @@
     <UnescapeNull>$([MSBuild]::Unescape(null))</UnescapeNull>
     <NestedEscapedString>$([System.String]::Copy($([MSBuild]::Escape(';'))))</NestedEscapedString>
     <RelativeFileAbove>$([MSBuild]::GetPathOfFileAbove('Cargo.toml', '.'))</RelativeFileAbove>
+    <RegistryPrefixMissing>$(Registry:HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__@Value)</RegistryPrefixMissing>
+    <RegistryViewMissingDefault>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__', 'Value', 'fallback', 'RegistryView.Default'))</RegistryViewMissingDefault>
   </PropertyGroup>
   <ItemGroup>
     <SplitItem Include="$([System.String]::Copy('a;b').Split(';'))" />

@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <FixtureRoot>$(MSBuildThisFileDirectory)</FixtureRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Literal Include="$(FixtureRoot)literal.txt;$(FixtureRoot)missing.txt;$(FixtureRoot)" />
+    <Globbed Include="$(FixtureRoot)*.txt" />
+    <ModifiedProjection Include="@(Literal->ModifiedTime())" />
+    <CreatedProjection Include="@(Literal->CreatedTime())" />
+    <AccessedProjection Include="@(Literal->AccessedTime())" />
+  </ItemGroup>
+</Project>

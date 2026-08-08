@@ -1,0 +1,22 @@
+{
+  "name": "ascii-string-casing",
+  "project": "project.proj",
+  "properties": [
+    "Upper",
+    "Lower",
+    "UpperInvariant",
+    "LowerInvariant",
+    "EmptyUpper",
+    "Chained",
+    "EscapedUpper",
+    "CaseInsensitiveLookup",
+    "TypedChain"
+  ],
+  "items": [
+    { "type": "BuildMetadata", "metadata": [] },
+    { "type": "ItemUpper", "metadata": [] },
+    { "type": "ItemLower", "metadata": [] },
+    { "type": "ItemUpperInvariant", "metadata": [] },
+    { "type": "ItemLowerInvariant", "metadata": [] }
+  ]
+}

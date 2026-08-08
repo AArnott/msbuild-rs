@@ -2300,6 +2300,41 @@ mod tests {
     }
 
     #[test]
+    fn ascii_string_casing_is_typed_escaped_chainable_and_rejects_non_ascii() -> Result<()> {
+        let mut model = ProjectModel::new();
+        model.set_property("Mixed".to_string(), "Ab-Cd_123".to_string());
+        model.set_property("Escaped".to_string(), "a%3bb".to_string());
+        model.set_property("Unicode".to_string(), "Straße".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        // Direct dotnet MSBuild comparisons on .NET SDK 10.0.302.
+        assert_eq!(evaluator.evaluate("$(Mixed.ToUpper())")?, "AB-CD_123");
+        assert_eq!(evaluator.evaluate("$(Mixed.tOlOwEr())")?, "ab-cd_123");
+        assert_eq!(
+            evaluator.evaluate("$(Mixed.ToUpperInvariant().Substring(3).ToLowerInvariant())")?,
+            "cd_123"
+        );
+        assert_eq!(evaluator.evaluate("$(Missing.ToUpperInvariant())")?, "");
+        assert_eq!(evaluator.evaluate("$(Escaped.ToUpper())")?, "A%3BB");
+        assert_eq!(
+            evaluator.evaluate("$([System.String]::Copy('aBc').ToLowerInvariant().Length)")?,
+            "3"
+        );
+
+        for member in ["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"] {
+            let error = format!(
+                "{:#}",
+                evaluator
+                    .evaluate(&format!("$(Unicode.{member}())"))
+                    .unwrap_err()
+            );
+            assert!(error.contains("non-ASCII casing"), "{member}: {error}");
+            assert!(error.contains("CoreCLR fallback"), "{member}: {error}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn upstream_property_function_static_method_chained() -> Result<()> {
         let model = ProjectModel::new();
         let evaluator = ExpressionEvaluator::new(&model);

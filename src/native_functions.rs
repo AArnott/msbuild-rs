@@ -1293,6 +1293,46 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
     ),
     intrinsic!(
         "System.String",
+        "ToUpper",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0,
+        "System.String",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
+        "ToLower",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0,
+        "System.String",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
+        "ToUpperInvariant",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0,
+        "System.String",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
+        "ToLowerInvariant",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0,
+        "System.String",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
         "Length",
         InstanceProperty,
         Decoded,
@@ -2150,6 +2190,10 @@ const ITEM_STRING_FUNCTIONS: &[&str] = &[
     "TrimStart",
     "TrimEnd",
     "Replace",
+    "ToUpper",
+    "ToLower",
+    "ToUpperInvariant",
+    "ToLowerInvariant",
     "get_Length",
 ];
 
@@ -2171,6 +2215,12 @@ pub(crate) fn invoke_item_string_function(
             bail!("{member} expects 0 argument(s), found {}", arguments.len());
         }
         return Ok(receiver.encode_utf16().count().to_string());
+    }
+    if is_ascii_casing_member(member) {
+        if !arguments.is_empty() {
+            bail!("{member} expects 0 argument(s), found {}", arguments.len());
+        }
+        return map_ascii_case(receiver, member);
     }
 
     if matches_ignore_ascii_case(member, &["Trim", "TrimStart", "TrimEnd"]) && arguments.len() == 1
@@ -2694,9 +2744,34 @@ fn handle_string_instance(
         ))
     } else if operation == member_code("ToString") {
         Ok(IntrinsicValue::String(receiver.clone()))
+    } else if is_ascii_casing_member(member) {
+        Ok(IntrinsicValue::String(map_ascii_case(receiver, member)?))
     } else {
         unreachable!("all registered string members are handled")
     }
+}
+
+fn is_ascii_casing_member(member: &str) -> bool {
+    matches_ignore_ascii_case(
+        member,
+        &["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"],
+    )
+}
+
+fn map_ascii_case(receiver: &str, member: &str) -> Result<String> {
+    if !receiver.is_ascii() {
+        bail!(
+            "Unsupported native input for System.String.{member}: non-ASCII casing requires a future CoreCLR fallback"
+        );
+    }
+
+    let mut result = receiver.to_owned();
+    if member.eq_ignore_ascii_case("ToUpper") || member.eq_ignore_ascii_case("ToUpperInvariant") {
+        result.make_ascii_uppercase();
+    } else {
+        result.make_ascii_lowercase();
+    }
+    Ok(result)
 }
 
 fn handle_string_array(
@@ -5643,15 +5718,59 @@ mod tests {
     }
 
     #[test]
-    fn invariant_casing_is_pruned_without_a_dotnet_versioned_unicode_table() {
-        for member in ["ToUpperInvariant", "ToLowerInvariant"] {
-            assert!(!is_allowed(
+    fn ascii_casing_matches_clr_and_non_ascii_requires_coreclr_fallback() -> Result<()> {
+        for (member, input, expected) in [
+            ("ToUpper", "Abc-123_z", "ABC-123_Z"),
+            ("ToLower", "AbC-123_Z", "abc-123_z"),
+            ("ToUpperInvariant", "Abc-123_z", "ABC-123_Z"),
+            ("ToLowerInvariant", "AbC-123_Z", "abc-123_z"),
+            ("ToUpper", "", ""),
+            ("ToLowerInvariant", "", ""),
+        ] {
+            assert!(is_allowed(
                 "System.String",
                 member,
                 InvocationKind::InstanceMethod
             ));
-            assert!(resolve_item_string_function(member).is_none());
+            assert_eq!(
+                map_ascii_case(input, member)?,
+                expected,
+                "System.String.{member}"
+            );
+            assert_eq!(
+                invoke_item_string_function(
+                    resolve_item_string_function(&member.to_ascii_lowercase()).unwrap(),
+                    input,
+                    &[],
+                )?,
+                expected,
+                "per-item System.String.{member}"
+            );
         }
+
+        assert!(is_allowed(
+            "system.string",
+            "tOuPpErInVaRiAnT",
+            InvocationKind::InstanceMethod
+        ));
+        assert!(
+            resolve(
+                "System.String",
+                "ToUpperInvariant",
+                InvocationKind::InstanceMethod,
+                1,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no allowlisted overload accepting 1")
+        );
+
+        for member in ["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"] {
+            let error = map_ascii_case("Straße", member).unwrap_err().to_string();
+            assert!(error.contains("non-ASCII casing"), "{member}: {error}");
+            assert!(error.contains("CoreCLR fallback"), "{member}: {error}");
+        }
+        Ok(())
     }
 
     #[test]

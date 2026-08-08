@@ -98,17 +98,18 @@ custom-format subset. `Environment.ExpandEnvironmentVariables` scans `%name%`
 tokens once and preserves missing/malformed tokens. Windows keys use
 .NET-compatible Unicode ordinal-ignore-case folding; Unix keys remain
 case-sensitive.
-The pinned SDK also requires ASCII `StartsWith`/`EndsWith`, integral decimal
+The pinned SDK also requires ASCII `StartsWith`/`EndsWith`, zero-argument
+`ToUpper`/`ToLower`/`ToUpperInvariant`/`ToLowerInvariant`, integral decimal
 spellings such as `10.0` for integral arithmetic overloads, the common
 `net`/`netcoreapp`/`netstandard`/short `net4x` TFM projection helpers, and
 empty-platform `ToolLocationHelper` probes. Those narrow inputs are retained
 and direct-fixture tested; broader culture-sensitive or NuGet compatibility
-behavior is not inferred.
-`ToUpperInvariant` and `ToLowerInvariant` are pruned from both property and
-per-item native allowlists. .NET casing data varies with runtime/globalization
-mode, and the available Rust/ICU table does not match targeted .NET 10 for
-known values including U+019B. Exact casing remains managed/native-table
-backlog rather than retaining a known-wrong mapping.
+behavior is not inferred. Casing first proves the complete receiver is ASCII,
+then maps ASCII bytes into one result allocation. Every non-ASCII receiver is
+rejected with an unsupported-native-input diagnostic reserved for a future
+CoreCLR fallback. This avoids the known .NET 10 mismatches, including U+019B,
+in Rust/ICU Unicode tables while making the common SDK and MicroBuild ASCII
+paths exact.
 `StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
 UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
 
@@ -139,10 +140,10 @@ Native-tier backlog (rather than approximate behavior): floating MSBuild
 arithmetic overloads, floating `System.Math` entries,
 `System.Convert.ToDouble`, culture-sensitive unary
 `Convert` string-to-number and number-to-string overloads, and
-`System.Double.ToString`; current-culture
-`non-ASCII/current-culture `String.StartsWith` and `EndsWith`, plus `CompareTo`,
-`IndexOf`, `LastIndexOf`,
-`ToLower`, and `ToUpper`; broad DateTime parsing/formatting; Guid equality
+`System.Double.ToString`; non-ASCII/current-culture `String.StartsWith` and
+`EndsWith`, plus `CompareTo`,
+`IndexOf`, `LastIndexOf`, and all non-ASCII casing; broad DateTime
+parsing/formatting; Guid equality
 binding and Guid X parsing (X formatting remains); Double custom formats; and
 unlisted CLR numeric overloads. Floating
 spellings including `inf` are rejected because no culture-sensitive floating
@@ -291,9 +292,10 @@ without changing the still-open remaining-item-function checkbox above.
 directory, deduplicates with .NET ordinal-ignore-case semantics, and returns the
 sorted ancestor union. Per-item string dispatch is a static allowlist:
 `Trim()`, `Trim/TrimStart/TrimEnd(string-as-char-set)`, `Replace`,
-`Substring`, `Contains`, ordinal `Equals`, and `get_Length`. This includes the
-`Trim`, `TrimStart`, and `Replace` forms present in the pinned .NET 10 SDK.
-Invariant and current-culture casing members are deliberately rejected.
+`Substring`, `Contains`, ordinal `Equals`, `get_Length`, and the four
+zero-argument ASCII casing members. This includes the `Trim`, `TrimStart`,
+`Replace`, and casing forms present in the pinned .NET 10 SDK. Casing rejects
+non-ASCII item identities before mapping.
 
 Timestamp metadata follows MSBuild's unusual filesystem rooting: relative item
 identities are probed from the process working directory, not the root or
@@ -394,23 +396,22 @@ also explicitly deferred.
   `MSBuildItemGlob` items, and `GetAllGlobs` reporting remain deferred. Repeated
   identical eager patterns are cached within one evaluation.
 - Per-item .NET string functions intentionally expose only the deterministic
-  allowlist documented above. Invariant/current-culture casing,
-  comparison/search overloads, and every unlisted member remain pruned rather
-  than being approximated.
+  allowlist documented above. Non-ASCII casing, comparison/search overloads,
+  and every unlisted member remain pruned rather than being approximated.
 - Native property functions deliberately remain a supported subset of
   MSBuild's legal .NET receiver surface. Regex, URI/culture/time-span,
   directory/file enumeration, ToolLocationHelper, broad numeric/enum
-  overloads, current-culture String comparison/search/casing, and full
-  culture-sensitive .NET formatting remain deferred to additional exact native
-  entries or the untouched late-stage CoreCLR plan. Removed members are not
-  approximated by ordinal Rust operations.
+  overloads, current-culture String comparison/search, non-ASCII casing, and
+  full culture-sensitive .NET formatting remain deferred to additional exact
+  native entries or the untouched late-stage CoreCLR plan. Removed members are
+  not approximated by ordinal Rust operations.
 - The installed `Microsoft.NET.Sdk` fixture completes through both workload
   locator SDKs, with direct semantic and preprocess-tree parity for reserved/SDK
-  properties and `KnownFrameworkReference` identities. It explicitly disables
-  casing-dependent output-path and implicit-define projections because exact
-  invariant casing is pruned as described above. Versioned
-  third-party SDK acquisition, missing-workload `MissingWorkloadPack` resolver
-  item injection, and the full NuGet TFM compatibility surface remain deferred.
+  properties and `KnownFrameworkReference` identities. Casing-dependent
+  output-path and implicit-define projections remain enabled and complete on
+  their ASCII inputs. Versioned third-party SDK acquisition, missing-workload
+  `MissingWorkloadPack` resolver item injection, and the full NuGet TFM
+  compatibility surface remain deferred.
 - Item operations still execute in the loader's source-position pass rather
   than MSBuild's separate property/item passes. Consequently, an SDK default
   item glob whose enablement properties are assigned later can be absent even

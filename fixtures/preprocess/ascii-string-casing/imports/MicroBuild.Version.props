@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <ConfigAndSignBuildMetadata />
+    <ConfigAndSignBuildMetadata Condition=" '$(Configuration)' != '' ">$(Configuration.Substring(0,1))</ConfigAndSignBuildMetadata>
+    <ConfigAndSignBuildMetadata Condition=" '$(SignType)' != '' ">$(ConfigAndSignBuildMetadata)$(SignType.Substring(0,1))</ConfigAndSignBuildMetadata>
+  </PropertyGroup>
+  <ItemGroup>
+    <BuildMetadata Condition=" '$(ConfigAndSignBuildMetadata)' != '' and '$(MicroBuild_DoNotAppendBuildMetadata)' != 'true' " Include="$(ConfigAndSignBuildMetadata.ToUpper())" />
+  </ItemGroup>
+</Project>

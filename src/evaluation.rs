@@ -2824,15 +2824,42 @@ mod tests {
     }
 
     #[test]
-    fn casing_per_item_string_functions_are_pruned() -> Result<()> {
+    fn ascii_casing_per_item_string_functions_match_dotnet_and_reject_non_ascii() -> Result<()> {
         let directory = TempDir::new()?;
-        for member in ["ToUpper", "ToUpperInvariant", "ToLowerInvariant"] {
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><ItemGroup>
+  <I Include="Ab-cD;xyZ;a%3bb" />
+  <Upper Include="@(I->ToUpper())" />
+  <Lower Include="@(I->ToLower())" />
+  <UpperInvariant Include="@(I->ToUpperInvariant())" />
+  <LowerInvariant Include="@(I->ToLowerInvariant())" />
+</ItemGroup></Project>"#,
+        );
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        let identities = |item_type: &str| {
+            model
+                .get_items(item_type)
+                .unwrap()
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(identities("Upper"), ["AB-CD", "XYZ", "A;B"]);
+        assert_eq!(identities("Lower"), ["ab-cd", "xyz", "a;b"]);
+        assert_eq!(identities("UpperInvariant"), ["AB-CD", "XYZ", "A;B"]);
+        assert_eq!(identities("LowerInvariant"), ["ab-cd", "xyz", "a;b"]);
+
+        for member in ["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"] {
             let project = write_project(
                 &directory,
                 "project.proj",
                 &format!(
                     r#"<Project><ItemGroup>
-  <I Include="i" />
+  <I Include="Straße" />
   <Rejected Include="@(I->{member}())" />
 </ItemGroup></Project>"#
                 ),
@@ -2842,7 +2869,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                error.contains("deterministic allowlist"),
+                error.contains("non-ASCII casing") && error.contains("CoreCLR fallback"),
                 "{member}: {error}"
             );
         }

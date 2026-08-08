@@ -161,13 +161,12 @@ read-only registry intrinsics preserve DWORD/QWORD numbers, embedded string
 NULs, and multi-string/byte arrays through member chains; `REG_NONE` uses the
 same byte-list model as `REG_BINARY`. Culture-sensitive floating MSBuild
 arithmetic and Math/Double/Convert overloads, Guid X parsing (X formatting
-remains), invariant/current-culture casing, broad CLR formatting, full NuGet
+remains), non-ASCII/current-culture casing, broad CLR formatting, full NuGet
 TFM compatibility, and OS-bitness queries are deliberately pruned rather than
-approximated. Invariant casing specifically requires a managed fallback or a
-.NET-versioned Unicode table; using the host Rust/ICU table would be observably
-wrong for .NET 10 cases such as U+019B. These
-legal calls require a future exact native implementation or the currently
-excluded managed fallback; see the compatibility worklist.
+approximated. The four zero-argument String casing methods have an exact ASCII
+native path; non-ASCII input requires a managed fallback or a .NET-versioned
+Unicode table because the host Rust/ICU table is observably wrong for .NET 10
+cases such as U+019B. See the compatibility worklist.
 CoreCLR will load lazily so it does not affect projects that stay on native fast
 paths.
 
@@ -262,9 +261,8 @@ This is a simplified MSBuild implementation focused on core functionality:
   injection are not yet supported
 - Evaluation still applies item operations in source position rather than a
   separate final item pass, so some SDK default globs enabled by later
-  properties can differ. The installed-SDK parity fixture also disables
-  casing-dependent output-path and implicit-define projections because exact
-  .NET-versioned invariant casing is intentionally pruned
+  properties can differ. The installed-SDK parity fixture leaves its
+  ASCII casing-dependent output-path and implicit-define projections enabled
 - Item transforms/functions cover the documented evaluation-time allowlist;
   lazy wildcard reporting and target-execution-only item mutations are deferred
 - Limited task ecosystem (only Message, Copy, Error built-in)

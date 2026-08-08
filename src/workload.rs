@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
 
 use crate::evaluation::ActiveToolset;
 use crate::object_model::PropertyMap;
@@ -190,14 +191,13 @@ impl InstalledWorkloadSdkResolver {
         let mut pack_sdk_paths = HashMap::<String, Vec<PathBuf>>::new();
         for manifest in &ordered_manifests {
             let manifest_path = manifest.directory.join("WorkloadManifest.json");
-            let document: serde_json::Value = parse_relaxed_json(
-                &fs::read_to_string(&manifest_path)
-                    .with_context(|| format!("Failed to read {}", manifest_path.display()))?,
-            )
-            .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
-            let mut packs = read_sdk_packs(&document, &manifest_path)?;
-            packs.sort_by(|left, right| ascii_case_compare(&left.id, &right.id));
-            for pack in packs {
+            let contents = fs::read_to_string(&manifest_path)
+                .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+            let document: serde_json::Value = parse_relaxed_json(&contents)
+                .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+            let pack_order = parse_relaxed_json_as::<OrderedManifestPacks>(&contents)
+                .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+            for pack in read_sdk_packs_in_order(&document, &manifest_path, &pack_order.0)? {
                 let Some(resolved_name) = resolve_pack_alias(&pack, &runtime_identifiers) else {
                     continue;
                 };
@@ -899,7 +899,103 @@ fn read_sdk_packs(document: &serde_json::Value, path: &Path) -> Result<Vec<SdkPa
     Ok(result)
 }
 
+fn read_sdk_packs_in_order(
+    document: &serde_json::Value,
+    path: &Path,
+    order: &[String],
+) -> Result<Vec<SdkPack>> {
+    let positions = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (ascii_key(id), index))
+        .collect::<HashMap<_, _>>();
+    let mut packs = read_sdk_packs(document, path)?;
+    packs.sort_by_key(|pack| {
+        positions
+            .get(&ascii_key(&pack.id))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    Ok(packs)
+}
+
+struct OrderedManifestPacks(Vec<String>);
+
+impl<'de> Deserialize<'de> for OrderedManifestPacks {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ManifestVisitor;
+
+        impl<'de> Visitor<'de> for ManifestVisitor {
+            type Value = OrderedManifestPacks;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a workload manifest object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut packs = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if key.eq_ignore_ascii_case("packs") {
+                        packs = map.next_value::<OrderedObjectKeys>()?.0;
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(OrderedManifestPacks(packs))
+            }
+        }
+
+        deserializer.deserialize_map(ManifestVisitor)
+    }
+}
+
+struct OrderedObjectKeys(Vec<String>);
+
+impl<'de> Deserialize<'de> for OrderedObjectKeys {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectVisitor;
+
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = OrderedObjectKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = Vec::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    keys.push(key);
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(OrderedObjectKeys(keys))
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
 fn parse_relaxed_json(contents: &str) -> serde_json::Result<serde_json::Value> {
+    parse_relaxed_json_as(contents)
+}
+
+fn parse_relaxed_json_as<T>(contents: &str) -> serde_json::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
     let bytes = contents.as_bytes();
     let mut without_comments = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -1500,6 +1596,30 @@ mod tests {
                 "invalid manifest should fail: {invalid}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn workload_sdk_packs_preserve_manifest_order() -> Result<()> {
+        let contents = r#"{
+  "version": "1.0.0",
+  "packs": {
+    "Z.First.Sdk": { "kind": "sdk", "version": "1.0.0" },
+    "A.Second.Sdk": { "kind": "sdk", "version": "1.0.0" }
+  }
+}"#;
+        let document = parse_relaxed_json(contents)?;
+        let order = parse_relaxed_json_as::<OrderedManifestPacks>(contents)?;
+
+        let packs =
+            read_sdk_packs_in_order(&document, Path::new("WorkloadManifest.json"), &order.0)?;
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| pack.id.as_str())
+                .collect::<Vec<_>>(),
+            ["Z.First.Sdk", "A.Second.Sdk"]
+        );
         Ok(())
     }
 }

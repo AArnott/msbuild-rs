@@ -182,12 +182,16 @@ cargo test
 # Run with sample projects
 cargo run -- --demo
 
-# Compare preprocessing startup and evaluation performance
+# Compare fresh-process preprocessing performance. Normalized /pp parity is a
+# mandatory gate before warmups or measurements.
 cargo build --release
-./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
 
-# Also retain raw and normalized preprocess output and report the first mismatch
-./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -CompareOutput
+# Generate fixed-seed large fixtures, verify their manifest/hashes, and run the
+# simple case plus properties, items, conditions, imports, and mixed cases.
+./scripts/generate-performance-fixtures.ps1 -Preset Benchmark
+./scripts/generate-performance-fixtures.ps1 -VerifyOnly
+./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
 
 # Compare a semantic evaluation fixture with dotnet msbuild without running targets
 cargo build
@@ -198,10 +202,16 @@ cargo build
 ```
 
 `global.json` pins the .NET SDK used by the comparison scripts and CI. The
-semantic runner writes raw tool output and deterministic, path-normalized JSON
+exact `rollForward: disable` pin also lets msbuild-rs resolve the installed
+toolset directly; other SDK-selection policies retain the `dotnet --info`
+fallback. The semantic runner writes raw tool output and deterministic,
+path-normalized JSON
 to `benchmark-results/evaluation`; fixtures with `expectedFailure` compare
 controlled rejection diagnostics and require both evaluators to fail.
-The all-fixture runner is also the cross-platform CI entry point.
+The all-fixture runner is also the cross-platform semantic CI entry point.
+Performance generation, parity eligibility, interleaved process timing, peak
+working set, artifact schemas, scale knobs, and interpretation guidance are
+documented in [the performance benchmarking guide](docs/performance-benchmarking.md).
 
 ## Sample Projects
 

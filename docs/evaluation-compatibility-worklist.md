@@ -11,20 +11,27 @@ normalized preprocess fixture pass against dotnet MSBuild and msbuild-rs.
 - [x] Support configurable warmups and iterations and retain raw CSV samples.
 - [x] Add a parity runner that compares normalized preprocessed output for compatibility fixtures.
 - [x] Pin the .NET SDK used for repeatable baseline results.
-- [ ] Add larger generated fixtures for properties, items, conditions, and import graphs.
+- [x] Add larger generated fixtures for properties, items, conditions, and import graphs.
 - [x] Report wall-clock distribution.
-- [ ] Report peak working set.
+- [x] Report peak working set.
 
-The two unchecked benchmark items are the subsequent performance-finalization
-wave, not evaluation-semantic gaps.
+The performance-finalization baseline is complete. Generated inputs use a
+fixed seed/configuration with per-file, per-fixture, aggregate, and manifest
+SHA-256 values. Timed processes are interleaved and record elapsed wall time
+and `PeakWorkingSet64`; timing is ineligible unless normalized `/pp` parity
+passes first.
 
 Run the current baseline after `cargo build --release`:
 
 ```powershell
-./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
+./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
+./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
 ```
 
-Both implementations now preserve aggregated project source, including unevaluated expressions and source-boundary comments around inlined imports. Semantic compatibility still depends on the evaluation items below.
+Both implementations preserve aggregated project source, including unevaluated
+expressions and source-boundary comments around inlined imports. See
+[the performance benchmarking guide](performance-benchmarking.md) for fixture
+scale knobs, artifact schemas, commands, and interpretation.
 
 ## Evaluation Semantics
 
@@ -329,6 +336,10 @@ The upstream-test mapping and fixture status are maintained in
 preprocess manifest; CI runs that same entry point on Windows, Linux, and macOS.
 
 ## Explicitly deferred gaps
+
+All non-late-stage checklist entries are complete. The unchecked CoreCLR items
+remain intentionally late-stage; the edge and out-of-scope behavior below is
+also explicitly deferred.
 
 - Lexical absolute local paths, including Windows spelling, are covered. Edge
   UNC normalization remains deferred.

@@ -17,6 +17,8 @@ $arguments = @{
     Iterations = 1
     Warmup = 0
     OutputDirectory = $OutputDirectory
+    FixtureName = $definition.name
+    ParityOnly = $true
     CompareOutput = $true
     FailOnMismatch = $true
 }

@@ -36,6 +36,9 @@ struct HostResolutionKey {
     global_json_contents: Option<String>,
     dotnet_host_path: Option<String>,
     dotnet_root: Option<String>,
+    dotnet_root_x64: Option<String>,
+    dotnet_root_x86: Option<String>,
+    dotnet_root_arm64: Option<String>,
     path: Option<String>,
 }
 
@@ -382,9 +385,12 @@ fn resolve_dotnet_toolset(environment: &PropertyMap, project_path: &Path) -> Opt
         .unwrap_or((None, None));
     let key = HostResolutionKey {
         global_json_path,
-        global_json_contents,
+        global_json_contents: global_json_contents.clone(),
         dotnet_host_path: environment.get("DOTNET_HOST_PATH").cloned(),
         dotnet_root: environment.get("DOTNET_ROOT").cloned(),
+        dotnet_root_x64: environment.get("DOTNET_ROOT_X64").cloned(),
+        dotnet_root_x86: environment.get("DOTNET_ROOT_X86").cloned(),
+        dotnet_root_arm64: environment.get("DOTNET_ROOT_ARM64").cloned(),
         path: environment.get("PATH").cloned(),
     };
     let cache = HOST_RESOLUTIONS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -392,7 +398,12 @@ fn resolve_dotnet_toolset(environment: &PropertyMap, project_path: &Path) -> Opt
         return resolution;
     }
 
-    let resolution = invoke_dotnet_host(environment, project_directory);
+    // An exact installed pin needs no host roll-forward decision, so avoid the
+    // comparatively expensive `dotnet --info` subprocess on this common path.
+    let resolution = global_json_contents
+        .as_deref()
+        .and_then(|contents| resolve_exact_pinned_toolset(environment, contents))
+        .or_else(|| invoke_dotnet_host(environment, project_directory));
     cache.lock().ok()?.insert(key, resolution.clone());
     resolution
 }
@@ -426,6 +437,119 @@ fn invoke_dotnet_host(
         return None;
     }
     parse_dotnet_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn resolve_exact_pinned_toolset(
+    environment: &PropertyMap,
+    global_json_contents: &str,
+) -> Option<ActiveToolset> {
+    let global_json: serde_json::Value = serde_json::from_str(global_json_contents).ok()?;
+    let sdk = global_json.get("sdk")?;
+    let version = sdk.get("version")?.as_str()?;
+    if !sdk
+        .get("rollForward")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("disable"))
+        || version.is_empty()
+        || version == "."
+        || version == ".."
+        || version.contains(['/', '\\'])
+    {
+        return None;
+    }
+
+    let dotnet_root = find_dotnet_root(environment, version)?;
+    active_toolset_from_sdk_directory(dotnet_root.join("sdk").join(version))
+}
+
+fn find_dotnet_root(environment: &PropertyMap, sdk_version: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for name in [
+        "DOTNET_ROOT",
+        "DOTNET_ROOT_X64",
+        "DOTNET_ROOT_X86",
+        "DOTNET_ROOT_ARM64",
+    ] {
+        if let Some(root) = environment.get(name) {
+            candidates.push(PathBuf::from(root));
+        }
+    }
+
+    let executable = environment
+        .get("DOTNET_HOST_PATH")
+        .map(String::as_str)
+        .unwrap_or("dotnet");
+    let executable_path = PathBuf::from(executable);
+    if executable_path.is_absolute() || executable_path.components().count() > 1 {
+        if let Some(parent) = executable_path
+            .canonicalize()
+            .unwrap_or(executable_path)
+            .parent()
+        {
+            candidates.push(parent.to_path_buf());
+        }
+    } else if let Some(path) = environment.get("PATH") {
+        for directory in env::split_paths(path) {
+            let candidate = directory.join(executable);
+            let candidate = if candidate.is_file() {
+                Some(candidate)
+            } else if cfg!(windows) && candidate.extension().is_none() {
+                let with_extension = candidate.with_extension("exe");
+                with_extension.is_file().then_some(with_extension)
+            } else {
+                None
+            };
+            if let Some(candidate) = candidate
+                && let Some(parent) = candidate.canonicalize().unwrap_or(candidate).parent()
+            {
+                candidates.push(parent.to_path_buf());
+                break;
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|root| root.join("sdk").join(sdk_version).is_dir())
+}
+
+fn active_toolset_from_sdk_directory(tools_path: PathBuf) -> Option<ActiveToolset> {
+    let sdk_root = tools_path.join("Sdks");
+    if !sdk_root.is_dir() {
+        return None;
+    }
+
+    let bundled_information =
+        fs::read_to_string(tools_path.join("Microsoft.NETCoreSdk.BundledMSBuildInformation.props"))
+            .ok()?;
+    let msbuild_version =
+        xml_element_text(&bundled_information, "BundledMSBuildVersion")?.to_string();
+    let commit = fs::read_to_string(tools_path.join(".version"))
+        .ok()
+        .and_then(|contents| {
+            let value = contents.lines().next()?.trim();
+            (!value.is_empty() && value.chars().all(|character| character.is_ascii_hexdigit()))
+                .then(|| value.chars().take(9).collect::<String>())
+        });
+    let msbuild_semantic_version = commit.map_or_else(
+        || msbuild_version.clone(),
+        |commit| format!("{msbuild_version}+{commit}"),
+    );
+    Some(ActiveToolset {
+        sdk_root,
+        tools_path,
+        msbuild_version,
+        msbuild_semantic_version,
+    })
+}
+
+fn xml_element_text<'a>(xml: &'a str, element: &str) -> Option<&'a str> {
+    let opening = format!("<{element}>");
+    let closing = format!("</{element}>");
+    let start = xml.find(&opening)? + opening.len();
+    let end = xml[start..].find(&closing)? + start;
+    let value = xml[start..end].trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn parse_dotnet_info(output: &str) -> Option<ActiveToolset> {
@@ -469,6 +593,44 @@ mod tests {
         let path = directory.path().join(name);
         fs::write(&path, contents).unwrap();
         path
+    }
+
+    #[test]
+    fn exact_pinned_toolset_avoids_dotnet_info_resolution() -> Result<()> {
+        let directory = TempDir::new()?;
+        let tools_path = directory.path().join("sdk").join("10.0.302");
+        fs::create_dir_all(tools_path.join("Sdks"))?;
+        fs::write(
+            tools_path.join("Microsoft.NETCoreSdk.BundledMSBuildInformation.props"),
+            "<Project><PropertyGroup><BundledMSBuildVersion>18.6.11</BundledMSBuildVersion></PropertyGroup></Project>",
+        )?;
+        fs::write(
+            tools_path.join(".version"),
+            "35b593bebfcba58f8e78298cef14c2761f5d86c6\n10.0.302\n",
+        )?;
+        let mut environment = PropertyMap::new();
+        environment.insert(
+            "DOTNET_ROOT".to_string(),
+            directory.path().to_string_lossy().into_owned(),
+        );
+
+        let toolset = resolve_exact_pinned_toolset(
+            &environment,
+            r#"{"sdk":{"version":"10.0.302","rollForward":"disable"}}"#,
+        )
+        .expect("the exact installed SDK should resolve without invoking dotnet");
+        assert_eq!(toolset.tools_path, tools_path);
+        assert_eq!(toolset.sdk_root, tools_path.join("Sdks"));
+        assert_eq!(toolset.msbuild_version, "18.6.11");
+        assert_eq!(toolset.msbuild_semantic_version, "18.6.11+35b593beb");
+        assert!(
+            resolve_exact_pinned_toolset(
+                &environment,
+                r#"{"sdk":{"version":"10.0.302","rollForward":"latestFeature"}}"#
+            )
+            .is_none()
+        );
+        Ok(())
     }
 
     #[test]

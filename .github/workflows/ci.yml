@@ -67,6 +67,23 @@ jobs:
           $executable = if ($IsWindows) { "target/debug/msbuild-rs.exe" } else { "target/debug/msbuild-rs" }
           ./scripts/run-compatibility-fixtures.ps1 -RustExecutable $executable
 
+      - name: Verify generated performance fixture smoke case
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: |
+          $generated = "benchmark-results/generated-smoke"
+          ./scripts/generate-performance-fixtures.ps1 -Preset Smoke -OutputDirectory $generated
+          ./scripts/generate-performance-fixtures.ps1 -OutputDirectory $generated -VerifyOnly
+          $manifest = Get-Content -Raw "$generated/manifest.json" | ConvertFrom-Json
+          $fixture = $manifest.cases | Where-Object name -eq "representative"
+          ./scripts/compare-preprocess.ps1 `
+            -Project (Join-Path $generated $fixture.project) `
+            -FixtureName $fixture.name `
+            -FixtureHash $fixture.fixtureHash `
+            -RustExecutable target/debug/msbuild-rs `
+            -OutputDirectory benchmark-results/generated-smoke-parity `
+            -ParityOnly
+
       - name: Test path normalization
         shell: pwsh
         run: ./scripts/tests/path-normalization.tests.ps1

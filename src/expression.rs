@@ -1381,11 +1381,11 @@ impl<'a> ExpressionEvaluator<'a> {
             if arguments[0].is_empty() {
                 return Ok(false);
             }
-            let path = Path::new(&arguments[0]);
+            let path = normalized_item_path(&arguments[0]);
             Ok(if path.is_absolute() {
                 path.exists()
             } else {
-                self.base_directory.join(path).exists()
+                self.base_directory.join(&path).exists()
             })
         } else if name.eq_ignore_ascii_case("HasTrailingSlash") {
             require_arguments(name, &arguments, 1)?;
@@ -1808,6 +1808,21 @@ mod tests {
             .evaluate("bin/$(Configuration)/$(Platform)")
             .unwrap();
         assert_eq!(result, "bin/Debug/x64");
+    }
+
+    #[test]
+    fn exists_accepts_msbuild_directory_separators() -> Result<()> {
+        let directory = TempDir::new()?;
+        fs::create_dir(directory.path().join("one"))?;
+        fs::write(directory.path().join("one").join("file.props"), "")?;
+        let project = directory.path().join("project.proj");
+        fs::write(&project, "<Project />")?;
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::with_current_file(&model, &project);
+
+        assert!(evaluator.evaluate_condition(r"Exists('one\file.props')")?);
+        assert!(evaluator.evaluate_condition("Exists('one/file.props')")?);
+        Ok(())
     }
 
     #[test]

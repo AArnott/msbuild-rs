@@ -91,6 +91,7 @@ jobs:
         run: |
           ./scripts/tests/path-normalization.tests.ps1
           ./scripts/tests/performance-fixture-identity.tests.ps1
+          ./scripts/tests/preprocess-semantic-xml.tests.ps1
 
       - name: Run demo mode
         run: cargo run -- --demo

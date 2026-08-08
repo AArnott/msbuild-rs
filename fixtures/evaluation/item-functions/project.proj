@@ -8,8 +8,6 @@
     <TrimStartChars Include="@(StringSource->TrimStart('.NETCoreApp,Version=v'))" />
     <Replaced Include="@(StringSource->Replace('.', '_'))" />
     <Substring Include="@(StringSource->Substring(2, 3))" />
-    <UpperInvariant Include="@(StringSource->ToUpperInvariant())" />
-    <LowerInvariant Include="@(StringSource->ToLowerInvariant())" />
     <Contains Include="@(StringSource->Contains('b'))" />
     <Equals Include="@(StringSource->Equals('abcdef'))" />
     <Length Include="@(StringSource->get_Length())" />

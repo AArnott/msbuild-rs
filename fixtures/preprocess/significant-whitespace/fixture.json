@@ -1,0 +1,5 @@
+{
+  "name": "significant-property-and-metadata-whitespace",
+  "project": "project.proj",
+  "comparison": "semanticXml"
+}

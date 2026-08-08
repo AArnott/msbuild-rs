@@ -39,9 +39,30 @@ struct InstallState {
     use_workload_sets: bool,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GlobalWorkloadConfig {
+    workload_version: Option<String>,
+    global_json_specified_workload_sets: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkloadSetSelectionSource {
+    GlobalJson,
+    InstallState,
+    Automatic,
+}
+
 struct WorkloadSetSelection {
     feature_band: String,
     manifests: serde_json::Map<String, serde_json::Value>,
+    source: WorkloadSetSelectionSource,
+}
+
+#[derive(Debug)]
+struct SdkPack {
+    id: String,
+    version: String,
+    aliases: Option<Vec<(String, String)>>,
 }
 
 impl WorkloadResolverConfig {
@@ -89,33 +110,53 @@ impl InstalledWorkloadSdkResolver {
                 .unwrap_or_default();
         let mut manifests = discover_loose_manifests(config, &manifest_roots, &known_manifest_ids);
 
-        let global_workload_version = nearest_global_json(&config.project_path)
-            .and_then(|path| read_global_workload_version(&path));
-        let install_state = read_install_state(config);
-        let workload_version = global_workload_version
-            .as_deref()
-            .or(install_state.workload_version.as_deref());
-        if let Some(workload_version) = workload_version {
-            let workload_set = find_workload_set(
-                &manifest_roots,
-                &config.feature_band,
-                workload_version,
-            )?
-            .ok_or_else(|| {
+        let global_config = nearest_global_json(&config.project_path)
+            .map(|path| read_global_workload_config(&path))
+            .transpose()?
+            .unwrap_or_default();
+        let install_state = read_install_state(config)?;
+        let mut workload_set = if let Some(workload_version) =
+            global_config.workload_version.as_deref()
+        {
+            Some(
+                find_workload_set(
+                    &manifest_roots,
+                    &config.feature_band,
+                    workload_version,
+                    WorkloadSetSelectionSource::GlobalJson,
+                )?
+                .ok_or_else(|| {
                     anyhow!(
                         "Workload set '{workload_version}' was not found under the configured workload manifest roots"
                     )
-                })?;
-            overlay_manifest_specifiers(
-                &mut manifests,
-                &manifest_roots,
-                &workload_set.feature_band,
-                &workload_set.manifests,
-            )?;
-        } else if install_state.use_workload_sets
-            && let Some((_, workload_set)) =
-                latest_workload_set(&manifest_roots, &config.feature_band)?
+                })?,
+            )
+        } else if let Some(workload_version) = install_state.workload_version.as_deref() {
+            Some(
+                find_workload_set(
+                    &manifest_roots,
+                    &config.feature_band,
+                    workload_version,
+                    WorkloadSetSelectionSource::InstallState,
+                )?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Workload set '{workload_version}' from install state was not found under the configured workload manifest roots"
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        if workload_set.is_none()
+            && global_config
+                .global_json_specified_workload_sets
+                .unwrap_or(install_state.use_workload_sets)
+            && let Some((_, selected)) = latest_workload_set(&manifest_roots, &config.feature_band)?
         {
+            workload_set = Some(selected);
+        }
+        if let Some(workload_set) = &workload_set {
             overlay_manifest_specifiers(
                 &mut manifests,
                 &manifest_roots,
@@ -123,7 +164,10 @@ impl InstalledWorkloadSdkResolver {
                 &workload_set.manifests,
             )?;
         }
-        if global_workload_version.is_none()
+        let install_state_manifests_may_overlay = workload_set
+            .as_ref()
+            .is_none_or(|selection| selection.source == WorkloadSetSelectionSource::InstallState);
+        if install_state_manifests_may_overlay
             && let Some(install_manifests) = &install_state.manifests
         {
             overlay_manifest_specifiers(
@@ -151,28 +195,14 @@ impl InstalledWorkloadSdkResolver {
                     .with_context(|| format!("Failed to read {}", manifest_path.display()))?,
             )
             .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
-            let Some(packs) = document.get("packs").and_then(serde_json::Value::as_object) else {
-                continue;
-            };
-            let mut pack_names = packs.keys().collect::<Vec<_>>();
-            pack_names.sort_by(|left, right| ascii_case_compare(left, right));
-            for pack_name in pack_names {
-                let pack = &packs[pack_name];
-                if !pack
-                    .get("kind")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case("sdk"))
-                {
-                    continue;
-                }
-                let Some(version) = pack.get("version").and_then(serde_json::Value::as_str) else {
+            let mut packs = read_sdk_packs(&document, &manifest_path)?;
+            packs.sort_by(|left, right| ascii_case_compare(&left.id, &right.id));
+            for pack in packs {
+                let Some(resolved_name) = resolve_pack_alias(&pack, &runtime_identifiers) else {
                     continue;
                 };
-                let Some(resolved_name) = resolve_pack_alias(pack_name, pack, &runtime_identifiers)
-                else {
-                    continue;
-                };
-                let Some(pack_directory) = find_installed_pack(&pack_roots, resolved_name, version)
+                let Some(pack_directory) =
+                    find_installed_pack(&pack_roots, resolved_name, &pack.version)
                 else {
                     continue;
                 };
@@ -181,7 +211,7 @@ impl InstalledWorkloadSdkResolver {
                     continue;
                 }
                 pack_sdk_paths
-                    .entry(ascii_key(pack_name))
+                    .entry(ascii_key(&pack.id))
                     .or_default()
                     .push(sdk_directory.clone());
                 if sdk_directory.join("AutoImport.props").is_file() {
@@ -415,6 +445,7 @@ fn find_workload_set(
     roots: &[PathBuf],
     current_feature_band: &str,
     version: &str,
+    source: WorkloadSetSelectionSource,
 ) -> Result<Option<WorkloadSetSelection>> {
     let mut candidate_bands = vec![current_feature_band.to_string()];
     if let Some(feature_band) = sdk_feature_band(version)
@@ -432,6 +463,7 @@ fn find_workload_set(
                 return Ok(Some(WorkloadSetSelection {
                     feature_band: band.clone(),
                     manifests: read_workload_set_directory(&directory)?,
+                    source,
                 }));
             }
         }
@@ -443,21 +475,23 @@ fn latest_workload_set(
     roots: &[PathBuf],
     feature_band: &str,
 ) -> Result<Option<(String, WorkloadSetSelection)>> {
-    let mut versions = Vec::new();
+    let mut latest: Option<(String, PathBuf)> = None;
     for root in roots {
         let sets = root.join(feature_band).join("workloadsets");
         let Ok(entries) = fs::read_dir(sets) else {
             continue;
         };
         for entry in entries.flatten().filter(|entry| entry.path().is_dir()) {
-            versions.push((
-                entry.file_name().to_string_lossy().into_owned(),
-                entry.path(),
-            ));
+            let version = entry.file_name().to_string_lossy().into_owned();
+            if latest
+                .as_ref()
+                .is_none_or(|(current, _)| compare_versions(&version, current).is_gt())
+            {
+                latest = Some((version, entry.path()));
+            }
         }
     }
-    versions.sort_by(|left, right| compare_versions(&left.0, &right.0));
-    let Some((version, directory)) = versions.pop() else {
+    let Some((version, directory)) = latest else {
         return Ok(None);
     };
     Ok(Some((
@@ -465,6 +499,7 @@ fn latest_workload_set(
         WorkloadSetSelection {
             feature_band: feature_band.to_string(),
             manifests: read_workload_set_directory(&directory)?,
+            source: WorkloadSetSelectionSource::Automatic,
         },
     )))
 }
@@ -511,18 +546,151 @@ fn read_workload_set_directory(
     Ok(result)
 }
 
-fn read_global_workload_version(path: &Path) -> Option<String> {
-    let document: serde_json::Value = parse_relaxed_json(&fs::read_to_string(path).ok()?).ok()?;
-    document
-        .get("sdk")?
-        .as_object()?
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("workloadVersion"))
-        .and_then(|(_, value)| value.as_str())
-        .map(str::to_string)
+fn read_global_workload_config(path: &Path) -> Result<GlobalWorkloadConfig> {
+    let document: serde_json::Value = parse_relaxed_json(
+        &fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?,
+    )
+    .with_context(|| format!("Failed to parse {}", path.display()))?;
+    let root = document
+        .as_object()
+        .ok_or_else(|| anyhow!("{} must contain a JSON object", path.display()))?;
+    let Some(sdk) = object_field_ignore_ascii_case(root, "sdk", "global.json root")? else {
+        return Ok(GlobalWorkloadConfig::default());
+    };
+    let sdk = sdk
+        .as_object()
+        .ok_or_else(|| anyhow!("The global.json 'sdk' value must be an object"))?;
+    let workload_version =
+        object_field_ignore_ascii_case(sdk, "workloadVersion", "global.json sdk")?
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("global.json sdk.workloadVersion must be a string"))
+            })
+            .transpose()?;
+    let update_mode =
+        object_field_ignore_ascii_case(sdk, "workloads-update-mode", "global.json sdk")?
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        anyhow!("global.json sdk.workloads-update-mode must be a string")
+                    })
+                    .map(str::to_string)
+            })
+            .transpose()?;
+    let global_json_specified_workload_sets = update_mode.as_deref().and_then(|mode| {
+        if mode.eq_ignore_ascii_case("workload-set") {
+            Some(true)
+        } else if mode.eq_ignore_ascii_case("manifests") {
+            Some(false)
+        } else {
+            None
+        }
+    });
+    Ok(GlobalWorkloadConfig {
+        workload_version,
+        global_json_specified_workload_sets,
+    })
 }
 
-fn read_install_state(config: &WorkloadResolverConfig) -> InstallState {
+fn read_install_state(config: &WorkloadResolverConfig) -> Result<InstallState> {
+    let Some(path) = install_state_path(config) else {
+        return Ok(InstallState {
+            workload_version: None,
+            manifests: None,
+            use_workload_sets: true,
+        });
+    };
+    let document = if path.is_file() {
+        Some(
+            parse_relaxed_json(
+                &fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read {}", path.display()))?,
+            )
+            .with_context(|| format!("Failed to parse {}", path.display()))?,
+        )
+    } else {
+        None
+    };
+    let object = document
+        .as_ref()
+        .map(|document| {
+            document.as_object().ok_or_else(|| {
+                anyhow!(
+                    "Workload install state {} must be an object",
+                    path.display()
+                )
+            })
+        })
+        .transpose()?;
+    let workload_version = object
+        .and_then(|object| object.get("workloadVersion"))
+        .map(|value| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value
+                    .as_str()
+                    .map(|value| (!value.is_empty()).then(|| value.to_string()))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Workload install state {} workloadVersion must be a string or null",
+                            path.display()
+                        )
+                    })
+            }
+        })
+        .transpose()?
+        .flatten();
+    let manifests = object
+        .and_then(|object| object.get("manifests"))
+        .map(|value| {
+            if value.is_null() {
+                return Ok(None);
+            }
+            let manifests = value.as_object().ok_or_else(|| {
+                anyhow!(
+                    "Workload install state {} manifests must be an object or null",
+                    path.display()
+                )
+            })?;
+            if let Some((id, _)) = manifests.iter().find(|(_, value)| !value.is_string()) {
+                bail!(
+                    "Workload install state {} manifest '{id}' must have a string specifier",
+                    path.display()
+                );
+            }
+            Ok(Some(manifests.clone()))
+        })
+        .transpose()?
+        .flatten();
+    let use_workload_sets = object
+        .and_then(|object| object.get("useWorkloadSets"))
+        .map(|value| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value.as_bool().map(Some).ok_or_else(|| {
+                    anyhow!(
+                        "Workload install state {} useWorkloadSets must be a Boolean or null",
+                        path.display()
+                    )
+                })
+            }
+        })
+        .transpose()?
+        .flatten()
+        .unwrap_or(true);
+    Ok(InstallState {
+        workload_version,
+        manifests,
+        use_workload_sets,
+    })
+}
+
+fn install_state_path(config: &WorkloadResolverConfig) -> Option<PathBuf> {
     let architecture = match env::consts::ARCH {
         "x86_64" => "X64",
         "x86" => "X86",
@@ -530,7 +698,37 @@ fn read_install_state(config: &WorkloadResolverConfig) -> InstallState {
         "arm" => "Arm",
         other => other,
     };
-    let mut candidates = vec![
+    if is_user_local(config) {
+        return dotnet_user_profile(&config.environment).map(|profile| {
+            profile
+                .join("metadata")
+                .join("workloads")
+                .join(architecture)
+                .join(&config.feature_band)
+                .join("InstallState")
+                .join("default.json")
+        });
+    }
+    let is_msi = config
+        .dotnet_root
+        .join("metadata")
+        .join("workloads")
+        .join(&config.feature_band)
+        .join("installertype")
+        .join("msi")
+        .is_file();
+    if is_msi {
+        return config.environment.get("PROGRAMDATA").map(|program_data| {
+            PathBuf::from(program_data)
+                .join("dotnet")
+                .join("workloads")
+                .join(architecture)
+                .join(&config.feature_band)
+                .join("InstallState")
+                .join("default.json")
+        });
+    }
+    Some(
         config
             .dotnet_root
             .join("metadata")
@@ -539,43 +737,7 @@ fn read_install_state(config: &WorkloadResolverConfig) -> InstallState {
             .join(&config.feature_band)
             .join("InstallState")
             .join("default.json"),
-    ];
-    if let Some(program_data) = config.environment.get("PROGRAMDATA") {
-        candidates.push(
-            PathBuf::from(program_data)
-                .join("dotnet")
-                .join("workloads")
-                .join(architecture)
-                .join(&config.feature_band)
-                .join("InstallState")
-                .join("default.json"),
-        );
-    }
-    let document = candidates.into_iter().find_map(|path| {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|contents| parse_relaxed_json(&contents).ok())
-    });
-    let workload_version = document
-        .as_ref()
-        .and_then(|value| value.get("workloadVersion"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let manifests = document
-        .as_ref()
-        .and_then(|value| value.get("manifests"))
-        .and_then(serde_json::Value::as_object)
-        .cloned();
-    let use_workload_sets = document
-        .as_ref()
-        .and_then(|value| value.get("useWorkloadSets"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    InstallState {
-        workload_version,
-        manifests,
-        use_workload_sets,
-    }
+    )
 }
 
 fn order_manifests(
@@ -599,21 +761,16 @@ fn order_manifests(
     manifests
 }
 
-fn resolve_pack_alias<'a>(
-    pack_name: &'a str,
-    pack: &'a serde_json::Value,
-    runtime_identifiers: &[String],
-) -> Option<&'a str> {
-    let aliases = pack.get("alias-to").and_then(serde_json::Value::as_object);
-    if let Some(aliases) = aliases {
+fn resolve_pack_alias<'a>(pack: &'a SdkPack, runtime_identifiers: &[String]) -> Option<&'a str> {
+    if let Some(aliases) = &pack.aliases {
         runtime_identifiers.iter().find_map(|rid| {
             aliases
                 .iter()
                 .find(|(candidate, _)| candidate.eq_ignore_ascii_case(rid))
-                .and_then(|(_, value)| value.as_str())
+                .map(|(_, value)| value.as_str())
         })
     } else {
-        Some(pack_name)
+        Some(&pack.id)
     }
 }
 
@@ -647,6 +804,99 @@ fn read_nonempty_lines(path: &Path) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect()
     })
+}
+
+fn object_field_ignore_ascii_case<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    context: &str,
+) -> Result<Option<&'a serde_json::Value>> {
+    let mut matches = object
+        .iter()
+        .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name));
+    let result = matches.next().map(|(_, value)| value);
+    if matches.next().is_some() {
+        bail!("{context} defines '{name}' more than once with different casing");
+    }
+    Ok(result)
+}
+
+fn read_sdk_packs(document: &serde_json::Value, path: &Path) -> Result<Vec<SdkPack>> {
+    let context = path.display().to_string();
+    let root = document
+        .as_object()
+        .ok_or_else(|| anyhow!("Workload manifest {context} must contain a JSON object"))?;
+    let version = object_field_ignore_ascii_case(root, "version", &context)?
+        .ok_or_else(|| anyhow!("Workload manifest {context} has no version"))?;
+    let valid_version = version.as_str().is_some()
+        || version
+            .as_i64()
+            .is_some_and(|version| (0..i64::from(i32::MAX)).contains(&version));
+    if !valid_version {
+        bail!("Workload manifest {context} has an invalid version");
+    }
+    let Some(packs) = object_field_ignore_ascii_case(root, "packs", &context)? else {
+        return Ok(Vec::new());
+    };
+    let packs = packs
+        .as_object()
+        .ok_or_else(|| anyhow!("Workload manifest {context} 'packs' must be an object"))?;
+    let mut result = Vec::new();
+    for (id, value) in packs {
+        let pack_context = format!("Workload manifest {context} pack '{id}'");
+        let pack = value
+            .as_object()
+            .ok_or_else(|| anyhow!("{pack_context} must be an object"))?;
+        for key in pack.keys() {
+            if !["version", "kind", "alias-to"]
+                .iter()
+                .any(|known| key.eq_ignore_ascii_case(known))
+            {
+                bail!("{pack_context} contains unknown key '{key}'");
+            }
+        }
+        let version = object_field_ignore_ascii_case(pack, "version", &pack_context)?
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("{pack_context} must have a string version"))?;
+        let kind = object_field_ignore_ascii_case(pack, "kind", &pack_context)?
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("{pack_context} must have a string kind"))?;
+        if !["sdk", "framework", "library", "template", "tool"]
+            .iter()
+            .any(|known| kind.eq_ignore_ascii_case(known))
+        {
+            bail!("{pack_context} has unknown kind '{kind}'");
+        }
+        let aliases =
+            object_field_ignore_ascii_case(pack, "alias-to", &pack_context)?
+                .map(|aliases| {
+                    let aliases = aliases
+                        .as_object()
+                        .ok_or_else(|| anyhow!("{pack_context} 'alias-to' must be an object"))?;
+                    aliases
+                        .iter()
+                        .map(|(rid, alias)| {
+                            alias
+                                .as_str()
+                                .map(|alias| (rid.clone(), alias.to_string()))
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "{pack_context} alias for runtime identifier '{rid}' must be a string"
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+        if kind.eq_ignore_ascii_case("sdk") {
+            result.push(SdkPack {
+                id: id.clone(),
+                version: version.to_string(),
+                aliases,
+            });
+        }
+    }
+    Ok(result)
 }
 
 fn parse_relaxed_json(contents: &str) -> serde_json::Result<serde_json::Value> {
@@ -749,34 +999,69 @@ fn feature_band_compare(left: &str, right: &str) -> Option<Ordering> {
 }
 
 fn compare_versions(left: &str, right: &str) -> Ordering {
-    fn parts(value: &str) -> (Vec<u64>, Option<&str>) {
-        let core_end = value.find(['-', '+']).unwrap_or(value.len());
+    fn parts(value: &str) -> Option<(Vec<i32>, Option<&str>)> {
+        let core_end = value.find('-').unwrap_or(value.len());
         let numbers = value[..core_end]
             .split('.')
-            .map(|part| part.parse::<u64>().unwrap_or_default())
-            .collect::<Vec<_>>();
-        let suffix = (core_end < value.len()).then(|| &value[core_end + 1..]);
-        (numbers, suffix)
+            .map(str::parse::<i32>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .ok()?;
+        if !(2..=4).contains(&numbers.len()) {
+            return None;
+        }
+        let suffix = (core_end < value.len()).then(|| &value[core_end..]);
+        Some((numbers, suffix))
     }
-    let (left_numbers, left_suffix) = parts(left);
-    let (right_numbers, right_suffix) = parts(right);
+
+    fn compare_identifiers(left: Option<&str>, right: Option<&str>) -> Ordering {
+        match (left, right) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) => {
+                let left = left.split('.').collect::<Vec<_>>();
+                let right = right.split('.').collect::<Vec<_>>();
+                for (left, right) in left.iter().zip(&right) {
+                    let left_numeric = left.bytes().all(|byte| byte.is_ascii_digit());
+                    let right_numeric = right.bytes().all(|byte| byte.is_ascii_digit());
+                    let order = match (left_numeric, right_numeric) {
+                        (true, true) => left.len().cmp(&right.len()).then_with(|| left.cmp(right)),
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                        (false, false) => left.cmp(right),
+                    };
+                    if !order.is_eq() {
+                        return order;
+                    }
+                }
+                left.len().cmp(&right.len())
+            }
+        }
+    }
+
+    let (Some((left_numbers, left_suffix)), Some((right_numbers, right_suffix))) =
+        (parts(left), parts(right))
+    else {
+        return left.cmp(right);
+    };
     let length = left_numbers.len().max(right_numbers.len());
     for index in 0..length {
-        let order = left_numbers
+        let left = left_numbers
             .get(index)
             .copied()
-            .unwrap_or_default()
-            .cmp(&right_numbers.get(index).copied().unwrap_or_default());
+            .map(i64::from)
+            .unwrap_or(-1);
+        let right = right_numbers
+            .get(index)
+            .copied()
+            .map(i64::from)
+            .unwrap_or(-1);
+        let order = left.cmp(&right);
         if !order.is_eq() {
             return order;
         }
     }
-    match (left_suffix, right_suffix) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater,
-        (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => left.cmp(right),
-    }
+    compare_identifiers(left_suffix, right_suffix)
 }
 
 fn ascii_key(value: &str) -> String {
@@ -814,6 +1099,46 @@ mod tests {
         }
     }
 
+    fn write_manifest(dotnet_root: &Path, id: &str, manifest_version: &str) -> Result<PathBuf> {
+        let directory = dotnet_root
+            .join("sdk-manifests")
+            .join("10.0.300")
+            .join(id)
+            .join(manifest_version);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("WorkloadManifest.json"),
+            format!(r#"{{ "version": "{manifest_version}", "workloads": {{}}, "packs": {{}} }}"#),
+        )?;
+        fs::write(directory.join("WorkloadManifest.targets"), "<Project />")?;
+        Ok(directory)
+    }
+
+    fn write_workload_set(
+        dotnet_root: &Path,
+        set_version: &str,
+        manifest_version: &str,
+    ) -> Result<()> {
+        let directory = dotnet_root
+            .join("sdk-manifests")
+            .join("10.0.300")
+            .join("workloadsets")
+            .join(set_version);
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("baseline.workloadset.json"),
+            format!(r#"{{ "example.manifest": "{manifest_version}/10.0.300" }}"#),
+        )?;
+        Ok(())
+    }
+
+    fn write_install_state(config: &WorkloadResolverConfig, contents: &str) -> Result<()> {
+        let path = install_state_path(config).expect("install state path");
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, contents)?;
+        Ok(())
+    }
+
     #[test]
     fn virtual_locators_use_selected_manifests_and_installed_sdk_packs() -> Result<()> {
         let directory = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))?;
@@ -838,13 +1163,13 @@ mod tests {
         fs::write(
             manifest.join("WorkloadManifest.json"),
             r#"{
-  "version": "1.2.3",
+  "VERSION": "1.2.3",
   "workloads": {},
-  "packs": {
+  "PACKS": {
     "Example.Sdk": {
-      "kind": "sdk",
-      "version": "4.5.6",
-      "alias-to": { "test-rid": "Example.Sdk.Host" }
+      "KIND": "sdk",
+      "VERSION": "4.5.6",
+      "ALIAS-TO": { "TEST-RID": "Example.Sdk.Host" }
     }
   }
 }"#,
@@ -944,6 +1269,237 @@ mod tests {
             resolver.resolve(MANIFEST_TARGETS_LOCATOR),
             Some([manifest].as_slice())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_release_version_precedence_orders_numeric_prerelease_identifiers() {
+        // SdkDirectoryWorkloadManifestProvider.VersionCompare delegates prerelease
+        // ordering to Microsoft.Deployment.DotNet.Releases.ReleaseVersion.
+        for (lower, higher) in [
+            ("10.0.300-preview.2", "10.0.300-preview.10"),
+            ("1.0.0-preview.1.2", "1.0.0-preview.2"),
+            (
+                "1.0.0-preview.1234567890123456",
+                "1.0.0-preview.12345678901234567",
+            ),
+            ("1.0.0-preview.4", "1.0.0"),
+        ] {
+            assert_eq!(compare_versions(lower, higher), Ordering::Less);
+            assert_eq!(compare_versions(higher, lower), Ordering::Greater);
+        }
+        assert_eq!(
+            compare_versions("1.0.0-preview.4", "1.0.0-preview.4"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn workload_set_source_controls_install_state_manifest_overlay() -> Result<()> {
+        let directory = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))?;
+        let dotnet_root = directory.path().join("dotnet");
+        let toolset = toolset(&dotnet_root);
+        fs::write(
+            toolset.tools_path.join("KnownWorkloadManifests.txt"),
+            "example.manifest\n",
+        )?;
+        let manifest_one = write_manifest(&dotnet_root, "example.manifest", "1.0.0")?;
+        let manifest_two = write_manifest(&dotnet_root, "example.manifest", "2.0.0")?;
+        let manifest_three = write_manifest(&dotnet_root, "example.manifest", "3.0.0")?;
+        write_workload_set(&dotnet_root, "10.0.300-preview.2", "1.0.0")?;
+        write_workload_set(&dotnet_root, "10.0.300-preview.10", "2.0.0")?;
+
+        let project_directory = directory.path().join("repo");
+        fs::create_dir_all(&project_directory)?;
+        let project = project_directory.join("project.csproj");
+        fs::write(&project, "<Project />")?;
+        let config = WorkloadResolverConfig::new(&PropertyMap::new(), &toolset, &project).unwrap();
+
+        write_install_state(
+            &config,
+            r#"{
+  "useWorkloadSets": true,
+  "manifests": { "example.manifest": "3.0.0/10.0.300" }
+}"#,
+        )?;
+        let resolver = InstalledWorkloadSdkResolver::discover(&config)?;
+        assert_eq!(
+            resolver.resolve(MANIFEST_TARGETS_LOCATOR),
+            Some([manifest_two.clone()].as_slice()),
+            "an automatically selected latest set must not be overlaid by install-state manifests"
+        );
+
+        write_install_state(
+            &config,
+            r#"{
+  "workloadVersion": "10.0.300-preview.2",
+  "manifests": { "example.manifest": "3.0.0/10.0.300" }
+}"#,
+        )?;
+        let resolver = InstalledWorkloadSdkResolver::discover(&config)?;
+        assert_eq!(
+            resolver.resolve(MANIFEST_TARGETS_LOCATOR),
+            Some([manifest_three.clone()].as_slice()),
+            "an install-state-selected set may carry extra install-state manifests"
+        );
+
+        fs::write(
+            project_directory.join("global.json"),
+            r#"{ "sdk": { "workloadVersion": "10.0.300-preview.2" } }"#,
+        )?;
+        let resolver = InstalledWorkloadSdkResolver::discover(&config)?;
+        assert_eq!(
+            resolver.resolve(MANIFEST_TARGETS_LOCATOR),
+            Some([manifest_one].as_slice()),
+            "a global.json-pinned set must not be overlaid by install state"
+        );
+
+        write_install_state(
+            &config,
+            r#"{
+  "useWorkloadSets": true,
+  "manifests": { "example.manifest": "3.0.0/10.0.300" }
+}"#,
+        )?;
+        fs::write(
+            project_directory.join("global.json"),
+            r#"{ "SDK": { "WORKLOADS-UPDATE-MODE": "manifests" } }"#,
+        )?;
+        let resolver = InstalledWorkloadSdkResolver::discover(&config)?;
+        assert_eq!(
+            resolver.resolve(MANIFEST_TARGETS_LOCATOR),
+            Some([manifest_three.clone()].as_slice()),
+            "global.json manifests mode overrides install state's workload-set preference"
+        );
+
+        write_install_state(
+            &config,
+            r#"{
+  "useWorkloadSets": false,
+  "manifests": { "example.manifest": "3.0.0/10.0.300" }
+}"#,
+        )?;
+        fs::write(
+            project_directory.join("global.json"),
+            r#"{ "sdk": { "workloads-update-mode": "workload-set" } }"#,
+        )?;
+        let resolver = InstalledWorkloadSdkResolver::discover(&config)?;
+        assert_eq!(
+            resolver.resolve(MANIFEST_TARGETS_LOCATOR),
+            Some([manifest_two].as_slice()),
+            "global.json workload-set mode overrides install state's manifest preference"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn install_state_uses_user_local_shared_and_msi_roots() -> Result<()> {
+        let directory = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))?;
+        let dotnet_root = directory.path().join("dotnet");
+        let toolset = toolset(&dotnet_root);
+        let project = directory.path().join("project.csproj");
+        fs::write(&project, "<Project />")?;
+        let home = directory.path().join("home");
+        let program_data = directory.path().join("program-data");
+        let mut environment = PropertyMap::new();
+        environment.insert(
+            "DOTNET_CLI_HOME".to_string(),
+            home.to_string_lossy().into_owned(),
+        );
+        environment.insert(
+            "PROGRAMDATA".to_string(),
+            program_data.to_string_lossy().into_owned(),
+        );
+        let config = WorkloadResolverConfig::new(&environment, &toolset, &project).unwrap();
+
+        let user_local = dotnet_root
+            .join("metadata")
+            .join("workloads")
+            .join("10.0.300")
+            .join("userlocal");
+        fs::create_dir_all(user_local.parent().unwrap())?;
+        fs::write(&user_local, "")?;
+        write_install_state(&config, r#"{ "workloadVersion": "user-local" }"#)?;
+        assert_eq!(
+            read_install_state(&config)?.workload_version.as_deref(),
+            Some("user-local")
+        );
+        assert!(
+            install_state_path(&config)
+                .unwrap()
+                .starts_with(home.join(".dotnet"))
+        );
+
+        fs::remove_file(user_local)?;
+        write_install_state(&config, r#"{ "workloadVersion": "shared" }"#)?;
+        assert_eq!(
+            read_install_state(&config)?.workload_version.as_deref(),
+            Some("shared")
+        );
+        assert!(
+            install_state_path(&config)
+                .unwrap()
+                .starts_with(&dotnet_root)
+        );
+
+        let msi = dotnet_root
+            .join("metadata")
+            .join("workloads")
+            .join("10.0.300")
+            .join("installertype")
+            .join("msi");
+        fs::create_dir_all(msi.parent().unwrap())?;
+        fs::write(msi, "")?;
+        write_install_state(&config, r#"{ "workloadVersion": "msi" }"#)?;
+        assert_eq!(
+            read_install_state(&config)?.workload_version.as_deref(),
+            Some("msi")
+        );
+        assert!(
+            install_state_path(&config)
+                .unwrap()
+                .starts_with(program_data)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workload_manifest_fields_are_case_insensitive_and_validated() -> Result<()> {
+        let path = Path::new("WorkloadManifest.json");
+        let document = parse_relaxed_json(
+            r#"{
+  "VERSION": "1.0.0",
+  "PACKS": {
+    "Example.Sdk": {
+      "KIND": "SDK",
+      "VERSION": "2.0.0",
+      "ALIAS-TO": { "TEST-RID": "Example.Host" }
+    }
+  }
+}"#,
+        )?;
+        let packs = read_sdk_packs(&document, path)?;
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].id, "Example.Sdk");
+        assert_eq!(packs[0].version, "2.0.0");
+        assert_eq!(
+            resolve_pack_alias(&packs[0], &["test-rid".to_string()]),
+            Some("Example.Host")
+        );
+
+        for invalid in [
+            r#"{ "version": "1.0.0", "packs": [] }"#,
+            r#"{ "version": "1.0.0", "packs": { "P": { "version": "1.0.0" } } }"#,
+            r#"{ "version": "1.0.0", "packs": { "P": { "kind": "sdk", "version": 1 } } }"#,
+            r#"{ "version": "1.0.0", "VERSION": "2.0.0", "packs": {} }"#,
+            r#"{ "version": "1.0.0", "packs": { "P": { "kind": "sdk", "version": "1.0.0", "unknown": true } } }"#,
+        ] {
+            let document = parse_relaxed_json(invalid)?;
+            assert!(
+                read_sdk_packs(&document, path).is_err(),
+                "invalid manifest should fail: {invalid}"
+            );
+        }
         Ok(())
     }
 }

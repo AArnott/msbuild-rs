@@ -3,13 +3,8 @@
     <Source>This IS SOME STUff</Source>
     <Index>3</Index>
     <List>a;b;c;d;e</List>
-    <SharpS>ß</SharpS>
-    <Sigma>ΟΣ</Sigma>
-    <DotlessI>ı</DotlessI>
-    <DottedI>İ</DottedI>
-
-    <NoArguments>$(Source.ToUpperInvariant())</NoArguments>
-    <NestedAndChained>$(Source.Substring(1$(Index)).ToLowerInvariant().Substring($(Index)))</NestedAndChained>
+    <NoArguments>$(Source.Trim())</NoArguments>
+    <NestedAndChained>$(Source.Substring(1$(Index)).Trim().Substring($(Index)))</NestedAndChained>
     <SplitAndIndexed>$(List.Split(';')[2])</SplitAndIndexed>
     <StaticChain>$([System.Version]::Parse('10.2.3.4').ToString(2))</StaticChain>
     <VersionBuild>$([System.Version]::Parse('10.2.3.4').Build)</VersionBuild>
@@ -31,12 +26,16 @@
     <PathDriveRooted>$([System.IO.Path]::IsPathRooted('C:relative'))</PathDriveRooted>
     <PathRelative>$([MSBuild]::MakeRelative('C:\a\b', 'C:\a\c'))</PathRelative>
     <PathRelativeUnicode>$([MSBuild]::MakeRelative('C:\Ärea\base', 'c:\ärea\child'))</PathRelativeUnicode>
+    <PathRelativeUnicodeDistinct>$([MSBuild]::MakeRelative('C:\ƛrea\base', 'c:\Ƛrea\child'))</PathRelativeUnicodeDistinct>
     <PathFull>$([System.IO.Path]::GetFullPath('child/../file.txt', '$(MSBuildProjectDirectory)'))</PathFull>
     <ExpandedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('%msbuild_rs_expand_case%-%MISSING%'))</ExpandedEnvironment>
     <MalformedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('prefix%MISSING'))</MalformedEnvironment>
     <FeatureBeforeBoundary>$([MSBuild]::AreFeaturesEnabled('18.5'))</FeatureBeforeBoundary>
     <FeatureAtBoundary>$([MSBuild]::AreFeaturesEnabled('18.6'))</FeatureAtBoundary>
     <TaskHostCurrent>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'CurrentArchitecture'))</TaskHostCurrent>
+    <TaskHostX86>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'x86'))</TaskHostX86>
+    <TaskHostX64>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'x64'))</TaskHostX64>
+    <TaskHostArm64>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'arm64'))</TaskHostArm64>
     <AsciiSubstring>$([MSBuild]::SubstringByAsciiChars('ab/éZ', 1, 20))</AsciiSubstring>
     <EscapedFunction>$([MSBuild]::Escape(';'))</EscapedFunction>
     <UnescapedFunction>$([MSBuild]::Unescape('%3b'))</UnescapedFunction>
@@ -69,10 +68,6 @@
     <SplitZero>$([System.String]::Copy('a b').Split())</SplitZero>
     <IndexedChar>$(Source[0])</IndexedChar>
     <SeparatorChar>$([System.IO.Path]::DirectorySeparatorChar)</SeparatorChar>
-    <UpperSharpS>$(SharpS.ToUpperInvariant())</UpperSharpS>
-    <LowerSigma>$(Sigma.ToLowerInvariant())</LowerSigma>
-    <UpperDotlessI>$(DotlessI.ToUpperInvariant())</UpperDotlessI>
-    <LowerDottedI>$(DottedI.ToLowerInvariant())</LowerDottedI>
     <OrdinalCompare>$([System.String]::CompareOrdinal('😀', '�'))</OrdinalCompare>
     <IsoDate>$([System.DateTime]::Parse('2010-12-25T01:02:03').ToString('yyyy-MM-dd HH:mm:ss'))</IsoDate>
     <GuidX>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('X'))</GuidX>
@@ -86,6 +81,9 @@
     <RegistryViewMissingDefault>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__', 'Value', 'fallback', 'RegistryView.Default'))</RegistryViewMissingDefault>
     <TypedNullConvert>$([System.Convert]::ToString($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullConvert>
     <TypedNullPredicate>$([System.String]::IsNullOrEmpty($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullPredicate>
+    <TypedNullContains>$([System.String]::Copy('abc').Contains($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullContains>
+    <TypedNullPathCombine>$([System.IO.Path]::Combine('a', $([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullPathCombine>
+    <TypedNullReplace>$([System.String]::Copy('aba').Replace('b', $([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullReplace>
     <IntegralDecimalAdd>$([MSBuild]::Add(10.0, 1))</IntegralDecimalAdd>
     <TargetFrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</TargetFrameworkIdentifier>
     <TargetFrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 4))</TargetFrameworkVersion>

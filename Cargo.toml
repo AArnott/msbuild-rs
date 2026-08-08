@@ -15,11 +15,11 @@ serde_json = "1.0.149"
 indexmap = "2.14.0"
 sha2 = "0.10.9"
 uuid = { version = "1.18.1", features = ["v4"] }
-icu_casemap = "2.2.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_Time",

@@ -22,6 +22,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "path-normalization.ps1")
 . (Join-Path $PSScriptRoot "performance-common.ps1")
+. (Join-Path $PSScriptRoot "preprocess-semantic-xml.ps1")
 
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
@@ -72,51 +73,6 @@ function Normalize-PreprocessedOutput {
     }
     Write-Utf8File $NormalizedPath ($content.Replace("`n", [Environment]::NewLine))
     return $content
-}
-
-function ConvertTo-SemanticXmlProjection {
-    param([Parameter(Mandatory = $true)][string]$Content)
-
-    $document = [System.Xml.XmlDocument]::new()
-    $document.PreserveWhitespace = $true
-    $document.XmlResolver = $null
-    $document.LoadXml($Content)
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $visit = {
-        param([System.Xml.XmlNode]$Node, [int]$Depth)
-
-        if ($Node.NodeType -eq [System.Xml.XmlNodeType]::Element) {
-            $attributes = @(
-                $Node.Attributes |
-                    Where-Object {
-                        $_.Prefix -ne "xmlns" -and
-                        $_.Name -ne "xmlns" -and
-                        -not ($Depth -eq 0 -and $Node.LocalName -eq "Project" -and
-                            $_.LocalName -in @("Sdk", "DefaultTargets"))
-                    } |
-                    ForEach-Object {
-                        "$($_.LocalName)=$($_.Value.Replace("`r`n", "`n").Replace("`r", "`n"))"
-                    } |
-                    Sort-Object
-            )
-            $lines.Add("$("  " * $Depth)E:$($Node.LocalName)|$($attributes -join "|")") | Out-Null
-            foreach ($child in $Node.ChildNodes) {
-                & $visit $child ($Depth + 1)
-            }
-            $lines.Add("$("  " * $Depth)X:$($Node.LocalName)") | Out-Null
-        }
-        elseif ($Node.NodeType -in @(
-                [System.Xml.XmlNodeType]::Text,
-                [System.Xml.XmlNodeType]::CDATA
-            )) {
-            $value = $Node.Value.Replace("`r`n", "`n").Replace("`r", "`n")
-            if (-not [string]::IsNullOrWhiteSpace($value)) {
-                $lines.Add("$("  " * $Depth)T:$($value.Trim())") | Out-Null
-            }
-        }
-    }
-    & $visit $document.DocumentElement 0
-    return [string]::Join("`n", $lines)
 }
 
 function Write-PreprocessMismatchDiagnostic {

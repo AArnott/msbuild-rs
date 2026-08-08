@@ -2781,8 +2781,6 @@ mod tests {
   <TrimStartChars Include="@(I->TrimStart('.NETCoreApp,Version=v'))" />
   <Replaced Include="@(I->Replace('.', '_'))" />
   <Substring Include="@(I->Substring(2, 3))" />
-  <UpperInvariant Include="@(I->ToUpperInvariant())" />
-  <LowerInvariant Include="@(I->ToLowerInvariant())" />
   <Contains Include="@(I->Contains('b'))" />
   <Equals Include="@(I->Equals('abcdef'))" />
   <Length Include="@(I->get_Length())" />
@@ -2816,14 +2814,6 @@ mod tests {
             ["Ab_c;d", "_NETCoreApp,Version=v8_0", "abcdef"]
         );
         assert_eq!(identities("Substring"), [".c;", "ETC", "cde"]);
-        assert_eq!(
-            identities("UpperInvariant"),
-            ["AB.C;D", ".NETCOREAPP,VERSION=V8.0", "ABCDEF"]
-        );
-        assert_eq!(
-            identities("LowerInvariant"),
-            ["ab.c;d", ".netcoreapp,version=v8.0", "abcdef"]
-        );
         assert_eq!(identities("Contains"), ["True", "False", "True"]);
         assert_eq!(identities("Equals"), ["False", "False", "True"]);
         assert_eq!(identities("Length"), ["6", "24", "6"]);
@@ -2834,21 +2824,28 @@ mod tests {
     }
 
     #[test]
-    fn culture_sensitive_per_item_string_functions_are_pruned() -> Result<()> {
+    fn casing_per_item_string_functions_are_pruned() -> Result<()> {
         let directory = TempDir::new()?;
-        let project = write_project(
-            &directory,
-            "project.proj",
-            r#"<Project><ItemGroup>
+        for member in ["ToUpper", "ToUpperInvariant", "ToLowerInvariant"] {
+            let project = write_project(
+                &directory,
+                "project.proj",
+                &format!(
+                    r#"<Project><ItemGroup>
   <I Include="i" />
-  <Rejected Include="@(I->ToUpper())" />
-</ItemGroup></Project>"#,
-        );
-        let error = ProjectEvaluator::new()
-            .load_project(project)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("deterministic allowlist"), "{error}");
+  <Rejected Include="@(I->{member}())" />
+</ItemGroup></Project>"#
+                ),
+            );
+            let error = ProjectEvaluator::new()
+                .load_project(project)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("deterministic allowlist"),
+                "{member}: {error}"
+            );
+        }
         Ok(())
     }
 

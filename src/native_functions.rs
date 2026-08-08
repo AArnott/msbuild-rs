@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail};
-use icu_casemap::CaseMapper;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::escaping::unescape_once;
 use crate::properties::display_path;
 use crate::registry::{RegistryData, RegistryReadResult, RegistryView, read_registry_value};
+#[cfg(windows)]
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 
@@ -1202,26 +1203,6 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
     ),
     intrinsic!(
         "System.String",
-        "ToLowerInvariant",
-        InstanceMethod,
-        Decoded,
-        Escape,
-        O0,
-        "System.String",
-        handle_string_instance
-    ),
-    intrinsic!(
-        "System.String",
-        "ToUpperInvariant",
-        InstanceMethod,
-        Decoded,
-        Escape,
-        O0,
-        "System.String",
-        handle_string_instance
-    ),
-    intrinsic!(
-        "System.String",
         "Trim",
         InstanceMethod,
         Decoded,
@@ -2165,8 +2146,6 @@ const ITEM_STRING_FUNCTIONS: &[&str] = &[
     "Contains",
     "Equals",
     "Substring",
-    "ToLowerInvariant",
-    "ToUpperInvariant",
     "Trim",
     "TrimStart",
     "TrimEnd",
@@ -2343,6 +2322,12 @@ fn coerce_argument(
     member: &str,
 ) -> Result<(IntrinsicValue, u32)> {
     if value.is_null() {
+        if matches!(value, IntrinsicValue::TypedNull(type_name) if type_name.eq_ignore_ascii_case("System.String"))
+            && matches!(coercion, Coercion::String | Coercion::Path)
+            && null_policy == NullPolicy::Reject
+        {
+            return Ok((IntrinsicValue::String(String::new()), 0));
+        }
         return match null_policy {
             NullPolicy::Reject => bail!("{member} does not accept null for this overload"),
             NullPolicy::Preserve => match value {
@@ -2606,10 +2591,6 @@ fn handle_string_instance(
         Ok(IntrinsicValue::String(utf16_substring(
             receiver, start, length,
         )?))
-    } else if operation == member_code("ToLowerInvariant") {
-        Ok(IntrinsicValue::String(invariant_case(receiver, false)))
-    } else if operation == member_code("ToUpperInvariant") {
-        Ok(IntrinsicValue::String(invariant_case(receiver, true)))
     } else if matches!(
         operation,
         value
@@ -4253,17 +4234,15 @@ fn does_task_host_exist(
     } else {
         architecture
     };
-    if !architecture.eq_ignore_ascii_case(current_architecture) {
-        bail!(
-            "DoesTaskHostExist cannot inspect the '{architecture}' toolset from the current '{current_architecture}' process"
-        );
-    }
 
     let tools_directory = context
         .tools_directory
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("DoesTaskHostExist requires an active MSBuild toolset"))?;
     let environment = environment_snapshot(context);
+    if runtime.eq_ignore_ascii_case("CLR2") && architecture.eq_ignore_ascii_case("arm64") {
+        return Ok(IntrinsicValue::Boolean(false));
+    }
     let executable = if runtime.eq_ignore_ascii_case("CLR2") {
         environment
             .get(&environment_key("MSBUILDTASKHOST_EXE_NAME"))
@@ -4281,8 +4260,27 @@ fn does_task_host_exist(
                 "MSBuild"
             })
     };
+    let override_directory = if runtime.eq_ignore_ascii_case("CLR2") {
+        let variable = if architecture.eq_ignore_ascii_case("x64") {
+            "MSBUILDTASKHOSTLOCATION64"
+        } else {
+            "MSBUILDTASKHOSTLOCATION"
+        };
+        environment
+            .get(&environment_key(variable))
+            .filter(|value| !value.is_empty())
+            .map(String::as_str)
+    } else {
+        None
+    };
+    let candidate = override_directory
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new(tools_directory))
+        .join(executable);
     Ok(IntrinsicValue::Boolean(
-        Path::new(tools_directory).join(executable).is_file(),
+        candidate.is_file()
+            || (override_directory.is_some()
+                && Path::new(tools_directory).join(executable).is_file()),
     ))
 }
 
@@ -4693,22 +4691,6 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
     bail!("MSB4184: Unsupported numeric format '{format}'")
 }
 
-fn invariant_case(value: &str, uppercase: bool) -> String {
-    let mapper = CaseMapper::new();
-    value
-        .chars()
-        .map(|character| {
-            if matches!(character, '\u{130}' | '\u{131}') {
-                character
-            } else if uppercase {
-                mapper.simple_uppercase(character)
-            } else {
-                mapper.simple_lowercase(character)
-            }
-        })
-        .collect()
-}
-
 pub(crate) fn dotnet_ordinal_ignore_case_key(value: &str) -> Vec<u16> {
     let mut key = Vec::with_capacity(value.len());
     for character in value.chars() {
@@ -4948,10 +4930,30 @@ fn fix_file_path_for_style(style: PathStyle, value: &str) -> String {
 }
 
 fn path_component_equals(style: PathStyle, left: &str, right: &str) -> bool {
-    if style == PathStyle::Windows {
-        dotnet_ordinal_ignore_case_key(left) == dotnet_ordinal_ignore_case_key(right)
-    } else {
-        left == right
+    if style != PathStyle::Windows {
+        return left == right;
+    }
+
+    #[cfg(windows)]
+    {
+        let left = left.encode_utf16().collect::<Vec<_>>();
+        let right = right.encode_utf16().collect::<Vec<_>>();
+        let (Ok(left_length), Ok(right_length)) =
+            (i32::try_from(left.len()), i32::try_from(right.len()))
+        else {
+            return false;
+        };
+        // SAFETY: both pointers remain valid for their explicit UTF-16 lengths.
+        (unsafe {
+            CompareStringOrdinal(left.as_ptr(), left_length, right.as_ptr(), right_length, 1)
+        }) == CSTR_EQUAL
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Windows-style paths are not host paths here. Keep only the portable
+        // ASCII rule rather than approximating Windows' Unicode ordinal table.
+        left.eq_ignore_ascii_case(right)
     }
 }
 
@@ -5641,6 +5643,18 @@ mod tests {
     }
 
     #[test]
+    fn invariant_casing_is_pruned_without_a_dotnet_versioned_unicode_table() {
+        for member in ["ToUpperInvariant", "ToLowerInvariant"] {
+            assert!(!is_allowed(
+                "System.String",
+                member,
+                InvocationKind::InstanceMethod
+            ));
+            assert!(resolve_item_string_function(member).is_none());
+        }
+    }
+
+    #[test]
     fn path_lexical_semantics_match_windows_and_unix_corelib() -> Result<()> {
         assert!(path_is_rooted(PathStyle::Windows, r"C:relative"));
         assert!(!path_is_fully_qualified(PathStyle::Windows, r"C:relative"));
@@ -5712,6 +5726,12 @@ mod tests {
             make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:\a\c", r"C:\cwd",)?,
             r"..\c"
         );
+        #[cfg(windows)]
+        {
+            assert!(path_component_equals(PathStyle::Windows, "Ä", "ä"));
+            assert!(!path_component_equals(PathStyle::Windows, "ƛ", "Ƛ"));
+        }
+        #[cfg(windows)]
         assert_eq!(
             make_relative_with_current(
                 PathStyle::Windows,
@@ -5720,6 +5740,16 @@ mod tests {
                 r"C:\cwd",
             )?,
             r"..\child"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            make_relative_with_current(
+                PathStyle::Windows,
+                "C:\\ƛ\\base",
+                "c:\\Ƛ\\child",
+                r"C:\cwd",
+            )?,
+            "..\\..\\Ƛ\\child"
         );
         assert_eq!(
             make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:relative", r"D:\cwd",)?,
@@ -5888,18 +5918,21 @@ mod tests {
             disable_features_from_version: None,
             runtime_type: Some("Core"),
         };
-        assert_eq!(
-            call_with_context(
-                "MSBuild",
-                "DoesTaskHostExist",
-                vec![
-                    IntrinsicValue::String("CurrentRuntime".to_string()),
-                    IntrinsicValue::String("CurrentArchitecture".to_string()),
-                ],
-                &context,
-            )?,
-            IntrinsicValue::Boolean(true)
-        );
+        for architecture in ["x86", "x64", "arm64", "CurrentArchitecture"] {
+            assert_eq!(
+                call_with_context(
+                    "MSBuild",
+                    "DoesTaskHostExist",
+                    vec![
+                        IntrinsicValue::String("CurrentRuntime".to_string()),
+                        IntrinsicValue::String(architecture.to_string()),
+                    ],
+                    &context,
+                )?,
+                IntrinsicValue::Boolean(true),
+                "{architecture}"
+            );
+        }
         assert!(
             call_with_context(
                 "MSBuild",

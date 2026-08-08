@@ -29,8 +29,8 @@ not in-process library throughput, and no hard CI speed threshold is applied.
 Run the current baseline after `cargo build --release`:
 
 ```powershell
-./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
-./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
+pwsh -File ./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
+pwsh -File ./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
 ```
 
 Both implementations preserve aggregated project source, including unevaluated
@@ -87,7 +87,7 @@ unchecked/wrapping, and shifts use CLR masks.
 
 The retained correctness-tested core includes ordinal `System.String`
 operations (`Copy`, null predicates, `Join`, `CompareOrdinal`, `Contains`,
-`Substring`, invariant casing, trim character sets, replace/split/equality,
+`Substring`, trim character sets, replace/split/equality,
 insertion/removal, length/indexer); host-lexical `System.IO.Path` filename,
 extension, root, combine, change-extension, and full-path members; integral
 `System.Math.Abs`; typed and radix-based `System.Convert` overloads that do not
@@ -104,10 +104,11 @@ spellings such as `10.0` for integral arithmetic overloads, the common
 empty-platform `ToolLocationHelper` probes. Those narrow inputs are retained
 and direct-fixture tested; broader culture-sensitive or NuGet compatibility
 behavior is not inferred.
-Invariant casing follows ICU simple one-scalar mappings plus .NET invariant
-special handling for dotted/dotless I, as verified against .NET 10's
-[`InvariantModeCasing`](https://github.com/dotnet/runtime/blob/v10.0.10/src/libraries/System.Private.CoreLib/src/System/Globalization/InvariantModeCasing.cs);
-the direct fixture covers `ß`, Greek sigma, `İ`, and `ı`.
+`ToUpperInvariant` and `ToLowerInvariant` are pruned from both property and
+per-item native allowlists. .NET casing data varies with runtime/globalization
+mode, and the available Rust/ICU table does not match targeted .NET 10 for
+known values including U+019B. Exact casing remains managed/native-table
+backlog rather than retaining a known-wrong mapping.
 `StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
 UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
 
@@ -123,10 +124,13 @@ invalid inputs. Feature-wave checks honor the resolved
 `MSBuildDisableFeaturesFromVersion` boundary for the pinned MSBuild 18.6
 toolset (including wave rounding/clamping). `DoesTaskHostExist` validates
 runtime/architecture names, resolves current runtime/architecture, and checks
-the active toolset executable. Cross-architecture toolset probing returns a
-controlled native-tier error because no alternate toolset path is available.
-On Unix, current-host availability follows whether that SDK actually ships an
-`MSBuild` apphost. `IsRunningFromVisualStudio` is always false because
+the active SDK toolset executable. Valid `x86`, `x64`, and `arm64` queries all
+return availability instead of failing merely because the requested
+architecture differs from the current process; this matches the pinned
+Core-host SDK layout, where each maps to the active toolset apphost. CLR2
+checks use the corresponding task-host override/default path and return false
+for unsupported ARM64. On Unix, availability follows whether that SDK actually
+ships an `MSBuild` apphost. `IsRunningFromVisualStudio` is always false because
 msbuild-rs is a standalone host.
 Disallowed receivers and members are rejected before argument evaluation.
 There is no reflection, subprocess dispatch, or runtime startup.
@@ -287,10 +291,9 @@ without changing the still-open remaining-item-function checkbox above.
 directory, deduplicates with .NET ordinal-ignore-case semantics, and returns the
 sorted ancestor union. Per-item string dispatch is a static allowlist:
 `Trim()`, `Trim/TrimStart/TrimEnd(string-as-char-set)`, `Replace`,
-`Substring`, `Contains`, ordinal `Equals`, `ToLowerInvariant`,
-`ToUpperInvariant`, and `get_Length`. This includes the `Trim`, `TrimStart`,
-and `Replace` forms present in the pinned .NET 10 SDK. Current-culture members
-are deliberately rejected.
+`Substring`, `Contains`, ordinal `Equals`, and `get_Length`. This includes the
+`Trim`, `TrimStart`, and `Replace` forms present in the pinned .NET 10 SDK.
+Invariant and current-culture casing members are deliberately rejected.
 
 Timestamp metadata follows MSBuild's unusual filesystem rooting: relative item
 identities are probed from the process working directory, not the root or
@@ -333,6 +336,16 @@ lock is retained, so finalized projects remain `Send + Sync`.
   evaluation, never invokes a process per import, and never acquires NuGet
   packages.
 - [x] Preserve an aggregated source representation equivalent to `/pp`.
+
+Workload-set selection distinguishes global.json pins, install-state pins, and
+automatic latest-set selection. `sdk.workloads-update-mode` supplies the
+nullable global preference used ahead of install state; install-state manifests
+may augment an install-state-selected set but cannot overwrite a global.json or
+automatically selected set. Install state is read from the selected user
+`.dotnet` root for user-local installs, the shared root for file-based installs,
+or ProgramData for MSI installs. Manifest field names are read
+case-insensitively with type/required-field validation, and manifest/set
+versions use the upstream ReleaseVersion numeric prerelease ordering.
 
 ### Escaping and Parsing
 
@@ -381,7 +394,7 @@ also explicitly deferred.
   `MSBuildItemGlob` items, and `GetAllGlobs` reporting remain deferred. Repeated
   identical eager patterns are cached within one evaluation.
 - Per-item .NET string functions intentionally expose only the deterministic
-  allowlist documented above. Culture-sensitive `ToUpper`, `ToLower`,
+  allowlist documented above. Invariant/current-culture casing,
   comparison/search overloads, and every unlisted member remain pruned rather
   than being approximated.
 - Native property functions deliberately remain a supported subset of
@@ -391,9 +404,11 @@ also explicitly deferred.
   culture-sensitive .NET formatting remain deferred to additional exact native
   entries or the untouched late-stage CoreCLR plan. Removed members are not
   approximated by ordinal Rust operations.
-- Ordinary installed `Microsoft.NET.Sdk` projects now complete through both
-  workload locator SDKs, with direct semantic and preprocess-tree parity for
-  reserved/SDK properties and `KnownFrameworkReference` identities. Versioned
+- The installed `Microsoft.NET.Sdk` fixture completes through both workload
+  locator SDKs, with direct semantic and preprocess-tree parity for reserved/SDK
+  properties and `KnownFrameworkReference` identities. It explicitly disables
+  casing-dependent output-path and implicit-define projections because exact
+  invariant casing is pruned as described above. Versioned
   third-party SDK acquisition, missing-workload `MissingWorkloadPack` resolver
   item injection, and the full NuGet TFM compatibility surface remain deferred.
 - Item operations still execute in the loader's source-position pass rather

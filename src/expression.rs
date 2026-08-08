@@ -2281,20 +2281,18 @@ mod tests {
     #[test]
     fn upstream_property_function_no_arguments_and_nested_chain() -> Result<()> {
         let mut model = ProjectModel::new();
-        model.set_property("SomeStuff".to_string(), "This IS SOME STUff".to_string());
+        model.set_property("SomeStuff".to_string(), "This IS SOME stuff".to_string());
         model.set_property("Value".to_string(), "3".to_string());
         let evaluator = ExpressionEvaluator::new(&model);
 
         // Ports Expander_Tests.PropertyFunctionNoArguments and
         // PropertyFunctionPropertyWithArgumentNestedAndChainedFunction.
         assert_eq!(
-            evaluator.evaluate("$(SomeStuff.ToUpperInvariant())")?,
-            "THIS IS SOME STUFF"
+            evaluator.evaluate("$(SomeStuff.Trim())")?,
+            "This IS SOME stuff"
         );
         assert_eq!(
-            evaluator.evaluate(
-                "$(SomeStuff.SubString(1$(Value)).ToLowerInvariant().SubString($(Value)))"
-            )?,
+            evaluator.evaluate("$(SomeStuff.SubString(1$(Value)).Trim().SubString($(Value)))")?,
             "ff"
         );
         assert_eq!(evaluator.evaluate("$(SomeStuff.Length.ToString())")?, "18");
@@ -2423,10 +2421,6 @@ mod tests {
     #[test]
     fn native_core_reviewer_cases_match_clr_semantics() -> Result<()> {
         let mut model = ProjectModel::new();
-        model.set_property("SharpS".to_string(), "ß".to_string());
-        model.set_property("Sigma".to_string(), "ΟΣ".to_string());
-        model.set_property("DotlessI".to_string(), "ı".to_string());
-        model.set_property("DottedI".to_string(), "İ".to_string());
         model.set_property("S".to_string(), "aba".to_string());
         let evaluator = ExpressionEvaluator::new(&model);
         let cases = [
@@ -2474,10 +2468,6 @@ mod tests {
             ("$([System.String]::Copy('a b').Split())", "a;b"),
             ("$(S.Replace('b',null))", "aa"),
             ("$(S.Trim('a'))", "b"),
-            ("$(SharpS.ToUpperInvariant())", "ß"),
-            ("$(Sigma.ToLowerInvariant())", "οσ"),
-            ("$(DotlessI.ToUpperInvariant())", "ı"),
-            ("$(DottedI.ToLowerInvariant())", "İ"),
             ("$([System.String]::CompareOrdinal('😀','�'))", "-10176"),
             ("$([System.String]::CompareOrdinal(null,'a'))", "-1"),
             (
@@ -2617,6 +2607,32 @@ mod tests {
                 "$([System.String]::IsNullOrEmpty($([System.Environment]::GetEnvironmentVariable('{missing}'))))"
             ))?,
             "True"
+        );
+        assert_eq!(
+            evaluator.evaluate(&format!(
+                "$([System.String]::Copy('abc').Contains($([System.Environment]::GetEnvironmentVariable('{missing}'))))"
+            ))?,
+            "True"
+        );
+        assert_eq!(
+            evaluator.evaluate(&format!(
+                "$([System.IO.Path]::Combine('a', $([System.Environment]::GetEnvironmentVariable('{missing}'))))"
+            ))?,
+            "a"
+        );
+        assert_eq!(
+            evaluator.evaluate(&format!(
+                "$([System.String]::Copy('aba').Replace('b', $([System.Environment]::GetEnvironmentVariable('{missing}'))))"
+            ))?,
+            "aa"
+        );
+        assert!(
+            evaluator
+                .evaluate(&format!(
+                    "$([System.String]::Copy('aba').Replace($([System.Environment]::GetEnvironmentVariable('{missing}')), 'x'))"
+                ))
+                .is_err(),
+            "a declared String null binds as an empty oldValue before Replace validates it"
         );
         assert!(
             evaluator

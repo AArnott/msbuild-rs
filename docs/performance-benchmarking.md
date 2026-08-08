@@ -22,14 +22,14 @@ PowerShell 7, the SDK pinned by `global.json`, and a release build are required.
 cargo build --release --locked
 
 # One preprocess case.
-./scripts/compare-preprocess.ps1 `
+pwsh -File ./scripts/compare-preprocess.ps1 `
   -Project ./sample_projects/simple.proj `
   -Warmup 5 `
   -Iterations 30 `
   -OutputDirectory ./benchmark-results/simple-preprocess
 
 # One target-free evaluation-query case.
-./scripts/compare-evaluation-performance.ps1 `
+pwsh -File ./scripts/compare-evaluation-performance.ps1 `
   -Project ./sample_projects/simple.proj `
   -PropertyName Configuration,OutputPath `
   -ItemType Compile `
@@ -39,15 +39,15 @@ cargo build --release --locked
   -OutputDirectory ./benchmark-results/simple-evaluation
 
 # Generate and verify fixed-seed inputs.
-./scripts/generate-performance-fixtures.ps1 `
+pwsh -File ./scripts/generate-performance-fixtures.ps1 `
   -Preset Benchmark `
   -OutputDirectory ./benchmark-results/generated-fixtures
-./scripts/generate-performance-fixtures.ps1 `
+pwsh -File ./scripts/generate-performance-fixtures.ps1 `
   -OutputDirectory ./benchmark-results/generated-fixtures `
   -VerifyOnly
 
 # Run both modes for simple and every generated manifest case.
-./scripts/run-performance-suite.ps1 `
+pwsh -File ./scripts/run-performance-suite.ps1 `
   -Preset Benchmark `
   -Warmup 5 `
   -Iterations 30 `

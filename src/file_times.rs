@@ -20,7 +20,7 @@ impl FileTimes {
             return Self::default();
         }
 
-        platform::format(&metadata)
+        platform::format(path, &metadata)
     }
 }
 
@@ -45,12 +45,13 @@ mod platform {
     use std::fs::Metadata;
     use std::mem::zeroed;
     use std::os::windows::fs::MetadataExt;
+    use std::path::Path;
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::System::Time::{
         FileTimeToSystemTime, SystemTimeToTzSpecificLocalTimeEx,
     };
 
-    pub(super) fn format(metadata: &Metadata) -> FileTimes {
+    pub(super) fn format(_path: &Path, metadata: &Metadata) -> FileTimes {
         FileTimes {
             modified: format_file_time(metadata.last_write_time()),
             created: format_file_time(metadata.creation_time()),
@@ -87,24 +88,63 @@ mod platform {
 #[cfg(unix)]
 mod platform {
     use super::FileTimes;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use std::ffi::CString;
     use std::fs::Metadata;
     use std::mem::zeroed;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    pub(super) fn format(metadata: &Metadata) -> FileTimes {
+    pub(super) fn format(path: &Path, metadata: &Metadata) -> FileTimes {
         let modified = metadata.modified().ok();
-        let created = metadata
-            .created()
-            .ok()
-            .or_else(|| synthesized_creation(metadata));
+        let created = creation_time(path, metadata);
         let accessed = metadata.accessed().ok();
         FileTimes {
             modified: modified.map(format_system_time).unwrap_or_default(),
             created: created.map(format_system_time).unwrap_or_default(),
             accessed: accessed.map(format_system_time).unwrap_or_default(),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn creation_time(path: &Path, metadata: &Metadata) -> Option<SystemTime> {
+        linux_birth_time(path).or_else(|| synthesized_creation(metadata))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn creation_time(_path: &Path, metadata: &Metadata) -> Option<SystemTime> {
+        metadata
+            .created()
+            .ok()
+            .or_else(|| synthesized_creation(metadata))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn linux_birth_time(path: &Path) -> Option<SystemTime> {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut status: libc::statx = unsafe { zeroed() };
+        if unsafe {
+            libc::statx(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                0,
+                libc::STATX_BTIME,
+                &mut status,
+            )
+        } != 0
+            || status.stx_mask & libc::STATX_BTIME == 0
+        {
+            return None;
+        }
+
+        Some(unix_system_time(
+            status.stx_btime.tv_sec,
+            i64::from(status.stx_btime.tv_nsec),
+        ))
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]

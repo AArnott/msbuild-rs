@@ -698,7 +698,7 @@ pub struct ProjectModel {
     pub items: CaseInsensitiveMap<Vec<Item>>,
     item_definitions: CaseInsensitiveMap<Arc<MetadataMap>>,
     all_evaluated_item_definition_metadata: Vec<EvaluatedItemDefinitionMetadata>,
-    pub targets: IndexMap<String, Target>,
+    pub targets: CaseInsensitiveMap<Target>,
     initial_targets: Vec<String>,
     pub imports: Vec<Import>,
     pub using_tasks: HashMap<String, String>,

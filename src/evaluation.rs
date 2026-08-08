@@ -313,16 +313,16 @@ impl ProjectEvaluator {
         target_name: &str,
         executed_targets: &mut HashSet<String>,
     ) -> Result<()> {
-        if executed_targets.contains(target_name) {
-            debug!("Target {target_name} already executed, skipping");
-            return Ok(());
-        }
-
         let model = self.model()?;
         let target = model
             .get_target(target_name)
             .ok_or_else(|| anyhow!("Target not found: {target_name}"))?
             .clone();
+        let target_key = target.name.to_ascii_lowercase();
+        if executed_targets.contains(&target_key) {
+            debug!("Target {} already executed, skipping", target.name);
+            return Ok(());
+        }
 
         if let Some(condition) = &target.condition
             && !ExpressionEvaluator::with_current_file(model, &target.source_file)
@@ -337,7 +337,7 @@ impl ProjectEvaluator {
         }
 
         info!("Executing target: {}", target.name);
-        executed_targets.insert(target_name.to_string());
+        executed_targets.insert(target_key);
         for task in &target.tasks {
             debug!("Executing task: {}", task.name);
             self.task_registry
@@ -590,13 +590,24 @@ fn parse_dotnet_info(output: &str) -> Option<ActiveToolset> {
 mod tests {
     use super::*;
     use crate::properties::display_path;
+    use crate::tasks::{TaskExecutionContext, TaskExecutor};
     use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     fn write_project(directory: &TempDir, name: &str, contents: &str) -> PathBuf {
         let path = directory.path().join(name);
         fs::write(&path, contents).unwrap();
         path
+    }
+
+    struct CountingTask(Arc<AtomicUsize>);
+
+    impl TaskExecutor for CountingTask {
+        fn execute(&self, _: &TaskExecutionContext) -> Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[test]
@@ -2976,6 +2987,81 @@ mod tests {
 
         let error = evaluator.execute_target("Main").unwrap_err().to_string();
         assert!(error.contains("initial target ran"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn initial_targets_expand_properties_only_at_each_file_source_position() -> Result<()> {
+        // Direct dotnet msbuild repro: InitialTargets expands properties but leaves
+        // item and metadata syntax as literal target names.
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "import.props",
+            r#"<Project InitialTargets="$(P);@(I);%(M);$(MSBuildThisFile)" />"#,
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project InitialTargets="$(P);@(I);%(M);$(MSBuildThisFile)">
+  <ItemGroup><I Include="must-not-expand" /></ItemGroup>
+  <Import Project="import.props" />
+</Project>"#,
+        );
+        let output_path = directory.path().join("preprocessed.xml");
+        let mut evaluator = ProjectEvaluator::with_global_properties([("P", "Expanded")]);
+        evaluator.load_project_and_write_preprocessed(project, &output_path)?;
+
+        assert_eq!(
+            evaluator.get_model().initial_targets(),
+            [
+                "Expanded",
+                "@(I)",
+                "%(M)",
+                "project.proj",
+                "Expanded",
+                "@(I)",
+                "%(M)",
+                "import.props",
+            ]
+        );
+        let output = fs::read_to_string(output_path)?;
+        assert!(output.contains(
+            r#"InitialTargets="$(P);@(I);%(M);$(MSBuildThisFile);$(P);@(I);%(M);$(MSBuildThisFile)""#
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn target_names_are_case_insensitive_for_initial_requested_and_dependencies() -> Result<()> {
+        // Direct dotnet msbuild repro: all three references resolve the authored
+        // target, and the duplicate InitialTargets spelling executes it once.
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project InitialTargets="Init;init">
+  <Target Name="INIT"><Count /></Target>
+  <Target Name="Main" DependsOnTargets="iNiT"></Target>
+</Project>"#,
+        );
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator
+            .task_registry
+            .register("Count", Box::new(CountingTask(Arc::clone(&count))));
+        evaluator.load_project(project)?;
+
+        assert_eq!(evaluator.get_model().targets.len(), 2);
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_target("init")
+                .map(|target| target.name.as_str()),
+            Some("INIT")
+        );
+        evaluator.execute_target("mAiN")?;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

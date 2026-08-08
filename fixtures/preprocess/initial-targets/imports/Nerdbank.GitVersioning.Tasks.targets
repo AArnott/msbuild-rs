@@ -1,3 +1,3 @@
-<Project InitialTargets="NBGV_SetDefaults">
+<Project InitialTargets="$(FixtureInitialTarget);@(FixtureItems);%(FixtureMetadata);NBGV_SetDefaults">
   <Target Name="NBGV_SetDefaults" />
 </Project>

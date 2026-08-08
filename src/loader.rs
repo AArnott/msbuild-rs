@@ -1077,7 +1077,7 @@ impl EvaluationState {
         }
 
         let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
-            .evaluate(&initial_targets)
+            .evaluate_properties_only(&initial_targets)
             .with_context(|| {
                 format!(
                     "Failed to evaluate InitialTargets in {}",

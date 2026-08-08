@@ -1,0 +1,32 @@
+<Project>
+  <PropertyGroup>
+    <Source>This IS SOME STUff</Source>
+    <Index>3</Index>
+    <List>a;b;c;d;e</List>
+
+    <NoArguments>$(Source.ToUpperInvariant())</NoArguments>
+    <NestedAndChained>$(Source.Substring(1$(Index)).ToLowerInvariant().Substring($(Index)))</NestedAndChained>
+    <SplitAndIndexed>$(List.Split(';')[2])</SplitAndIndexed>
+    <StaticChain>$([System.Version]::Parse('10.2.3.4').ToString(2))</StaticChain>
+    <VersionBuild>$([System.Version]::Parse('10.2.3.4').Build)</VersionBuild>
+    <VersionConstructor>$([System.Version]::new(1, 2, 3).ToString())</VersionConstructor>
+    <MathMaximum>$([System.Math]::Max(1, 2))</MathMaximum>
+    <ConvertedHex>$([System.Convert]::ToInt64('28', 16))</ConvertedHex>
+    <GuidCompact>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('N'))</GuidCompact>
+    <PathFileName>$([System.IO.Path]::GetFileName('dir/file.txt'))</PathFileName>
+    <PathCombined>$([System.IO.Path]::Combine('root', 'sub', 'file.txt'))</PathCombined>
+    <StringCopied>$([System.String]::Copy('copy'))</StringCopied>
+    <TypedNumericChain>$([MSBuild]::Add(1, 2).CompareTo(3))</TypedNumericChain>
+    <FunctionCondition Condition="$(Source.EndsWith('STUff'))">passed</FunctionCondition>
+    <FrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</FrameworkIdentifier>
+    <FrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 2))</FrameworkVersion>
+    <PlatformIdentifier>$([MSBuild]::GetTargetPlatformIdentifier('net10.0-windows10.0.19041.0'))</PlatformIdentifier>
+    <PlatformVersion>$([MSBuild]::GetTargetPlatformVersion('net10.0-windows10.0.19041.0', 4))</PlatformVersion>
+    <StableHash>$([MSBuild]::StableStringHash('abc'))</StableHash>
+    <StableSha256>$([MSBuild]::StableStringHash('abc', 'Sha256'))</StableSha256>
+    <EscapedFunction>$([MSBuild]::Escape(';'))</EscapedFunction>
+    <UnescapedFunction>$([MSBuild]::Unescape('%3b'))</UnescapedFunction>
+    <EscapedPathResult>$([System.IO.Path]::GetFileName('dir/a%3Bb'))</EscapedPathResult>
+    <FormattedDate>$([System.DateTime]::Parse('2010-12-25').ToString('yyyy/MM/dd HH:mm:ss'))</FormattedDate>
+  </PropertyGroup>
+</Project>

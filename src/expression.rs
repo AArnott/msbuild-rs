@@ -1,11 +1,16 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use crate::escaping::{DecodedString, EscapedString, escape, unescape_once};
+use crate::native_functions::{
+    ArgumentRule, IntrinsicArgument, IntrinsicContext, IntrinsicValue, InvocationKind, ResultRule,
+    invoke, is_allowed, resolve,
+};
 use crate::object_model::{Item, ProjectModel};
 use crate::properties::this_file_property;
+use crate::registry::{expand_registry_property, missing_registry_prefix};
 
 const MAX_EXPRESSION_NESTING: usize = 128;
 
@@ -63,6 +68,22 @@ pub(crate) struct EvaluatedItemExpression<'a> {
 struct ItemExpressionEvaluation<'a> {
     values: Vec<EvaluatedItemExpression<'a>>,
     separator: String,
+}
+
+struct IntrinsicOutcome {
+    value: IntrinsicValue,
+    result_rule: ResultRule,
+}
+
+#[derive(Debug)]
+enum ChainOperation<'a> {
+    Member {
+        name: &'a str,
+        arguments: Option<&'a str>,
+    },
+    Indexer {
+        argument: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,68 +758,49 @@ impl<'a> ExpressionEvaluator<'a> {
             return self.evaluate_static_function(function, depth);
         }
 
-        if let Some((property, invocation)) = expression.split_once('.')
-            && let Some((method, arguments)) = parse_invocation(invocation)
+        if expression
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Registry:"))
         {
-            let value = EscapedString::new(
-                self.property_value(property)
-                    .unwrap_or(Cow::Borrowed(""))
-                    .into_owned(),
-            )
-            .decode();
-            let arguments = split_arguments(arguments)?
-                .into_iter()
-                .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
-                .map(|argument| {
-                    argument.map(|value| EscapedString::new(value).decode().into_string())
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let argument = arguments.first().map_or("", |value| value.as_str());
-            if let Some(matched) =
-                match_ignore_ascii_case(method, &["Contains", "StartsWith", "EndsWith"])
-            {
-                let result = match matched {
-                    "Contains" => value.as_str().contains(argument),
-                    "StartsWith" => value.as_str().starts_with(argument),
-                    _ => value.as_str().ends_with(argument),
-                };
-                return Ok(DecodedString::new(dotnet_bool(result))
-                    .into_escaped()
-                    .into_string());
-            }
-            if method.eq_ignore_ascii_case("Substring") {
-                if !(1..=2).contains(&arguments.len()) {
-                    bail!("Substring expects one or two arguments");
-                }
-                let start = arguments[0].parse::<usize>()?;
-                let characters = value.as_str().chars().collect::<Vec<_>>();
-                let end = if arguments.len() == 2 {
-                    start + arguments[1].parse::<usize>()?
-                } else {
-                    characters.len()
-                };
-                let result = characters
-                    .get(start..end)
-                    .map(|characters| characters.iter().collect())
-                    .ok_or_else(|| anyhow!("Substring range {start}..{end} is out of bounds"))?;
-                return Ok(DecodedString::new(result).into_escaped().into_string());
-            }
-            if method.eq_ignore_ascii_case("ToLower")
-                || method.eq_ignore_ascii_case("ToUpper")
-                || method.eq_ignore_ascii_case("Trim")
-            {
-                require_arguments(method, &arguments, 0)?;
-                let result = if method.eq_ignore_ascii_case("ToLower") {
-                    value.as_str().to_lowercase()
-                } else if method.eq_ignore_ascii_case("ToUpper") {
-                    value.as_str().to_uppercase()
-                } else {
-                    value.as_str().trim().to_string()
-                };
-                return Ok(DecodedString::new(result).into_escaped().into_string());
-            }
-            bail!("Unsupported property method: {method}")
+            return Ok(escape(&expand_registry_property(expression)?));
         }
+        if let Some(value) = missing_registry_prefix(expression)? {
+            return Ok(value);
+        }
+
+        if let Some(chain_start) = expression.find(['.', '[']) {
+            let property = &expression[..chain_start];
+            let chain = &expression[chain_start..];
+            let chain = chain.strip_prefix('.').unwrap_or(chain);
+            if !property.is_empty()
+                && let Ok(operations) = parse_member_chain(chain)
+                && let Some(first) = operations.first()
+            {
+                let property_exists = self.property_value(property).is_some();
+                let first_is_call = matches!(
+                    first,
+                    ChainOperation::Member {
+                        arguments: Some(_),
+                        ..
+                    } | ChainOperation::Indexer { .. }
+                );
+                let first_is_allowed = operation_is_allowed("System.String", first);
+                if property_exists || first_is_call || first_is_allowed {
+                    let receiver = IntrinsicValue::String(
+                        EscapedString::new(
+                            self.property_value(property)
+                                .unwrap_or(Cow::Borrowed(""))
+                                .into_owned(),
+                        )
+                        .decode()
+                        .into_string(),
+                    );
+                    let outcome = self.evaluate_instance_chain(receiver, &operations, depth)?;
+                    return render_intrinsic(outcome);
+                }
+            }
+        }
+
         Ok(self
             .property_value(expression)
             .map(Cow::into_owned)
@@ -842,163 +844,123 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 
     fn evaluate_static_function(&self, expression: &str, depth: usize) -> Result<String> {
-        Ok(
-            DecodedString::new(self.evaluate_static_function_decoded(expression, depth)?)
-                .into_escaped()
-                .into_string(),
-        )
-    }
-
-    fn evaluate_static_function_decoded(&self, expression: &str, depth: usize) -> Result<String> {
-        let (type_name, invocation) = expression
+        let (type_name, chain) = expression
             .split_once("]::")
             .ok_or_else(|| anyhow!("Malformed property function: $([{expression})"))?;
-        let (method, arguments) = parse_invocation(invocation)
-            .ok_or_else(|| anyhow!("Malformed property function invocation: {invocation}"))?;
-        let arguments = split_arguments(arguments)?
-            .into_iter()
-            .map(|argument| self.evaluate_with_depth(&argument, depth + 1))
-            .map(|argument| argument.map(|value| EscapedString::new(value).decode().into_string()))
-            .collect::<Result<Vec<_>>>()?;
-
-        if type_name.eq_ignore_ascii_case("MSBuild") {
-            match method.to_ascii_lowercase().as_str() {
-                "arefeaturesenabled" => Ok("True".to_string()),
-                "isrunningfromvisualstudio" => {
-                    require_arguments(method, &arguments, 0)?;
-                    Ok("False".to_string())
-                }
-                "isosplatform" => {
-                    require_arguments(method, &arguments, 1)?;
-                    Ok(dotnet_bool(is_os_platform(&arguments[0])?))
-                }
-                "versiongreaterthan"
-                | "versiongreaterthanorequals"
-                | "versionlessthan"
-                | "versionlessthanorequals"
-                | "versionequals" => {
-                    require_arguments(method, &arguments, 2)?;
-                    let ordering = compare_versions(&arguments[0], &arguments[1]);
-                    let result = match method.to_ascii_lowercase().as_str() {
-                        "versiongreaterthan" => ordering.is_gt(),
-                        "versiongreaterthanorequals" => !ordering.is_lt(),
-                        "versionlessthan" => ordering.is_lt(),
-                        "versionlessthanorequals" => !ordering.is_gt(),
-                        _ => ordering.is_eq(),
-                    };
-                    Ok(dotnet_bool(result))
-                }
-                "getdirectorynameoffileabove" => {
-                    require_arguments(method, &arguments, 2)?;
-                    Ok(find_file_above(&arguments[0], &arguments[1])
-                        .and_then(|path| path.parent().map(display_path))
-                        .unwrap_or_default())
-                }
-                "getpathoffileabove" => {
-                    require_arguments(method, &arguments, 2)?;
-                    let file_name = Path::new(&arguments[0])
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
-                    Ok(find_file_above(&arguments[1], &file_name)
-                        .map(|path| display_path(&path))
-                        .unwrap_or_default())
-                }
-                "makerelative" => {
-                    require_arguments(method, &arguments, 2)?;
-                    Ok(make_relative(&arguments[0], &arguments[1]))
-                }
-                "normalizepath" => {
-                    if arguments.is_empty() {
-                        bail!("NormalizePath expects at least one argument");
-                    }
-                    let mut path = PathBuf::from(&arguments[0]);
-                    for part in &arguments[1..] {
-                        path.push(part);
-                    }
-                    Ok(display_path(&path.canonicalize().unwrap_or(path)))
-                }
-                "ensuretrailingslash" => {
-                    require_arguments(method, &arguments, 1)?;
-                    if arguments[0].ends_with(['/', '\\']) || arguments[0].is_empty() {
-                        Ok(arguments[0].clone())
-                    } else {
-                        Ok(format!("{}{}", arguments[0], std::path::MAIN_SEPARATOR))
-                    }
-                }
-                "add" | "subtract" | "multiply" | "divide" | "modulo" => {
-                    require_arguments(method, &arguments, 2)?;
-                    let left = arguments[0].parse::<f64>().with_context(|| {
-                        format!("{method} left operand '{}' is not numeric", arguments[0])
-                    })?;
-                    let right = arguments[1].parse::<f64>().with_context(|| {
-                        format!("{method} right operand '{}' is not numeric", arguments[1])
-                    })?;
-                    let value = match method.to_ascii_lowercase().as_str() {
-                        "add" => left + right,
-                        "subtract" => left - right,
-                        "multiply" => left * right,
-                        "divide" if right != 0.0 => left / right,
-                        "modulo" if right != 0.0 => left % right,
-                        "divide" => bail!("Cannot divide by zero"),
-                        _ => bail!("Cannot calculate modulo zero"),
-                    };
-                    Ok(if value.fract() == 0.0 {
-                        format!("{value:.0}")
-                    } else {
-                        value.to_string()
-                    })
-                }
-                _ => bail!("Unsupported MSBuild property function: {method}"),
-            }
-        } else if type_name.eq_ignore_ascii_case("System.IO.Path") {
-            if method.eq_ignore_ascii_case("Combine") {
-                require_arguments(method, &arguments, 2)?;
-                Ok(display_path(&Path::new(&arguments[0]).join(&arguments[1])))
-            } else if method.eq_ignore_ascii_case("IsPathRooted") {
-                require_arguments(method, &arguments, 1)?;
-                Ok(dotnet_bool(Path::new(&arguments[0]).is_absolute()))
-            } else if method.eq_ignore_ascii_case("GetDirectoryName") {
-                require_arguments(method, &arguments, 1)?;
-                Ok(Path::new(&arguments[0])
-                    .parent()
-                    .map(display_path)
-                    .unwrap_or_default())
-            } else if method.eq_ignore_ascii_case("GetFileName") {
-                require_arguments(method, &arguments, 1)?;
-                Ok(Path::new(&arguments[0])
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned())
-            } else if method.eq_ignore_ascii_case("GetFileNameWithoutExtension") {
-                require_arguments(method, &arguments, 1)?;
-                Ok(Path::new(&arguments[0])
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned())
-            } else if method.eq_ignore_ascii_case("GetExtension") {
-                require_arguments(method, &arguments, 1)?;
-                Ok(Path::new(&arguments[0])
-                    .extension()
-                    .map(|extension| format!(".{}", extension.to_string_lossy()))
-                    .unwrap_or_default())
-            } else if method.eq_ignore_ascii_case("GetFullPath") {
-                require_arguments(method, &arguments, 1)?;
-                let path = PathBuf::from(&arguments[0]);
-                Ok(display_path(&path.canonicalize().unwrap_or(path)))
-            } else {
-                bail!("Unsupported System.IO.Path property function: {method}")
-            }
-        } else if type_name.eq_ignore_ascii_case("System.Version")
-            && method.eq_ignore_ascii_case("Parse")
-        {
-            require_arguments(method, &arguments, 1)?;
-            Ok(arguments[0].clone())
+        let operations = parse_member_chain(chain)?;
+        let Some(ChainOperation::Member { name, arguments }) = operations.first() else {
+            bail!("Malformed property function invocation: [{type_name}]::{chain}");
+        };
+        let kind = if name.eq_ignore_ascii_case("new") {
+            InvocationKind::Constructor
+        } else if arguments.is_some() {
+            InvocationKind::StaticMethod
         } else {
-            bail!("Unsupported property function: [{type_name}]::{method}")
+            InvocationKind::StaticProperty
+        };
+        let mut outcome =
+            self.invoke_intrinsic(type_name, name, kind, None, *arguments, depth + 1)?;
+        for operation in &operations[1..] {
+            outcome = self.invoke_instance_operation(outcome.value, operation, depth + 1)?;
         }
+        render_intrinsic(outcome)
+    }
+
+    fn evaluate_instance_chain(
+        &self,
+        mut receiver: IntrinsicValue,
+        operations: &[ChainOperation<'_>],
+        depth: usize,
+    ) -> Result<IntrinsicOutcome> {
+        let mut result_rule = ResultRule::Escape;
+        for operation in operations {
+            let outcome = self.invoke_instance_operation(receiver, operation, depth + 1)?;
+            receiver = outcome.value;
+            result_rule = outcome.result_rule;
+        }
+        Ok(IntrinsicOutcome {
+            value: receiver,
+            result_rule,
+        })
+    }
+
+    fn invoke_instance_operation(
+        &self,
+        receiver: IntrinsicValue,
+        operation: &ChainOperation<'_>,
+        depth: usize,
+    ) -> Result<IntrinsicOutcome> {
+        match operation {
+            ChainOperation::Member { name, arguments } => {
+                let kind = if arguments.is_some() {
+                    InvocationKind::InstanceMethod
+                } else {
+                    InvocationKind::InstanceProperty
+                };
+                self.invoke_intrinsic(
+                    receiver.type_name(),
+                    name,
+                    kind,
+                    Some(&receiver),
+                    *arguments,
+                    depth + 1,
+                )
+            }
+            ChainOperation::Indexer { argument } => self.invoke_intrinsic(
+                receiver.type_name(),
+                "Item",
+                InvocationKind::Indexer,
+                Some(&receiver),
+                Some(argument),
+                depth + 1,
+            ),
+        }
+    }
+
+    fn invoke_intrinsic(
+        &self,
+        type_name: &str,
+        member: &str,
+        kind: InvocationKind,
+        receiver: Option<&IntrinsicValue>,
+        argument_expression: Option<&str>,
+        depth: usize,
+    ) -> Result<IntrinsicOutcome> {
+        let raw_arguments = argument_expression
+            .map(split_raw_arguments)
+            .transpose()?
+            .unwrap_or_default();
+        // Resolve the allowlist entry before expanding any argument. Besides
+        // producing a better diagnostic, this guarantees a rejected receiver
+        // cannot trigger nested work before it is blocked.
+        let descriptor = resolve(type_name, member, kind, raw_arguments.len())?;
+        let arguments = raw_arguments
+            .into_iter()
+            .map(|raw| {
+                let raw = raw.trim();
+                let is_null = raw.eq_ignore_ascii_case("null")
+                    && !((raw.starts_with('\'') && raw.ends_with('\''))
+                        || (raw.starts_with('"') && raw.ends_with('"')));
+                let expression = unquote(raw);
+                let evaluated = self.evaluate_with_depth(&expression, depth + 1)?;
+                let value = match descriptor.argument_rule {
+                    ArgumentRule::Decoded => EscapedString::new(evaluated).decode().into_string(),
+                    ArgumentRule::Escaped => evaluated,
+                };
+                Ok(IntrinsicArgument { value, is_null })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let context = IntrinsicContext {
+            base_directory: &self.base_directory,
+            tools_directory: self
+                .model
+                .get_property("MSBuildToolsPath")
+                .map(String::as_str),
+        };
+        Ok(IntrinsicOutcome {
+            value: invoke(descriptor, &context, receiver, &arguments)?,
+            result_rule: descriptor.result_rule,
+        })
     }
 
     pub(crate) fn evaluate_item_expression_items(
@@ -1286,6 +1248,9 @@ impl<'a> ExpressionEvaluator<'a> {
             .collect::<Result<Vec<_>>>()?;
         if name.eq_ignore_ascii_case("Exists") {
             require_arguments(name, &arguments, 1)?;
+            if arguments[0].is_empty() {
+                return Ok(false);
+            }
             let path = Path::new(&arguments[0]);
             Ok(if path.is_absolute() {
                 path.exists()
@@ -1373,19 +1338,6 @@ fn dotnet_ordinal_ignore_case_key(value: &str) -> Vec<u16> {
     key
 }
 
-fn is_os_platform(platform: &str) -> Result<bool> {
-    if platform.is_empty() {
-        bail!("IsOSPlatform platform cannot be empty");
-    }
-    let current_platform = match std::env::consts::OS {
-        "windows" => "Windows",
-        "linux" => "Linux",
-        "macos" => "OSX",
-        _ => return Ok(false),
-    };
-    Ok(platform.eq_ignore_ascii_case(current_platform))
-}
-
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
     let mut depth = 0usize;
     let mut quote = None;
@@ -1424,6 +1376,124 @@ fn parse_invocation(input: &str) -> Option<(&str, &str)> {
     input
         .ends_with(')')
         .then(|| (&input[..opening], &input[opening + 1..input.len() - 1]))
+}
+
+fn parse_member_chain(input: &str) -> Result<Vec<ChainOperation<'_>>> {
+    let input = input.trim();
+    let mut operations = Vec::new();
+    let mut position = 0;
+
+    while position < input.len() {
+        while input.as_bytes().get(position) == Some(&b' ') {
+            position += 1;
+        }
+        if input.as_bytes().get(position) == Some(&b'[') {
+            let end = find_matching_bracket(input, position)?;
+            operations.push(ChainOperation::Indexer {
+                argument: input[position + 1..end].trim(),
+            });
+            position = end + 1;
+        } else {
+            let start = position;
+            while let Some(byte) = input.as_bytes().get(position) {
+                if matches!(byte, b'(' | b'.' | b'[') {
+                    break;
+                }
+                position += 1;
+            }
+            let name = input[start..position].trim();
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                bail!("Malformed property-function member chain: {input}");
+            }
+            let arguments = if input.as_bytes().get(position) == Some(&b'(') {
+                let end = find_matching_parenthesis(input, position)?;
+                let arguments = &input[position + 1..end];
+                position = end + 1;
+                Some(arguments)
+            } else {
+                None
+            };
+            operations.push(ChainOperation::Member { name, arguments });
+        }
+
+        while input.as_bytes().get(position) == Some(&b' ') {
+            position += 1;
+        }
+        if position == input.len() {
+            break;
+        }
+        if input.as_bytes().get(position) == Some(&b'[') {
+            continue;
+        }
+        if input.as_bytes().get(position) != Some(&b'.') {
+            bail!(
+                "Malformed property-function member chain near '{}'",
+                &input[position..]
+            );
+        }
+        position += 1;
+        if position == input.len() {
+            bail!("Property-function member chain cannot end with '.'");
+        }
+    }
+
+    if operations.is_empty() {
+        bail!("Property function has no member to invoke");
+    }
+    Ok(operations)
+}
+
+fn find_matching_bracket(input: &str, opening: usize) -> Result<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (offset, character) in input[opening..].char_indices() {
+        let position = opening + offset;
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(position);
+                }
+            }
+            _ => {}
+        }
+    }
+    bail!("Unterminated indexer in '{input}'")
+}
+
+fn operation_is_allowed(type_name: &str, operation: &ChainOperation<'_>) -> bool {
+    match operation {
+        ChainOperation::Member { name, arguments } => is_allowed(
+            type_name,
+            name,
+            if arguments.is_some() {
+                InvocationKind::InstanceMethod
+            } else {
+                InvocationKind::InstanceProperty
+            },
+        ),
+        ChainOperation::Indexer { .. } => is_allowed(type_name, "Item", InvocationKind::Indexer),
+    }
+}
+
+fn render_intrinsic(outcome: IntrinsicOutcome) -> Result<String> {
+    let value = outcome.value.to_msbuild_string()?;
+    Ok(match outcome.result_rule {
+        ResultRule::Escape => DecodedString::new(value).into_escaped().into_string(),
+        ResultRule::AlreadyEscaped => value,
+    })
 }
 
 fn split_item_separator(input: &str) -> Result<(&str, Option<&str>)> {
@@ -1490,7 +1560,7 @@ fn split_item_pipeline(input: &str) -> Result<Vec<&str>> {
     Ok(stages)
 }
 
-fn split_arguments(input: &str) -> Result<Vec<String>> {
+fn split_raw_arguments(input: &str) -> Result<Vec<&str>> {
     if input.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -1517,7 +1587,7 @@ fn split_arguments(input: &str) -> Result<Vec<String>> {
             }
             ')' => depth -= 1,
             ',' if depth == 0 => {
-                arguments.push(unquote(input[start..position].trim()));
+                arguments.push(input[start..position].trim());
                 start = position + 1;
             }
             _ => {}
@@ -1526,18 +1596,19 @@ fn split_arguments(input: &str) -> Result<Vec<String>> {
     if quote.is_some() || depth != 0 {
         bail!("Malformed function arguments: {input}")
     }
-    arguments.push(unquote(input[start..].trim()));
+    arguments.push(input[start..].trim());
     Ok(arguments)
+}
+
+fn split_arguments(input: &str) -> Result<Vec<String>> {
+    split_raw_arguments(input)
+        .map(|arguments| arguments.into_iter().map(unquote).collect::<Vec<_>>())
 }
 
 fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
     options
         .iter()
         .any(|option| value.eq_ignore_ascii_case(option))
-}
-
-fn dotnet_bool(value: bool) -> String {
-    if value { "True" } else { "False" }.to_string()
 }
 
 fn unquote(value: &str) -> String {
@@ -1559,80 +1630,6 @@ fn require_arguments(method: &str, arguments: &[String], count: usize) -> Result
             "{method} expects {count} argument(s), found {}",
             arguments.len()
         )
-    }
-}
-
-fn match_ignore_ascii_case<'a>(value: &str, options: &'a [&str]) -> Option<&'a str> {
-    options
-        .iter()
-        .copied()
-        .find(|option| value.eq_ignore_ascii_case(option))
-}
-
-fn compare_versions(left: &str, right: &str) -> Ordering {
-    let parse = |value: &str| {
-        value
-            .split(['.', '-'])
-            .take_while(|part| part.chars().all(|character| character.is_ascii_digit()))
-            .map(|part| part.parse::<u32>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    let mut left = parse(left);
-    let mut right = parse(right);
-    let length = left.len().max(right.len());
-    left.resize(length, 0);
-    right.resize(length, 0);
-    left.cmp(&right)
-}
-
-fn make_relative(base: &str, path: &str) -> String {
-    if let Ok(relative) = Path::new(path).strip_prefix(base) {
-        return display_path(relative);
-    }
-
-    let is_windows_path = |value: &str| {
-        value.contains('\\')
-            || value
-                .as_bytes()
-                .get(1)
-                .is_some_and(|character| *character == b':')
-    };
-    if is_windows_path(base) || is_windows_path(path) {
-        let base_components = base
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        let path_components = path
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        if path_components.len() >= base_components.len()
-            && path_components
-                .iter()
-                .zip(&base_components)
-                .all(|(path, base)| path.eq_ignore_ascii_case(base))
-        {
-            let separator = if path.contains('\\') { "\\" } else { "/" };
-            return path_components[base_components.len()..].join(separator);
-        }
-    }
-
-    path.to_string()
-}
-
-fn find_file_above(start: &str, file_name: &str) -> Option<PathBuf> {
-    let mut directory = PathBuf::from(start.replace('/', std::path::MAIN_SEPARATOR_STR));
-    if directory.is_file() {
-        directory.pop();
-    }
-    loop {
-        let candidate = directory.join(file_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !directory.pop() {
-            return None;
-        }
     }
 }
 
@@ -2130,12 +2127,219 @@ mod tests {
             evaluator
                 .evaluate("$([System.IO.Path]::IsPathRooted('C:\\root'))")
                 .unwrap(),
-            dotnet_bool(cfg!(windows))
+            if cfg!(windows) { "True" } else { "False" }
         );
         assert_eq!(
             evaluator.evaluate("$(SdkVersion.Substring(0, 4))").unwrap(),
             "10.0"
         );
+    }
+
+    #[test]
+    fn upstream_property_function_no_arguments_and_nested_chain() -> Result<()> {
+        let mut model = ProjectModel::new();
+        model.set_property("SomeStuff".to_string(), "This IS SOME STUff".to_string());
+        model.set_property("Value".to_string(), "3".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        // Ports Expander_Tests.PropertyFunctionNoArguments and
+        // PropertyFunctionPropertyWithArgumentNestedAndChainedFunction.
+        assert_eq!(
+            evaluator.evaluate("$(SomeStuff.ToUpperInvariant())")?,
+            "THIS IS SOME STUFF"
+        );
+        assert_eq!(
+            evaluator.evaluate(
+                "$(SomeStuff.SubString(1$(Value)).ToLowerInvariant().SubString($(Value)))"
+            )?,
+            "ff"
+        );
+        assert_eq!(evaluator.evaluate("$(SomeStuff.Length.ToString())")?, "18");
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_property_function_static_method_chained() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        // Deterministic ISO-date variant of
+        // Expander_Tests.PropertyFunctionStaticMethodChained.
+        assert_eq!(
+            evaluator.evaluate(
+                "$([System.DateTime]::Parse('2010-12-25').ToString('yyyy/MM/dd HH:mm:ss'))"
+            )?,
+            "2010/12/25 00:00:00"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([System.Version]::Parse('10.2.3.4').ToString(2))")?,
+            "10.2"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_property_function_in_condition() -> Result<()> {
+        let mut model = ProjectModel::new();
+        model.set_property("PathRoot".to_string(), r"C:\goo".to_string());
+        model.set_property("PathRoot2".to_string(), "C:\\goop\\".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert!(evaluator.evaluate_condition("'$(PathRoot2.Endswith('\\'))' == 'true'")?);
+        assert!(!evaluator.evaluate_condition("$(PathRoot.EndsWith('\\'))")?);
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_property_function_medley_representative_subset() -> Result<()> {
+        let mut model = ProjectModel::new();
+        model.set_property("input".to_string(), "EXPORT a".to_string());
+        model.set_property("listofthings".to_string(), "a;b;c;d;e".to_string());
+        model.set_property("position".to_string(), "4".to_string());
+        model.set_property("e".to_string(), "xxx".to_string());
+        model.set_property("a".to_string(), "no".to_string());
+        model.set_property("c".to_string(), "1".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert_eq!(evaluator.evaluate("$(input[1])")?, "X");
+        assert_eq!(
+            evaluator.evaluate("$(listofthings.Split(';')[$(position)])")?,
+            "e"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([MSBuild]::Add(1,2).CompareTo(3))")?,
+            "0"
+        );
+        assert_eq!(
+            evaluator
+                .evaluate("$([System.Convert]::ToDouble($([MSBuild]::Add(1,2))).Equals(3.0))")?,
+            "True"
+        );
+        assert_eq!(evaluator.evaluate("$(a.Insert(0,'%28'))")?, "%28no");
+        assert_eq!(evaluator.evaluate("$(e.Length.ToString())")?, "3");
+        assert_eq!(evaluator.evaluate("$([MSBuild]::Escape(';'))")?, "%3b");
+        assert_eq!(evaluator.evaluate("$([MSBuild]::UnEscape('%3b'))")?, ";");
+        assert_eq!(
+            evaluator.evaluate("$([System.Int32]::MaxValue)")?,
+            i32::MAX.to_string()
+        );
+        assert_eq!(evaluator.evaluate("$(a.Equals($(c)))")?, "False");
+        assert_eq!(evaluator.evaluate("$(a.CompareTo($(c)))")?, "1");
+        Ok(())
+    }
+
+    #[test]
+    fn native_allowlist_covers_representative_required_types() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert_eq!(evaluator.evaluate("$([system.math]::mAx(1, 2))")?, "2");
+        assert_eq!(
+            evaluator.evaluate("$([System.Convert]::ToInt64('28', 16))")?,
+            "40"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([System.Version]::new(1, 2, 3).Build)")?,
+            "3"
+        );
+        assert_eq!(
+            evaluator.evaluate(
+                "$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('N'))"
+            )?,
+            "00112233445566778899aabbccddeeff"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([System.Guid]::Empty)")?,
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([System.IO.Path]::DirectorySeparatorChar)")?,
+            std::path::MAIN_SEPARATOR.to_string()
+        );
+        assert_eq!(
+            evaluator.evaluate("$([MSBuild]::StableStringHash('abc'))")?,
+            "536991770"
+        );
+        assert_eq!(
+            evaluator.evaluate(
+                "$([MSBuild]::GetTargetPlatformIdentifier('net10.0-windows10.0.19041.0'))"
+            )?,
+            "windows"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_allowlisted_static_works_and_state_mutation_stays_blocked() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+        let variable = "MSBUILD_RS_PROPERTY_FUNCTION_BLOCK_TEST";
+        let before = std::env::var_os(variable);
+
+        assert_eq!(evaluator.evaluate("$([System.Math]::Max(1, 2))")?, "2");
+        let error = evaluator
+            .evaluate(
+                "$([System.Environment]::SetEnvironmentVariable('MSBUILD_RS_PROPERTY_FUNCTION_BLOCK_TEST', 'x'))",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4185"));
+        assert_eq!(std::env::var_os(variable), before);
+        let current_directory = std::env::current_dir()?;
+        let error = evaluator
+            .evaluate("$([System.Environment]::set_CurrentDirectory('.'))")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4185"));
+        assert_eq!(std::env::current_dir()?, current_directory);
+
+        let directory = TempDir::new()?;
+        let marker = directory.path().join("must-not-exist.txt");
+        let error = evaluator
+            .evaluate(&format!(
+                "$([System.Diagnostics.Process]::Start('cmd.exe', '/c echo bad>{}'))",
+                display_path(&marker)
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4212"));
+        assert!(!marker.exists());
+        let error = evaluator
+            .evaluate(
+                "$([System.Diagnostics.Process]::Start($([System.Int32]::Parse('not-a-number'))))",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("MSB4212"));
+        assert!(!error.contains("not-a-number"));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_prefix_syntax_and_missing_values_match_msbuild() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+
+        assert_eq!(
+            evaluator.evaluate(
+                r"$(Registry:HKEY_CURRENT_USER\Software\Microsoft\MSBuild_rs_missing@Value)"
+            )?,
+            ""
+        );
+        assert_eq!(
+            evaluator.evaluate(
+                r"$(HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VisualStudio\9.0\VSTSDB@VSTSDBDirectory)"
+            )?,
+            ""
+        );
+        assert!(
+            evaluator
+                .evaluate(r"$(HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VisualStudio\9.0\VSTSDB@Other)")
+                .unwrap_err()
+                .to_string()
+                .contains("Registry:")
+        );
+        Ok(())
     }
 
     #[test]
@@ -2215,6 +2419,7 @@ mod tests {
                 .evaluate_condition("HasTrailingSlash('obj\\') And HasTrailingSlash('obj/')")?
         );
         assert!(!evaluator.evaluate_condition("HasTrailingSlash('obj')")?);
+        assert!(!evaluator.evaluate_condition("Exists('')")?);
         assert!(evaluator.evaluate_condition(
             "$([MSBuild]::AreFeaturesEnabled('17.10')) And '$(Restore)' == 'true'"
         )?);

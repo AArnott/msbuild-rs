@@ -721,6 +721,32 @@ mod tests {
     }
 
     #[test]
+    fn sdk_style_fixture_reaches_the_known_virtual_workload_sdk_boundary() -> Result<()> {
+        let project = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/evaluation/sdk-style-progress/project.proj");
+        let mut evaluator = ProjectEvaluator::new();
+        match evaluator.load_project(project) {
+            Ok(()) => {
+                // Accept a future resolver implementation, but require the
+                // native target-framework functions to have produced SDK state.
+                assert_eq!(
+                    evaluator
+                        .get_model()
+                        .get_property("TargetFrameworkIdentifier")
+                        .map(String::as_str),
+                    Some(".NETCoreApp")
+                );
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                assert!(error.contains("AutoImport.props"), "{error}");
+                assert!(!error.contains("MSB4185"), "{error}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn imports_observe_parent_state_and_evaluate_at_source_position() -> Result<()> {
         let directory = TempDir::new()?;
         write_project(
@@ -922,6 +948,37 @@ mod tests {
                 .get_property("Order")
                 .map(String::as_str),
             Some("ab")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn semicolon_separated_import_paths_ignore_empty_entries_and_preserve_order() -> Result<()> {
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "first.props",
+            "<Project><PropertyGroup><Order>$(Order)first</Order></PropertyGroup></Project>",
+        );
+        write_project(
+            &directory,
+            "second.props",
+            "<Project><PropertyGroup><Order>$(Order),second</Order></PropertyGroup></Project>",
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project><Import Project=";first.props;;second.props;" /></Project>"#,
+        );
+
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project(project)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("Order")
+                .map(String::as_str),
+            Some("first,second")
         );
         Ok(())
     }

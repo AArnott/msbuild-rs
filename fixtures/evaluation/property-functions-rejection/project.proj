@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <Rejected>$([System.Diagnostics.Process]::Start('this-must-never-run'))</Rejected>
+  </PropertyGroup>
+</Project>

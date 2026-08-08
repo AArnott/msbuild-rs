@@ -1,0 +1,31 @@
+{
+  "name": "native-property-functions",
+  "project": "project.proj",
+  "properties": [
+    "NoArguments",
+    "NestedAndChained",
+    "SplitAndIndexed",
+    "StaticChain",
+    "VersionBuild",
+    "VersionConstructor",
+    "MathMaximum",
+    "ConvertedHex",
+    "GuidCompact",
+    "PathFileName",
+    "PathCombined",
+    "StringCopied",
+    "TypedNumericChain",
+    "FunctionCondition",
+    "FrameworkIdentifier",
+    "FrameworkVersion",
+    "PlatformIdentifier",
+    "PlatformVersion",
+    "StableHash",
+    "StableSha256",
+    "EscapedFunction",
+    "UnescapedFunction",
+    "EscapedPathResult",
+    "FormattedDate"
+  ],
+  "items": []
+}

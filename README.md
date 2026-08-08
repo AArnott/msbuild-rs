@@ -178,7 +178,8 @@ cargo build
 
 `global.json` pins the .NET SDK used by the comparison scripts and CI. The
 semantic runner writes raw tool output and deterministic, path-normalized JSON
-to `benchmark-results/evaluation`.
+to `benchmark-results/evaluation`; fixtures with `expectedFailure` compare
+controlled rejection diagnostics and require both evaluators to fail.
 
 ## Sample Projects
 

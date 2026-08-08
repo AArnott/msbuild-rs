@@ -36,9 +36,28 @@ Both implementations now preserve aggregated project source, including unevaluat
   set, and synthesize current-file properties only from active evaluation context.
 - [x] Preserve lexical project/current-file paths and provide host-resolved
   active .NET SDK and toolset properties during preprocessing.
-- [ ] Implement property functions with an explicit allowlist matching MSBuild.
+- [x] Implement native property functions with an explicit allowlist matching
+  MSBuild's receiver restrictions for the supported surface.
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
-- [ ] Implement registry properties where supported.
+- [x] Implement read-only registry properties where supported.
+
+The native registry is initialized once and indexed by normalized type, member,
+and invocation kind. It exposes arity/coercion and argument/result escaping
+metadata for inspection. The supported surface includes common `System.String`
+static/instance members and indexers; `System.IO.Path`; representative
+`System.Math`, `System.Convert`, `System.Version`, `System.Guid`, numeric, and
+deterministic `System.DateTime` members; safe `System.Environment` reads; and
+the MSBuild path, arithmetic, version/target-framework, escaping, hash, and
+registry intrinsics exercised by the .NET 10 SDK scan. Disallowed receivers and
+members are rejected before argument evaluation or invocation. There is no
+reflection, subprocess dispatch, or runtime startup.
+
+On Windows, `$(Registry:...)` and the native MSBuild registry intrinsics are
+read-only and support string/expanded-string, DWORD, QWORD, multi-string, and
+binary values, including 32/64-bit views. Missing keys/values expand to empty
+(or the supplied intrinsic default). On non-Windows, `$(Registry:...)` expands
+to empty before syntax validation, matching modern dotnet MSBuild's retained
+.NET Core behavior; intrinsic reads return empty/the supplied default.
 
 #### .NET-backed intrinsic expressions (late-stage)
 
@@ -209,6 +228,16 @@ The upstream-test mapping and fixture status are maintained in
 - `GetPathsOfAllDirectoriesAbove` and arbitrary per-item .NET string
   functions remain deferred. String methods will require an explicit safe
   allowlist rather than unrestricted dispatch.
+- Native property functions deliberately remain a supported subset of
+  MSBuild's legal .NET receiver surface. Regex, URI/culture/time-span,
+  directory/file enumeration, ToolLocationHelper, broad numeric/enum
+  overloads, and full culture-sensitive .NET formatting remain deferred to
+  additional native entries or the untouched late-stage CoreCLR plan.
+- SDK-style evaluation now passes the native property-function and
+  semicolon-separated import stages and reaches
+  `Microsoft.NET.Sdk.ImportWorkloads.props`. Resolution of the virtual
+  `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` SDK remains a loader
+  backlog item, so full SDK project evaluation is not claimed.
 - Target-execution-only item mutation features (`KeepDuplicates`,
   `KeepMetadata`, `RemoveMetadata`, `MatchOnMetadata`, and
   `MatchOnMetadataOptions`) are outside evaluation scope.

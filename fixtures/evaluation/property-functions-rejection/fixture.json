@@ -1,0 +1,12 @@
+{
+  "name": "rejected-property-functions",
+  "project": "project.proj",
+  "expectedFailure": {
+    "dotnetPattern": "MSB4212",
+    "rustPattern": "MSB4212"
+  },
+  "properties": [
+    "Rejected"
+  ],
+  "items": []
+}

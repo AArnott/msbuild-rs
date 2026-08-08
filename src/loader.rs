@@ -1553,31 +1553,34 @@ impl EvaluationState {
             );
         }
         let import_root = importing_path.parent().unwrap_or_else(|| Path::new(""));
-        let paths = match ItemSpec::parse(import_root, &evaluated_project_escaped)? {
-            ItemSpec::Literal { value } => {
-                let import_path = lexical_absolute(&import_root.join(value))?;
-                resolve_import_path(&import_path, importing_path)?
+        let mut paths = Vec::new();
+        for project in tokenize_list(&evaluated_project_escaped)? {
+            match ItemSpec::parse(import_root, project)? {
+                ItemSpec::Literal { value } => {
+                    let import_path = lexical_absolute(&import_root.join(value))?;
+                    paths.extend(resolve_import_path(&import_path, importing_path)?);
+                }
+                ItemSpec::Glob(pattern) => {
+                    let mut matches = pattern
+                        .enumerate(&[])
+                        .into_iter()
+                        .map(|matched| matched.path)
+                        .collect::<Vec<_>>();
+                    matches.sort_by_cached_key(|path| {
+                        (
+                            normalized_lexical_file_identity(path)
+                                .unwrap_or_else(|_| path.to_path_buf()),
+                            path.to_path_buf(),
+                        )
+                    });
+                    matches.dedup_by(|left, right| {
+                        normalized_lexical_file_identity(left).ok()
+                            == normalized_lexical_file_identity(right).ok()
+                    });
+                    paths.extend(matches);
+                }
             }
-            ItemSpec::Glob(pattern) => {
-                let mut paths = pattern
-                    .enumerate(&[])
-                    .into_iter()
-                    .map(|matched| matched.path)
-                    .collect::<Vec<_>>();
-                paths.sort_by_cached_key(|path| {
-                    (
-                        normalized_lexical_file_identity(path)
-                            .unwrap_or_else(|_| path.to_path_buf()),
-                        path.to_path_buf(),
-                    )
-                });
-                paths.dedup_by(|left, right| {
-                    normalized_lexical_file_identity(left).ok()
-                        == normalized_lexical_file_identity(right).ok()
-                });
-                paths
-            }
-        };
+        }
         debug!(
             "Import '{}' from {} matched {} file(s)",
             import.project,

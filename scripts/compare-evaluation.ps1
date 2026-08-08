@@ -94,6 +94,48 @@ try {
             [System.Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value)
         }
     }
+
+if ($fixtureDefinition.PSObject.Properties["expectedFailure"]) {
+    $dotnetArguments = @("msbuild", $projectPath, "-nologo")
+    $rustArguments = @("--project", $projectPath)
+    if ($fixtureDefinition.PSObject.Properties["globalProperties"]) {
+        foreach ($property in $fixtureDefinition.globalProperties.PSObject.Properties) {
+            $dotnetArguments += "-property:$($property.Name)=$($property.Value)"
+            $rustArguments += @("--property", "$($property.Name)=$($property.Value)")
+        }
+    }
+    foreach ($property in @($fixtureDefinition.properties)) {
+        $rustArguments += @("--get-property", $property)
+    }
+    if (@($fixtureDefinition.properties).Count -gt 0) {
+        $dotnetArguments += "-getProperty:$(@($fixtureDefinition.properties) -join ',')"
+    }
+
+    $dotnetErrorPath = Join-Path $outputPath "dotnet-expected-failure.stderr.txt"
+    $dotnetOutput = (& dotnet @dotnetArguments 2>$dotnetErrorPath | Out-String)
+    $dotnetExitCode = $LASTEXITCODE
+    $dotnetDiagnostic = $dotnetOutput + (Get-Content -Raw $dotnetErrorPath)
+
+    $rustErrorPath = Join-Path $outputPath "rust-expected-failure.stderr.txt"
+    $rustOutput = (& $rustPath @rustArguments 2>$rustErrorPath | Out-String)
+    $rustExitCode = $LASTEXITCODE
+    $rustDiagnostic = $rustOutput + (Get-Content -Raw $rustErrorPath)
+
+    $dotnetDiagnostic | Set-Content (Join-Path $outputPath "dotnet-expected-failure.txt") -Encoding utf8
+    $rustDiagnostic | Set-Content (Join-Path $outputPath "rust-expected-failure.txt") -Encoding utf8
+    if ($dotnetExitCode -eq 0 -or $rustExitCode -eq 0) {
+        throw "Expected both evaluators to reject the fixture, but exit codes were dotnet=$dotnetExitCode rust=$rustExitCode."
+    }
+    if ($dotnetDiagnostic -notmatch $fixtureDefinition.expectedFailure.dotnetPattern) {
+        throw "dotnet rejection did not match '$($fixtureDefinition.expectedFailure.dotnetPattern)'."
+    }
+    if ($rustDiagnostic -notmatch $fixtureDefinition.expectedFailure.rustPattern) {
+        throw "msbuild-rs rejection did not match '$($fixtureDefinition.expectedFailure.rustPattern)'."
+    }
+    Write-Host "Evaluation rejection parity passed: $($fixtureDefinition.name)"
+    return
+}
+
 $dotnetSdkVersion = (& dotnet --version).Trim()
 $script:SdkPath = (& dotnet msbuild $projectPath -nologo -getProperty:MSBuildSDKsPath).Trim()
 if ($LASTEXITCODE -ne 0) {

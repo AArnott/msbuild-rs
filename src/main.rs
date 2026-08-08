@@ -4,8 +4,10 @@ mod expression;
 mod item_glob;
 mod loader;
 mod logger;
+mod native_functions;
 mod object_model;
 mod properties;
+mod registry;
 mod tasks;
 mod tests;
 

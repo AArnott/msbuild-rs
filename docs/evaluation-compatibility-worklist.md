@@ -36,21 +36,39 @@ Both implementations now preserve aggregated project source, including unevaluat
   set, and synthesize current-file properties only from active evaluation context.
 - [x] Preserve lexical project/current-file paths and provide host-resolved
   active .NET SDK and toolset properties during preprocessing.
-- [x] Implement native property functions with an explicit allowlist matching
-  MSBuild's receiver restrictions for the supported surface.
+- [ ] Complete the representative native property-function surface while
+  preserving MSBuild's receiver restrictions. The correctness-first core below
+  is implemented, but culture-sensitive members removed from the native tier
+  leave the original representative `EndsWith`/`CompareTo` surface incomplete.
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
 - [x] Implement read-only registry properties where supported.
 
 The native registry is initialized once and indexed by normalized type, member,
-and invocation kind. It exposes arity/coercion and argument/result escaping
-metadata for inspection. The supported surface includes common `System.String`
-static/instance members and indexers; `System.IO.Path`; representative
-`System.Math`, `System.Convert`, `System.Version`, `System.Guid`, numeric, and
-deterministic `System.DateTime` members; safe `System.Environment` reads; and
-the MSBuild path, arithmetic, version/target-framework, escaping, hash, and
-registry intrinsics exercised by the .NET 10 SDK scan. Disallowed receivers and
-members are rejected before argument evaluation or invocation. There is no
-reflection, subprocess dispatch, or runtime startup.
+and invocation kind. Overload arity, parameter/params coercion, and per-overload
+null policy are enforced before dispatch. Values retain `null`, arrays, numeric
+types, and `System.Char` boundaries through chains. Integral MSBuild arithmetic
+is unchecked/wrapping, shifts use CLR masks, floating operations retain IEEE
+NaN/infinity, and array results escape each element before joining with a raw
+semicolon.
+
+The retained correctness-tested core includes ordinal `System.String`
+operations (`Copy`, null predicates, `Join`, `CompareOrdinal`, `Contains`,
+`Substring`, invariant casing, parameterless trim, replace/split/equality,
+insertion/removal, length/indexer); params `Path.Combine`; selected `System.Math` and
+`System.Convert` overloads; all supported `Version` constructor shapes;
+Guid N/D/B/P/X formatting; invariant Int32/Int64/UInt64 D/X formatting; and a
+deliberately narrow ISO DateTime parse plus numeric custom-format subset. Safe
+`System.Environment` reads and the existing MSBuild intrinsics remain.
+Disallowed receivers and members are rejected before argument evaluation.
+There is no reflection, subprocess dispatch, or runtime startup.
+
+Native-tier backlog (rather than approximate behavior): current-culture
+`String.StartsWith`, `EndsWith`, `CompareTo`, `IndexOf`, `LastIndexOf`,
+`ToLower`, and `ToUpper`; broad DateTime parsing/formatting; Guid equality
+binding; params-character trim overloads; Double custom formats; and unlisted
+CLR numeric overloads. These legal MSBuild calls await a proven culture
+implementation, an exact native entry, or the excluded late-stage managed
+fallback.
 
 On Windows, `$(Registry:...)` and the native MSBuild registry intrinsics are
 read-only and support string/expanded-string, DWORD, QWORD, multi-string, and
@@ -231,8 +249,10 @@ The upstream-test mapping and fixture status are maintained in
 - Native property functions deliberately remain a supported subset of
   MSBuild's legal .NET receiver surface. Regex, URI/culture/time-span,
   directory/file enumeration, ToolLocationHelper, broad numeric/enum
-  overloads, and full culture-sensitive .NET formatting remain deferred to
-  additional native entries or the untouched late-stage CoreCLR plan.
+  overloads, current-culture String comparison/search/casing, and full
+  culture-sensitive .NET formatting remain deferred to additional exact native
+  entries or the untouched late-stage CoreCLR plan. Removed members are not
+  approximated by ordinal Rust operations.
 - SDK-style evaluation now passes the native property-function and
   semicolon-separated import stages and reaches
   `Microsoft.NET.Sdk.ImportWorkloads.props`. Resolution of the virtual

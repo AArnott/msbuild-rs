@@ -844,6 +844,14 @@ impl<'a> ExpressionEvaluator<'a> {
     }
 
     fn evaluate_static_function(&self, expression: &str, depth: usize) -> Result<String> {
+        render_intrinsic(self.evaluate_static_function_outcome(expression, depth)?)
+    }
+
+    fn evaluate_static_function_outcome(
+        &self,
+        expression: &str,
+        depth: usize,
+    ) -> Result<IntrinsicOutcome> {
         let (type_name, chain) = expression
             .split_once("]::")
             .ok_or_else(|| anyhow!("Malformed property function: $([{expression})"))?;
@@ -863,7 +871,7 @@ impl<'a> ExpressionEvaluator<'a> {
         for operation in &operations[1..] {
             outcome = self.invoke_instance_operation(outcome.value, operation, depth + 1)?;
         }
-        render_intrinsic(outcome)
+        Ok(outcome)
     }
 
     fn evaluate_instance_chain(
@@ -938,16 +946,22 @@ impl<'a> ExpressionEvaluator<'a> {
             .into_iter()
             .map(|raw| {
                 let raw = raw.trim();
-                let is_null = raw.eq_ignore_ascii_case("null")
-                    && !((raw.starts_with('\'') && raw.ends_with('\''))
-                        || (raw.starts_with('"') && raw.ends_with('"')));
+                let quoted = (raw.starts_with('\'') && raw.ends_with('\''))
+                    || (raw.starts_with('"') && raw.ends_with('"'));
+                if raw.eq_ignore_ascii_case("null") && !quoted {
+                    return Ok(IntrinsicArgument {
+                        value: IntrinsicValue::Null,
+                    });
+                }
                 let expression = unquote(raw);
                 let evaluated = self.evaluate_with_depth(&expression, depth + 1)?;
                 let value = match descriptor.argument_rule {
                     ArgumentRule::Decoded => EscapedString::new(evaluated).decode().into_string(),
                     ArgumentRule::Escaped => evaluated,
                 };
-                Ok(IntrinsicArgument { value, is_null })
+                Ok(IntrinsicArgument {
+                    value: IntrinsicValue::String(value),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let context = IntrinsicContext {
@@ -1489,11 +1503,21 @@ fn operation_is_allowed(type_name: &str, operation: &ChainOperation<'_>) -> bool
 }
 
 fn render_intrinsic(outcome: IntrinsicOutcome) -> Result<String> {
-    let value = outcome.value.to_msbuild_string()?;
-    Ok(match outcome.result_rule {
-        ResultRule::Escape => DecodedString::new(value).into_escaped().into_string(),
-        ResultRule::AlreadyEscaped => value,
-    })
+    match (outcome.result_rule, outcome.value) {
+        (ResultRule::Escape, IntrinsicValue::Strings(values)) => Ok(values
+            .into_iter()
+            .map(|value| DecodedString::new(value).into_escaped().into_string())
+            .collect::<Vec<_>>()
+            .join(";")),
+        (result_rule, value) => {
+            let value = value.to_msbuild_string()?;
+            Ok(if result_rule == ResultRule::Escape {
+                DecodedString::new(value).into_escaped().into_string()
+            } else {
+                value
+            })
+        }
+    }
 }
 
 fn split_item_separator(input: &str) -> Result<(&str, Option<&str>)> {
@@ -1585,7 +1609,12 @@ fn split_raw_arguments(input: &str) -> Result<Vec<&str>> {
                     );
                 }
             }
-            ')' => depth -= 1,
+            ')' => {
+                if depth == 0 {
+                    bail!("Malformed function arguments: unexpected ')' in {input}");
+                }
+                depth -= 1;
+            }
             ',' if depth == 0 => {
                 arguments.push(input[start..position].trim());
                 start = position + 1;
@@ -2185,8 +2214,12 @@ mod tests {
         model.set_property("PathRoot2".to_string(), "C:\\goop\\".to_string());
         let evaluator = ExpressionEvaluator::new(&model);
 
-        assert!(evaluator.evaluate_condition("'$(PathRoot2.Endswith('\\'))' == 'true'")?);
-        assert!(!evaluator.evaluate_condition("$(PathRoot.EndsWith('\\'))")?);
+        assert!(evaluator.evaluate_condition("'$(PathRoot2.Contains('\\'))' == 'true'")?);
+        let error = evaluator
+            .evaluate_condition("$(PathRoot.EndsWith('\\'))")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not in the native MSBuild property-function allowlist"));
         Ok(())
     }
 
@@ -2224,7 +2257,11 @@ mod tests {
             i32::MAX.to_string()
         );
         assert_eq!(evaluator.evaluate("$(a.Equals($(c)))")?, "False");
-        assert_eq!(evaluator.evaluate("$(a.CompareTo($(c)))")?, "1");
+        assert_eq!(
+            evaluator.evaluate("$([System.String]::CompareOrdinal($(a),$(c)))")?,
+            "61"
+        );
+        assert!(evaluator.evaluate("$(a.CompareTo($(c)))").is_err());
         Ok(())
     }
 
@@ -2267,6 +2304,146 @@ mod tests {
             "windows"
         );
         Ok(())
+    }
+
+    #[test]
+    fn native_core_reviewer_cases_match_clr_semantics() -> Result<()> {
+        let mut model = ProjectModel::new();
+        model.set_property("SharpS".to_string(), "ß".to_string());
+        model.set_property("Sigma".to_string(), "ΟΣ".to_string());
+        model.set_property("S".to_string(), "aba".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+        let cases = [
+            (
+                "$([MSBuild]::Add(9223372036854775807,1))",
+                "-9223372036854775808",
+            ),
+            (
+                "$([MSBuild]::Subtract(-9223372036854775808,1))",
+                "9223372036854775807",
+            ),
+            ("$([MSBuild]::Multiply(9223372036854775807,2))", "-2"),
+            ("$([MSBuild]::LeftShift(1,32))", "1"),
+            ("$([MSBuild]::LeftShift(1,-1))", "-2147483648"),
+            ("$([MSBuild]::Divide(1.0,0.0))", "Infinity"),
+            ("$([MSBuild]::Divide(0.0,0.0))", "NaN"),
+            ("$([MSBuild]::Modulo(1.0,0.0))", "NaN"),
+            ("$([System.Math]::Sqrt(-1.0))", "NaN"),
+            ("$([System.Math]::Pow(1.0e308,2.0))", "Infinity"),
+            (
+                "$([System.Math]::Max(9007199254740992,9007199254740993))",
+                "9007199254740992",
+            ),
+            ("$([System.Convert]::ToInt32('FFFFFFFF',16))", "-1"),
+            ("$([System.Convert]::ToInt64('FFFFFFFFFFFFFFFF',16))", "-1"),
+            ("$([System.Convert]::ToString(-1,16))", "ffff"),
+            (
+                "$([System.Convert]::ToString($([System.Convert]::ToInt64('-1')),16))",
+                "ffff",
+            ),
+            ("$([System.IO.Path]::Combine())", ""),
+            ("$([System.IO.Path]::Combine('a'))", "a"),
+            ("$([System.Version]::new())", "0.0"),
+            ("$([System.Version]::new('1.2.3'))", "1.2.3"),
+            ("$([System.Version]::new(1,2))", "1.2"),
+            ("$([System.Version]::new(1,2,3,4))", "1.2.3.4"),
+            ("$([System.String]::Copy('a;b').Split(';'))", "a;b"),
+            ("$(S.Replace('b',null))", "aa"),
+            ("$(SharpS.ToUpperInvariant())", "ß"),
+            ("$(Sigma.ToLowerInvariant())", "οσ"),
+            ("$([System.String]::CompareOrdinal('😀','�'))", "-10176"),
+            ("$([System.String]::CompareOrdinal(null,'a'))", "-1"),
+            (
+                "$([System.DateTime]::Parse('2010-12-25T01:02:03').ToString('yyyy-MM-dd HH:mm:ss'))",
+                "2010-12-25 01:02:03",
+            ),
+            (
+                "$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('X'))",
+                "{0x00112233,0x4455,0x6677,{0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff}}",
+            ),
+            (
+                "$([System.Guid]::Parse('(00112233-4455-6677-8899-aabbccddeeff)').ToString('D'))",
+                "00112233-4455-6677-8899-aabbccddeeff",
+            ),
+            ("$([System.Int32]::Parse('42').ToString('D4'))", "0042"),
+            ("$([System.Int32]::Parse('-1').ToString('X'))", "FFFFFFFF"),
+            ("$([MSBuild]::Escape(null))", ""),
+            ("$([MSBuild]::ValueOrDefault(null,'fallback'))", "fallback"),
+            ("$([System.String]::IsNullOrEmpty(null))", "True"),
+        ];
+        for (expression, expected) in cases {
+            assert_eq!(
+                evaluator.evaluate(expression)?,
+                expected,
+                "expression: {expression}"
+            );
+        }
+        assert_eq!(
+            evaluator.evaluate("$([System.IO.Path]::Combine('a','b','c','d','e'))")?,
+            ["a", "b", "c", "d", "e"]
+                .iter()
+                .collect::<PathBuf>()
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            evaluator.evaluate("$([System.String]::Copy('a%3Bb,c').Split(','))")?,
+            "a%3Bb;c"
+        );
+        let components = (0..20).map(|index| format!("s{index}")).collect::<Vec<_>>();
+        let arguments = components
+            .iter()
+            .map(|component| format!("'{component}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let relative = components.iter().collect::<PathBuf>().display().to_string();
+        assert_eq!(
+            evaluator.evaluate(&format!("$([System.IO.Path]::Combine({arguments}))"))?,
+            relative
+        );
+        assert!(
+            evaluator
+                .evaluate(&format!("$([MSBuild]::NormalizePath({arguments}))"))?
+                .ends_with(&relative)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_core_invalid_inputs_return_errors_without_panicking() {
+        let mut model = ProjectModel::new();
+        model.set_property("S".to_string(), "abc".to_string());
+        let evaluator = ExpressionEvaluator::new(&model);
+        for expression in [
+            "$([System.String]::Copy(null))",
+            "$([System.IO.Path]::Combine('a',null))",
+            "$(S.Replace('','x'))",
+            "$(S.Substring(-1))",
+            "$(S.Remove(4))",
+            "$(S.Trim('a'))",
+            "$(S[0].Length)",
+            "$([System.Math]::Abs(-2147483648))",
+            "$([System.Math]::Round(1.0,16))",
+            "$([System.DateTime]::Parse('2023-02-29').ToString('yyyy-MM-dd'))",
+            "$([System.DateTime]::Parse('12/25/2010'))",
+            "$([System.Guid]::Parse('not-a-guid'))",
+            "$([System.Guid]::Empty.ToString('Z'))",
+            "$([System.Int32]::Parse('not-an-int'))",
+            "$([System.Int32]::Parse('1').ToString('Q'))",
+            "$([System.Convert]::ToInt32('-1',16))",
+            "$([System.Convert]::ToInt32('100000000',16))",
+            "$([System.Version]::new(-1,2))",
+            "$([System.Version]::new(1,2).ToString(3))",
+            "$([MSBuild]::Divide(-9223372036854775808,-1))",
+            "$([MSBuild]::Modulo(-9223372036854775808,-1))",
+            "$([System.Convert]::ToInt32(null))",
+            "$([System.Convert]::ToString(null))",
+        ] {
+            assert!(
+                evaluator.evaluate(expression).is_err(),
+                "expression should fail: {expression}"
+            );
+        }
     }
 
     #[test]

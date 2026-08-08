@@ -3,6 +3,8 @@
     <Source>This IS SOME STUff</Source>
     <Index>3</Index>
     <List>a;b;c;d;e</List>
+    <SharpS>ß</SharpS>
+    <Sigma>ΟΣ</Sigma>
 
     <NoArguments>$(Source.ToUpperInvariant())</NoArguments>
     <NestedAndChained>$(Source.Substring(1$(Index)).ToLowerInvariant().Substring($(Index)))</NestedAndChained>
@@ -17,7 +19,7 @@
     <PathCombined>$([System.IO.Path]::Combine('root', 'sub', 'file.txt'))</PathCombined>
     <StringCopied>$([System.String]::Copy('copy'))</StringCopied>
     <TypedNumericChain>$([MSBuild]::Add(1, 2).CompareTo(3))</TypedNumericChain>
-    <FunctionCondition Condition="$(Source.EndsWith('STUff'))">passed</FunctionCondition>
+    <FunctionCondition Condition="$(Source.Contains('STUff'))">passed</FunctionCondition>
     <FrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</FrameworkIdentifier>
     <FrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 2))</FrameworkVersion>
     <PlatformIdentifier>$([MSBuild]::GetTargetPlatformIdentifier('net10.0-windows10.0.19041.0'))</PlatformIdentifier>
@@ -28,5 +30,41 @@
     <UnescapedFunction>$([MSBuild]::Unescape('%3b'))</UnescapedFunction>
     <EscapedPathResult>$([System.IO.Path]::GetFileName('dir/a%3Bb'))</EscapedPathResult>
     <FormattedDate>$([System.DateTime]::Parse('2010-12-25').ToString('yyyy/MM/dd HH:mm:ss'))</FormattedDate>
+    <AddWrap>$([MSBuild]::Add(9223372036854775807, 1))</AddWrap>
+    <SubtractWrap>$([MSBuild]::Subtract(-9223372036854775808, 1))</SubtractWrap>
+    <MultiplyWrap>$([MSBuild]::Multiply(9223372036854775807, 2))</MultiplyWrap>
+    <MaskedLeftShift>$([MSBuild]::LeftShift(1, -1))</MaskedLeftShift>
+    <MaskedRightShift>$([MSBuild]::RightShift(-2, 32))</MaskedRightShift>
+    <DivideInfinity>$([MSBuild]::Divide(1.0, 0.0))</DivideInfinity>
+    <DivideNaN>$([MSBuild]::Divide(0.0, 0.0))</DivideNaN>
+    <ModuloNaN>$([MSBuild]::Modulo(1.0, 0.0))</ModuloNaN>
+    <SqrtNaN>$([System.Math]::Sqrt(-1.0))</SqrtNaN>
+    <DoubleMaximum>$([System.Math]::Max(9007199254740992, 9007199254740993))</DoubleMaximum>
+    <SignedRadixInt>$([System.Convert]::ToInt32('FFFFFFFF', 16))</SignedRadixInt>
+    <SignedRadixString>$([System.Convert]::ToString(-1, 16))</SignedRadixString>
+    <NestedSignedRadix>$([System.Convert]::ToString($([System.Convert]::ToInt64('-1')), 16))</NestedSignedRadix>
+    <PathCombineEmpty>$([System.IO.Path]::Combine())</PathCombineEmpty>
+    <PathCombineOne>$([System.IO.Path]::Combine('a'))</PathCombineOne>
+    <PathCombineMany>$([System.IO.Path]::Combine('a', 'b', 'c', 'd', 'e'))</PathCombineMany>
+    <NormalizeMany>$([MSBuild]::NormalizePath('a', 'b', 'c', 'd', 'e'))</NormalizeMany>
+    <VersionEmpty>$([System.Version]::new())</VersionEmpty>
+    <VersionString>$([System.Version]::new('1.2.3'))</VersionString>
+    <VersionTwo>$([System.Version]::new(1, 2))</VersionTwo>
+    <VersionFour>$([System.Version]::new(1, 2, 3, 4))</VersionFour>
+    <SplitCopied>$([System.String]::Copy('a;b').Split(';'))</SplitCopied>
+    <IndexedChar>$(Source[0])</IndexedChar>
+    <SeparatorChar>$([System.IO.Path]::DirectorySeparatorChar)</SeparatorChar>
+    <UpperSharpS>$(SharpS.ToUpperInvariant())</UpperSharpS>
+    <LowerSigma>$(Sigma.ToLowerInvariant())</LowerSigma>
+    <OrdinalCompare>$([System.String]::CompareOrdinal('😀', '�'))</OrdinalCompare>
+    <IsoDate>$([System.DateTime]::Parse('2010-12-25T01:02:03').ToString('yyyy-MM-dd HH:mm:ss'))</IsoDate>
+    <GuidX>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('X'))</GuidX>
+    <IntD4>$([System.Int32]::Parse('42').ToString('D4'))</IntD4>
+    <EscapeNull>$([MSBuild]::Escape(null))</EscapeNull>
+    <DefaultNull>$([MSBuild]::ValueOrDefault(null, 'fallback'))</DefaultNull>
   </PropertyGroup>
+  <ItemGroup>
+    <SplitItem Include="$([System.String]::Copy('a;b').Split(';'))" />
+    <EscapedSplitItem Include="$([System.String]::Copy('a%3Bb,c').Split(','))" />
+  </ItemGroup>
 </Project>

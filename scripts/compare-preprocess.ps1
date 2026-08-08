@@ -103,8 +103,9 @@ function Write-PreprocessMismatchDiagnostic {
         $actualLine = if ($index -lt $actualLines.Count) { $actualLines[$index] } else { "<end of file>" }
         $diagnostic.Add("line $($index + 1):`n  dotnet: $expectedLine`n  rust:   $actualLine") | Out-Null
     }
-    Write-Utf8File $Path ([string]::Join("`n", $diagnostic) + "`n")
-    return "Preprocessed output differs at line $($firstDifference + 1). See $Path"
+    $diagnosticText = [string]::Join("`n", $diagnostic)
+    Write-Utf8File $Path ($diagnosticText + "`n")
+    return "Preprocessed output differs at line $($firstDifference + 1). See $Path`n$diagnosticText"
 }
 
 function Format-Command {

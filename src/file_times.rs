@@ -88,12 +88,8 @@ mod platform {
 #[cfg(unix)]
 mod platform {
     use super::FileTimes;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    use std::ffi::CString;
     use std::fs::Metadata;
     use std::mem::zeroed;
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use std::time::Duration;
@@ -111,8 +107,10 @@ mod platform {
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn creation_time(path: &Path, metadata: &Metadata) -> Option<SystemTime> {
-        linux_birth_time(path).or_else(|| synthesized_creation(metadata))
+    fn creation_time(_path: &Path, metadata: &Metadata) -> Option<SystemTime> {
+        // .NET's Unix PAL does not use Linux statx birth times. It synthesizes
+        // creation time from the older of ctime and mtime.
+        synthesized_creation(metadata)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -121,30 +119,6 @@ mod platform {
             .created()
             .ok()
             .or_else(|| synthesized_creation(metadata))
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn linux_birth_time(path: &Path) -> Option<SystemTime> {
-        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-        let mut status: libc::statx = unsafe { zeroed() };
-        if unsafe {
-            libc::statx(
-                libc::AT_FDCWD,
-                path.as_ptr(),
-                0,
-                libc::STATX_BTIME,
-                &mut status,
-            )
-        } != 0
-            || status.stx_mask & libc::STATX_BTIME == 0
-        {
-            return None;
-        }
-
-        Some(unix_system_time(
-            status.stx_btime.tv_sec,
-            i64::from(status.stx_btime.tv_nsec),
-        ))
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -195,6 +169,22 @@ mod platform {
                         -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX) - 1,
                         1_000_000_000 - duration.subsec_nanos(),
                     )
+                }
+
+                #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+                mod tests {
+                    use super::*;
+
+                    #[test]
+                    fn creation_time_matches_dotnet_linux_synthesis() {
+                        let executable = std::env::current_exe().unwrap();
+                        let metadata = std::fs::metadata(&executable).unwrap();
+
+                        assert_eq!(
+                            creation_time(&executable, &metadata),
+                            synthesized_creation(&metadata)
+                        );
+                    }
                 }
             }
         };

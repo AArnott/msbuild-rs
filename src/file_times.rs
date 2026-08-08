@@ -170,22 +170,6 @@ mod platform {
                         1_000_000_000 - duration.subsec_nanos(),
                     )
                 }
-
-                #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
-                mod tests {
-                    use super::*;
-
-                    #[test]
-                    fn creation_time_matches_dotnet_linux_synthesis() {
-                        let executable = std::env::current_exe().unwrap();
-                        let metadata = std::fs::metadata(&executable).unwrap();
-
-                        assert_eq!(
-                            creation_time(&executable, &metadata),
-                            synthesized_creation(&metadata)
-                        );
-                    }
-                }
             }
         };
         let timestamp = match libc::time_t::try_from(seconds) {
@@ -207,5 +191,21 @@ mod platform {
             local.tm_sec,
             nanoseconds / 100
         )
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn creation_time_matches_dotnet_linux_synthesis() {
+            let executable = std::env::current_exe().unwrap();
+            let metadata = std::fs::metadata(&executable).unwrap();
+
+            assert_eq!(
+                creation_time(&executable, &metadata),
+                synthesized_creation(&metadata)
+            );
+        }
     }
 }

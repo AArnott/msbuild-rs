@@ -53,18 +53,24 @@ pub(crate) enum ResultRule {
 pub(crate) enum Coercion {
     Any,
     String,
-    Boolean,
+    StringArray,
+    Char,
     Byte,
     Int16,
     Int32,
     Int64,
     UInt64,
-    Double,
-    Number,
     Version,
     Path,
     Radix,
     RegistryView,
+    ExactBoolean,
+    ExactByte,
+    ExactInt16,
+    ExactInt32,
+    ExactInt64,
+    ExactUInt64,
+    SignedRadixValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +166,6 @@ pub(crate) enum IntrinsicValue {
     Int32(i32),
     Int64(i64),
     UInt64(u64),
-    Double(f64),
     Version(NativeVersion),
     Guid(Uuid),
     DateTime(NativeDateTime),
@@ -180,7 +185,6 @@ impl IntrinsicValue {
             Self::Int32(_) => "System.Int32",
             Self::Int64(_) => "System.Int64",
             Self::UInt64(_) => "System.UInt64",
-            Self::Double(_) => "System.Double",
             Self::Version(_) => "System.Version",
             Self::Guid(_) => "System.Guid",
             Self::DateTime(_) => "System.DateTime",
@@ -205,7 +209,6 @@ impl IntrinsicValue {
             Self::Int32(value) => Ok(value.to_string()),
             Self::Int64(value) => Ok(value.to_string()),
             Self::UInt64(value) => Ok(value.to_string()),
-            Self::Double(value) => format_double(*value),
             Self::Version(value) => Ok(value.to_string()),
             Self::Guid(value) => Ok(value.to_string()),
             Self::DateTime(_) => bail!(
@@ -514,10 +517,10 @@ const O1_STRING_EMPTY_NULL: &[OverloadDescriptor] = &[overload!(
 )];
 const O1_VERSION: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Version])];
 const O1_BYTE: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Byte])];
+const O1_INT16: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int16])];
 const O1_INT32: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int32])];
 const O1_INT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int64])];
 const O1_UINT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::UInt64])];
-const O1_DOUBLE: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Double])];
 const O1_VERSION_NULL: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(1),
     [Coercion::Version],
@@ -542,17 +545,13 @@ const O2_REPLACE: &[OverloadDescriptor] = &[overload!(
     [Coercion::String, Coercion::String],
     [NullPolicy::Reject, NullPolicy::EmptyString]
 )];
-const O2_NUMBER: &[OverloadDescriptor] = &[overload!(
+const O2_INT64: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
-    [Coercion::Number, Coercion::Number]
+    [Coercion::Int64, Coercion::Int64]
 )];
 const O2_INT32: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
     [Coercion::Int32, Coercion::Int32]
-)];
-const O2_DOUBLE: &[OverloadDescriptor] = &[overload!(
-    Arity::Exact(2),
-    [Coercion::Double, Coercion::Double]
 )];
 const O_INT32_STRING: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
@@ -583,44 +582,45 @@ const O0_1_INT32: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::Int32]),
 ];
 const O_MATH_ABS: &[OverloadDescriptor] = &[
+    overload!(Arity::Exact(1), [Coercion::Int16]),
     overload!(Arity::Exact(1), [Coercion::Int32]),
     overload!(Arity::Exact(1), [Coercion::Int64]),
-    overload!(Arity::Exact(1), [Coercion::Double]),
-];
-const O_ROUND: &[OverloadDescriptor] = &[
-    overload!(Arity::Exact(1), [Coercion::Double]),
-    overload!(Arity::Exact(2), [Coercion::Double, Coercion::Int32]),
 ];
 const O_CONVERT_INT32: &[OverloadDescriptor] = &[
-    overload!(Arity::Exact(1), [Coercion::String], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Boolean], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int32], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::UInt64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Double], [NullPolicy::Preserve]),
+    overload!(Arity::Exact(1), [Coercion::ExactBoolean]),
+    overload!(Arity::Exact(1), [Coercion::ExactByte]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt16]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt32]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt64]),
+    overload!(Arity::Exact(1), [Coercion::ExactUInt64]),
     overload!(Arity::Exact(2), [Coercion::String, Coercion::Radix]),
 ];
 const O_CONVERT_INT64: &[OverloadDescriptor] = O_CONVERT_INT32;
 const O_CONVERT_UINT64: &[OverloadDescriptor] = O_CONVERT_INT32;
-const O_CONVERT_DOUBLE: &[OverloadDescriptor] = O_CONVERT_BOOLEAN;
 const O_CONVERT_BOOLEAN: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::String], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Boolean], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int32], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::UInt64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Double], [NullPolicy::Preserve]),
+    overload!(
+        Arity::Exact(1),
+        [Coercion::ExactBoolean],
+        [NullPolicy::Preserve]
+    ),
+    overload!(Arity::Exact(1), [Coercion::ExactByte]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt16]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt32]),
+    overload!(Arity::Exact(1), [Coercion::ExactInt64]),
+    overload!(Arity::Exact(1), [Coercion::ExactUInt64]),
 ];
 const O_CONVERT_STRING: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::String], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Boolean], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int32], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Int64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::UInt64], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(1), [Coercion::Double], [NullPolicy::Preserve]),
-    overload!(Arity::Exact(2), [Coercion::Int16, Coercion::Radix]),
-    overload!(Arity::Exact(2), [Coercion::Int32, Coercion::Radix]),
-    overload!(Arity::Exact(2), [Coercion::Int64, Coercion::Radix]),
+    overload!(
+        Arity::Exact(1),
+        [Coercion::ExactBoolean],
+        [NullPolicy::Preserve]
+    ),
+    overload!(
+        Arity::Exact(2),
+        [Coercion::SignedRadixValue, Coercion::Radix]
+    ),
 ];
 const O_PATH_0_PLUS: &[OverloadDescriptor] = &[overload!(Arity::AtLeast(0), [Coercion::Path])];
 const O_PATH_1_PLUS: &[OverloadDescriptor] = &[overload!(Arity::AtLeast(1), [Coercion::Path])];
@@ -629,11 +629,25 @@ const O_VERSION_NEW: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::String]),
     overload!(Arity::Range(2, 4), [Coercion::Int32]),
 ];
-const O_JOIN: &[OverloadDescriptor] = &[overload!(
-    Arity::AtLeast(2),
-    [Coercion::String],
-    [NullPolicy::EmptyString]
-)];
+const O_JOIN: &[OverloadDescriptor] = &[
+    overload!(Arity::Exact(2), [Coercion::String, Coercion::StringArray]),
+    overload!(Arity::Exact(2), [Coercion::Char, Coercion::StringArray]),
+    overload!(
+        Arity::AtLeast(2),
+        [Coercion::String],
+        [NullPolicy::Reject, NullPolicy::EmptyString]
+    ),
+    overload!(
+        Arity::AtLeast(2),
+        [Coercion::Char, Coercion::String],
+        [NullPolicy::Reject, NullPolicy::EmptyString]
+    ),
+];
+const O_SPLIT: &[OverloadDescriptor] = &[
+    overload!(Arity::Exact(0), []),
+    overload!(Arity::Exact(1), [Coercion::String]),
+    overload!(Arity::Exact(1), [Coercion::Char]),
+];
 const O_REGISTRY_VALUE: &[OverloadDescriptor] = &[
     overload!(
         Arity::Exact(2),
@@ -851,8 +865,8 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_NUMBER,
-        "System.Int64/System.Double",
+        O2_INT64,
+        "System.Int64",
         handle_msbuild
     ),
     intrinsic!(
@@ -861,8 +875,8 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_NUMBER,
-        "System.Int64/System.Double",
+        O2_INT64,
+        "System.Int64",
         handle_msbuild
     ),
     intrinsic!(
@@ -871,8 +885,8 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_NUMBER,
-        "System.Int64/System.Double",
+        O2_INT64,
+        "System.Int64",
         handle_msbuild
     ),
     intrinsic!(
@@ -881,8 +895,8 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_NUMBER,
-        "System.Int64/System.Double",
+        O2_INT64,
+        "System.Int64",
         handle_msbuild
     ),
     intrinsic!(
@@ -891,8 +905,8 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_NUMBER,
-        "System.Int64/System.Double",
+        O2_INT64,
+        "System.Int64",
         handle_msbuild
     ),
     intrinsic!(
@@ -981,7 +995,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Escaped,
         AlreadyEscaped,
-        O1_STRING,
+        O1_STRING_EMPTY_NULL,
         "System.String",
         handle_msbuild
     ),
@@ -1181,7 +1195,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         InstanceMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O_SPLIT,
         "System.String[]",
         handle_string_instance
     ),
@@ -1316,6 +1330,36 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         handle_char_instance
     ),
     intrinsic!(
+        "System.Int16",
+        "CompareTo",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_INT16,
+        "System.Int32",
+        handle_numeric_instance
+    ),
+    intrinsic!(
+        "System.Int16",
+        "Equals",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_INT16,
+        "System.Boolean",
+        handle_numeric_instance
+    ),
+    intrinsic!(
+        "System.Int16",
+        "ToString",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0_1_STRING,
+        "System.String",
+        handle_numeric_instance
+    ),
+    intrinsic!(
         "System.Byte",
         "CompareTo",
         InstanceMethod,
@@ -1361,7 +1405,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.Boolean",
         handle_path
     ),
@@ -1371,7 +1415,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.String",
         handle_path
     ),
@@ -1381,7 +1425,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.String",
         handle_path
     ),
@@ -1391,7 +1435,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.String",
         handle_path
     ),
@@ -1401,7 +1445,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.String",
         handle_path
     ),
@@ -1421,7 +1465,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.String",
         handle_path
     ),
@@ -1431,7 +1475,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING_NULL,
+        O1_STRING,
         "System.Boolean",
         handle_path
     ),
@@ -1537,92 +1581,12 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
     ),
     intrinsic!(
         "System.Math",
-        "Max",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O2_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Min",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O2_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
         "Abs",
         StaticMethod,
         Decoded,
         Escape,
         O_MATH_ABS,
-        "System.Int32/System.Int64/System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Ceiling",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Floor",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Truncate",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Round",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O_ROUND,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Pow",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O2_DOUBLE,
-        "System.Double",
-        handle_math
-    ),
-    intrinsic!(
-        "System.Math",
-        "Sqrt",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Double",
+        "System.Int16/System.Int32/System.Int64",
         handle_math
     ),
     intrinsic!(
@@ -1653,16 +1617,6 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         Escape,
         O_CONVERT_UINT64,
         "System.UInt64",
-        handle_convert
-    ),
-    intrinsic!(
-        "System.Convert",
-        "ToDouble",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O_CONVERT_DOUBLE,
-        "System.Double",
         handle_convert
     ),
     intrinsic!(
@@ -1986,36 +1940,6 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         handle_numeric_instance
     ),
     intrinsic!(
-        "System.Double",
-        "CompareTo",
-        InstanceMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Int32",
-        handle_numeric_instance
-    ),
-    intrinsic!(
-        "System.Double",
-        "Equals",
-        InstanceMethod,
-        Decoded,
-        Escape,
-        O1_DOUBLE,
-        "System.Boolean",
-        handle_numeric_instance
-    ),
-    intrinsic!(
-        "System.Double",
-        "ToString",
-        InstanceMethod,
-        Decoded,
-        Escape,
-        O0,
-        "System.String",
-        handle_numeric_instance
-    ),
-    intrinsic!(
         "System.Boolean",
         "ToString",
         InstanceMethod,
@@ -2234,30 +2158,29 @@ fn coerce_argument(
     }
 
     let result = match coercion {
-        Coercion::Any => (value.clone(), 0),
-        Coercion::RegistryView => (value.clone(), 0),
+        Coercion::Any | Coercion::RegistryView => (value.clone(), 0),
         Coercion::String | Coercion::Path => match value {
             IntrinsicValue::String(value) => (IntrinsicValue::String(value.clone()), 0),
-            IntrinsicValue::Char(value) => (
-                IntrinsicValue::String(String::from_utf16(&[*value]).map_err(|_| {
-                    anyhow!("{member} cannot convert a lone UTF-16 surrogate to String")
-                })?),
-                1,
-            ),
-            _ => (IntrinsicValue::String(value.to_msbuild_string()?), 30),
+            _ => bail!("{member} cannot coerce {} to String", value.type_name()),
         },
-        Coercion::Boolean => match value {
-            IntrinsicValue::Boolean(value) => (IntrinsicValue::Boolean(*value), 0),
+        Coercion::StringArray => match value {
+            IntrinsicValue::Strings(values) => (IntrinsicValue::Strings(values.clone()), 0),
+            _ => bail!(
+                "{member} cannot coerce {} to System.String[]",
+                value.type_name()
+            ),
+        },
+        Coercion::Char => match value {
+            IntrinsicValue::Char(value) => (IntrinsicValue::Char(*value), 0),
             IntrinsicValue::String(value) => {
-                (IntrinsicValue::Boolean(parse_boolean(value, member)?), 20)
+                let mut units = value.encode_utf16();
+                let character = units
+                    .next()
+                    .filter(|_| units.next().is_none())
+                    .ok_or_else(|| anyhow!("{member} requires a single UTF-16 character"))?;
+                (IntrinsicValue::Char(character), 1)
             }
-            IntrinsicValue::Byte(value) => (IntrinsicValue::Boolean(*value != 0), 10),
-            IntrinsicValue::Int16(value) => (IntrinsicValue::Boolean(*value != 0), 10),
-            IntrinsicValue::Int32(value) => (IntrinsicValue::Boolean(*value != 0), 10),
-            IntrinsicValue::Int64(value) => (IntrinsicValue::Boolean(*value != 0), 10),
-            IntrinsicValue::UInt64(value) => (IntrinsicValue::Boolean(*value != 0), 10),
-            IntrinsicValue::Double(value) => (IntrinsicValue::Boolean(*value != 0.0), 10),
-            _ => bail!("{member} cannot coerce {} to Boolean", value.type_name()),
+            _ => bail!("{member} cannot coerce {} to Char", value.type_name()),
         },
         Coercion::Byte => match value {
             IntrinsicValue::Byte(value) => (IntrinsicValue::Byte(*value), 0),
@@ -2265,10 +2188,6 @@ fn coerce_argument(
             IntrinsicValue::Int32(value) => (IntrinsicValue::Byte((*value).try_into()?), 5),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Byte((*value).try_into()?), 6),
             IntrinsicValue::UInt64(value) => (IntrinsicValue::Byte((*value).try_into()?), 6),
-            IntrinsicValue::Double(value) => {
-                let value = checked_f64_to_i64(*value)?;
-                (IntrinsicValue::Byte(value.try_into()?), 8)
-            }
             IntrinsicValue::String(value) => {
                 (IntrinsicValue::Byte(value.trim().parse::<u8>()?), 20)
             }
@@ -2279,10 +2198,6 @@ fn coerce_argument(
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int16(*value), 0),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int16((*value).try_into()?), 5),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int16((*value).try_into()?), 6),
-            IntrinsicValue::UInt64(value) => (IntrinsicValue::Int16((*value).try_into()?), 6),
-            IntrinsicValue::Double(value) => {
-                (IntrinsicValue::Int16(checked_f64_to_i16(*value)?), 8)
-            }
             IntrinsicValue::String(value) => (IntrinsicValue::Int16(parse_decimal_i16(value)?), 20),
             _ => bail!("{member} cannot coerce {} to Int16", value.type_name()),
         },
@@ -2292,8 +2207,6 @@ fn coerce_argument(
                 IntrinsicValue::Int16(value) => (i32::from(*value), 1),
                 IntrinsicValue::Int32(value) => (*value, 0),
                 IntrinsicValue::Int64(value) => ((*value).try_into()?, 5),
-                IntrinsicValue::UInt64(value) => ((*value).try_into()?, 6),
-                IntrinsicValue::Double(value) => (checked_f64_to_i32(*value)?, 8),
                 IntrinsicValue::String(value) => (parse_decimal_i32(value)?, 21),
                 _ => bail!("{member} cannot coerce {} to Int32", value.type_name()),
             };
@@ -2307,10 +2220,6 @@ fn coerce_argument(
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
-            IntrinsicValue::UInt64(value) => (IntrinsicValue::Int64((*value).try_into()?), 6),
-            IntrinsicValue::Double(value) => {
-                (IntrinsicValue::Int64(checked_f64_to_i64(*value)?), 8)
-            }
             IntrinsicValue::String(value) => (IntrinsicValue::Int64(parse_decimal_i64(value)?), 22),
             _ => bail!("{member} cannot coerce {} to Int64", value.type_name()),
         },
@@ -2320,41 +2229,10 @@ fn coerce_argument(
             IntrinsicValue::Int32(value) => (IntrinsicValue::UInt64((*value).try_into()?), 5),
             IntrinsicValue::Int64(value) => (IntrinsicValue::UInt64((*value).try_into()?), 5),
             IntrinsicValue::UInt64(value) => (IntrinsicValue::UInt64(*value), 0),
-            IntrinsicValue::Double(value) => {
-                (IntrinsicValue::UInt64(checked_f64_to_u64(*value)?), 8)
-            }
             IntrinsicValue::String(value) => {
                 (IntrinsicValue::UInt64(parse_decimal_u64(value)?), 23)
             }
             _ => bail!("{member} cannot coerce {} to UInt64", value.type_name()),
-        },
-        Coercion::Double => match value {
-            IntrinsicValue::Byte(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
-            IntrinsicValue::Int16(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
-            IntrinsicValue::Int32(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
-            IntrinsicValue::Int64(value) => (IntrinsicValue::Double(*value as f64), 2),
-            IntrinsicValue::UInt64(value) => (IntrinsicValue::Double(*value as f64), 2),
-            IntrinsicValue::Double(value) => (IntrinsicValue::Double(*value), 0),
-            IntrinsicValue::String(value) => {
-                (IntrinsicValue::Double(parse_invariant_f64(value)?), 24)
-            }
-            _ => bail!("{member} cannot coerce {} to Double", value.type_name()),
-        },
-        Coercion::Number => match value {
-            IntrinsicValue::Byte(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
-            IntrinsicValue::Int16(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
-            IntrinsicValue::Int32(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
-            IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
-            IntrinsicValue::UInt64(value) => (IntrinsicValue::Int64((*value).try_into()?), 1),
-            IntrinsicValue::Double(value) => (IntrinsicValue::Double(*value), 0),
-            IntrinsicValue::String(value) => {
-                if let Ok(value) = parse_decimal_i64(value) {
-                    (IntrinsicValue::Int64(value), 20)
-                } else {
-                    (IntrinsicValue::Double(parse_invariant_f64(value)?), 20)
-                }
-            }
-            _ => bail!("{member} cannot coerce {} to Number", value.type_name()),
         },
         Coercion::Version => match value {
             IntrinsicValue::Version(value) => (IntrinsicValue::Version(value.clone()), 0),
@@ -2363,6 +2241,31 @@ fn coerce_argument(
             }
             _ => bail!("{member} cannot coerce {} to Version", value.type_name()),
         },
+        Coercion::ExactBoolean => match value {
+            IntrinsicValue::Boolean(value) => (IntrinsicValue::Boolean(*value), 0),
+            _ => bail!("{member} requires a typed Boolean argument"),
+        },
+        Coercion::ExactByte => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Byte(*value), 0),
+            _ => bail!("{member} requires a typed Byte argument"),
+        },
+        Coercion::ExactInt16 => match value {
+            IntrinsicValue::Int16(value) => (IntrinsicValue::Int16(*value), 0),
+            _ => bail!("{member} requires a typed Int16 argument"),
+        },
+        Coercion::ExactInt32 => match value {
+            IntrinsicValue::Int32(value) => (IntrinsicValue::Int32(*value), 0),
+            _ => bail!("{member} requires a typed Int32 argument"),
+        },
+        Coercion::ExactInt64 => match value {
+            IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
+            _ => bail!("{member} requires a typed Int64 argument"),
+        },
+        Coercion::ExactUInt64 => match value {
+            IntrinsicValue::UInt64(value) => (IntrinsicValue::UInt64(*value), 0),
+            _ => bail!("{member} requires a typed UInt64 argument"),
+        },
+        Coercion::SignedRadixValue => (coerce_signed_radix_value(value, member)?, 0),
     };
     Ok(result)
 }
@@ -2387,13 +2290,30 @@ fn handle_string_static(
             _ => false,
         }))
     } else if operation == member_code("Join") {
-        let separator = argument_string(&arguments[0], descriptor.member)?;
+        let separator = match &arguments[0].value {
+            IntrinsicValue::String(value) => value.clone(),
+            IntrinsicValue::Char(value) => String::from_utf16(&[*value])
+                .map_err(|_| anyhow!("String.Join separator is a lone UTF-16 surrogate"))?,
+            value => bail!(
+                "String.Join requires a String or Char separator, found {}",
+                value.type_name()
+            ),
+        };
+        if let [
+            _,
+            IntrinsicArgument {
+                value: IntrinsicValue::Strings(values),
+            },
+        ] = arguments
+        {
+            return Ok(IntrinsicValue::String(values.join(&separator)));
+        }
         Ok(IntrinsicValue::String(
             arguments[1..]
                 .iter()
                 .map(|argument| argument_string(argument, descriptor.member))
                 .collect::<Result<Vec<_>>>()?
-                .join(separator),
+                .join(&separator),
         ))
     } else if operation == member_code("CompareOrdinal") {
         let left = argument_optional_string(&arguments[0], descriptor.member)?;
@@ -2483,11 +2403,20 @@ fn handle_string_instance(
             receiver.replace(old, argument_string(&arguments[1], member)?),
         ))
     } else if operation == member_code("Split") {
-        let separators = match &arguments[0].value {
-            IntrinsicValue::Null => None,
-            IntrinsicValue::String(value) if value.is_empty() => None,
-            IntrinsicValue::String(value) => Some(value.as_str()),
-            _ => bail!("String.Split requires a string separator"),
+        let separator_storage;
+        let separators = match arguments.first().map(|argument| &argument.value) {
+            None => None,
+            Some(IntrinsicValue::String(value)) if value.is_empty() => None,
+            Some(IntrinsicValue::String(value)) => Some(value.as_str()),
+            Some(IntrinsicValue::Char(value)) => {
+                separator_storage = String::from_utf16(&[*value])
+                    .map_err(|_| anyhow!("String.Split separator is a lone UTF-16 surrogate"))?;
+                Some(separator_storage.as_str())
+            }
+            Some(value) => bail!(
+                "String.Split requires a String or Char separator, found {}",
+                value.type_name()
+            ),
         };
         if separators.is_some_and(|value| value.chars().any(|character| character.len_utf16() > 1))
         {
@@ -3245,75 +3174,26 @@ fn ensure_trailing_separator(mut value: String) -> String {
 }
 
 fn handle_math(
-    descriptor: &IntrinsicDescriptor,
+    _: &IntrinsicDescriptor,
     _: &IntrinsicContext<'_>,
     _: Option<&IntrinsicValue>,
     arguments: &[IntrinsicArgument],
 ) -> Result<IntrinsicValue> {
-    let member = descriptor.member;
-    let operation = descriptor.dispatch_code;
-    if operation == member_code("Abs") {
-        return match &arguments[0].value {
-            IntrinsicValue::Int32(value) => value
-                .checked_abs()
-                .map(IntrinsicValue::Int32)
-                .ok_or_else(|| anyhow!("System.Math.Abs overflowed its Int32 argument")),
-            IntrinsicValue::Int64(value) => value
-                .checked_abs()
-                .map(IntrinsicValue::Int64)
-                .ok_or_else(|| anyhow!("System.Math.Abs overflowed its Int64 argument")),
-            IntrinsicValue::Double(value) => Ok(IntrinsicValue::Double(value.abs())),
-            _ => bail!("System.Math.Abs received a nonnumeric coerced argument"),
-        };
+    match &arguments[0].value {
+        IntrinsicValue::Int16(value) => value
+            .checked_abs()
+            .map(IntrinsicValue::Int16)
+            .ok_or_else(|| anyhow!("System.Math.Abs overflowed its Int16 argument")),
+        IntrinsicValue::Int32(value) => value
+            .checked_abs()
+            .map(IntrinsicValue::Int32)
+            .ok_or_else(|| anyhow!("System.Math.Abs overflowed its Int32 argument")),
+        IntrinsicValue::Int64(value) => value
+            .checked_abs()
+            .map(IntrinsicValue::Int64)
+            .ok_or_else(|| anyhow!("System.Math.Abs overflowed its Int64 argument")),
+        _ => bail!("System.Math.Abs received a nonintegral coerced argument"),
     }
-    let left = argument_f64(&arguments[0], member)?;
-    let value = if operation == member_code("Max") {
-        let right = argument_f64(&arguments[1], member)?;
-        if left.is_nan() {
-            left
-        } else if right.is_nan() {
-            right
-        } else {
-            left.max(right)
-        }
-    } else if operation == member_code("Min") {
-        let right = argument_f64(&arguments[1], member)?;
-        if left.is_nan() {
-            left
-        } else if right.is_nan() {
-            right
-        } else {
-            left.min(right)
-        }
-    } else if operation == member_code("Ceiling") {
-        left.ceil()
-    } else if operation == member_code("Floor") {
-        left.floor()
-    } else if operation == member_code("Truncate") {
-        left.trunc()
-    } else if operation == member_code("Round") {
-        if let Some(digits) = arguments.get(1) {
-            let digits = argument_i32(digits, member)?;
-            if !(0..=15).contains(&digits) {
-                bail!("System.Math.Round digits must be between 0 and 15");
-            }
-            if left.abs() < 1e16 {
-                let factor = 10f64.powi(digits);
-                (left * factor).round_ties_even() / factor
-            } else {
-                left
-            }
-        } else {
-            left.round_ties_even()
-        }
-    } else if operation == member_code("Pow") {
-        left.powf(argument_f64(&arguments[1], member)?)
-    } else if operation == member_code("Sqrt") {
-        left.sqrt()
-    } else {
-        unreachable!("all registered math members are handled")
-    };
-    Ok(IntrinsicValue::Double(value))
 }
 
 fn handle_environment(
@@ -3354,15 +3234,19 @@ fn handle_environment(
     }
 }
 
-fn environment_key(name: &str) -> String {
-    if cfg!(windows) {
-        name.to_ascii_uppercase()
+fn environment_key_for_platform(name: &str, windows_case_insensitive: bool) -> Vec<u16> {
+    if windows_case_insensitive {
+        dotnet_ordinal_ignore_case_key(name)
     } else {
-        name.to_string()
+        name.encode_utf16().collect()
     }
 }
 
-fn environment_snapshot(context: &IntrinsicContext<'_>) -> HashMap<String, String> {
+fn environment_key(name: &str) -> Vec<u16> {
+    environment_key_for_platform(name, cfg!(windows))
+}
+
+fn environment_snapshot(context: &IntrinsicContext<'_>) -> HashMap<Vec<u16>, String> {
     if let Some(environment) = context.environment {
         return environment
             .iter()
@@ -3379,7 +3263,15 @@ fn environment_snapshot(context: &IntrinsicContext<'_>) -> HashMap<String, Strin
         .collect()
 }
 
-fn expand_environment_variables(input: &str, environment: &HashMap<String, String>) -> String {
+fn expand_environment_variables(input: &str, environment: &HashMap<Vec<u16>, String>) -> String {
+    expand_environment_variables_for_platform(input, environment, cfg!(windows))
+}
+
+fn expand_environment_variables_for_platform(
+    input: &str,
+    environment: &HashMap<Vec<u16>, String>,
+    windows_case_insensitive: bool,
+) -> String {
     let mut output = String::with_capacity(input.len());
     let mut last_position = 0;
     while last_position < input.len() {
@@ -3394,7 +3286,10 @@ fn expand_environment_variables(input: &str, environment: &HashMap<String, Strin
         let position = search_start + relative_position;
         if next_character == '%' {
             let name = &input[search_start..position];
-            if let Some(value) = environment.get(&environment_key(name)) {
+            if let Some(value) = environment.get(&environment_key_for_platform(
+                name,
+                windows_case_insensitive,
+            )) {
                 output.push_str(value);
                 last_position = position + 1;
                 continue;
@@ -3437,8 +3332,6 @@ fn handle_convert(
         } else {
             convert_to_u64(&arguments[0].value)?
         }))
-    } else if operation == member_code("ToDouble") {
-        Ok(IntrinsicValue::Double(convert_to_f64(&arguments[0].value)?))
     } else if operation == member_code("ToBoolean") {
         Ok(IntrinsicValue::Boolean(convert_to_bool(
             &arguments[0].value,
@@ -3731,15 +3624,22 @@ fn handle_msbuild(
             find_file_above(
                 argument_string(&arguments[0], member)?,
                 argument_string(&arguments[1], member)?,
-            )
+            )?
             .and_then(|path| path.parent().map(display_path))
             .unwrap_or_default(),
         ))
     } else if operation == member_code("GetPathOfFileAbove") {
-        let file_name =
-            path_get_file_name(host_path_style(), argument_string(&arguments[0], member)?);
+        let file_name = argument_string(&arguments[0], member)?;
+        if file_name
+            .bytes()
+            .any(|byte| path_is_separator(host_path_style(), byte))
+        {
+            bail!(
+                "GetPathOfFileAbove file name '{file_name}' cannot include a directory separator"
+            );
+        }
         Ok(IntrinsicValue::String(
-            find_file_above(argument_string(&arguments[1], member)?, file_name)
+            find_file_above(argument_string(&arguments[1], member)?, file_name)?
                 .map(|path| display_path(&path))
                 .unwrap_or_default(),
         ))
@@ -3849,44 +3749,28 @@ fn arithmetic(
 ) -> Result<IntrinsicValue> {
     let member = descriptor.member;
     let operation = descriptor.dispatch_code;
-    if arguments.iter().all(is_integer_argument) {
-        let left = argument_i64(&arguments[0], member)?;
-        let right = argument_i64(&arguments[1], member)?;
-        let value = if operation == member_code("Add") {
-            left.wrapping_add(right)
-        } else if operation == member_code("Subtract") {
-            left.wrapping_sub(right)
-        } else if operation == member_code("Multiply") {
-            left.wrapping_mul(right)
-        } else {
-            if right == 0 {
-                bail!("{member} divided by zero");
-            }
-            if left == i64::MIN && right == -1 {
-                bail!("{member} overflowed");
-            }
-            if operation == member_code("Divide") {
-                left / right
-            } else {
-                left % right
-            }
-        };
-        return Ok(IntrinsicValue::Int64(value));
-    }
-    let left = argument_f64(&arguments[0], member)?;
-    let right = argument_f64(&arguments[1], member)?;
+    let left = argument_i64(&arguments[0], member)?;
+    let right = argument_i64(&arguments[1], member)?;
     let value = if operation == member_code("Add") {
-        left + right
+        left.wrapping_add(right)
     } else if operation == member_code("Subtract") {
-        left - right
+        left.wrapping_sub(right)
     } else if operation == member_code("Multiply") {
-        left * right
-    } else if operation == member_code("Divide") {
-        left / right
+        left.wrapping_mul(right)
     } else {
-        left % right
+        if right == 0 {
+            bail!("{member} divided by zero");
+        }
+        if left == i64::MIN && right == -1 {
+            bail!("{member} overflowed");
+        }
+        if operation == member_code("Divide") {
+            left / right
+        } else {
+            left % right
+        }
     };
-    Ok(IntrinsicValue::Double(value))
+    Ok(IntrinsicValue::Int64(value))
 }
 
 fn registry_intrinsic(
@@ -4121,13 +4005,21 @@ fn does_task_host_exist(
 
 fn substring_by_ascii_chars(arguments: &[IntrinsicArgument]) -> Result<IntrinsicValue> {
     let input = argument_string(&arguments[0], "SubstringByAsciiChars")?;
-    let start = argument_usize(&arguments[1], "SubstringByAsciiChars")?;
-    let requested_length = argument_usize(&arguments[2], "SubstringByAsciiChars")?;
+    let start_i32 = argument_i32(&arguments[1], "SubstringByAsciiChars")?;
+    let length_i32 = argument_i32(&arguments[2], "SubstringByAsciiChars")?;
+    let start =
+        usize::try_from(start_i32).context("SubstringByAsciiChars start must be nonnegative")?;
+    usize::try_from(length_i32).context("SubstringByAsciiChars length must be nonnegative")?;
     let units = input.encode_utf16().collect::<Vec<_>>();
     if start > units.len() {
         return Ok(IntrinsicValue::String(String::new()));
     }
-    let end = start.saturating_add(requested_length).min(units.len());
+    let end = start_i32
+        .checked_add(length_i32)
+        .ok_or_else(|| anyhow!("SubstringByAsciiChars start plus length overflowed Int32"))?;
+    let end = usize::try_from(end)
+        .expect("nonnegative Int32 inputs have a nonnegative checked sum")
+        .min(units.len());
     let mut output = String::with_capacity(end - start);
     for unit in &units[start..end] {
         let is_valid = (32..=126).contains(unit)
@@ -4178,16 +4070,6 @@ fn argument_optional_string<'a>(
     }
 }
 
-fn is_integer_argument(argument: &IntrinsicArgument) -> bool {
-    matches!(
-        &argument.value,
-        IntrinsicValue::Byte(_)
-            | IntrinsicValue::Int16(_)
-            | IntrinsicValue::Int32(_)
-            | IntrinsicValue::Int64(_)
-    )
-}
-
 fn argument_i32(argument: &IntrinsicArgument, member: &str) -> Result<i32> {
     match &argument.value {
         IntrinsicValue::Byte(value) => Ok(i32::from(*value)),
@@ -4221,21 +4103,6 @@ fn argument_usize(argument: &IntrinsicArgument, member: &str) -> Result<usize> {
     value
         .try_into()
         .with_context(|| format!("{member} argument '{value}' is not a nonnegative index"))
-}
-
-fn argument_f64(argument: &IntrinsicArgument, member: &str) -> Result<f64> {
-    match &argument.value {
-        IntrinsicValue::Byte(value) => Ok(f64::from(*value)),
-        IntrinsicValue::Int16(value) => Ok(f64::from(*value)),
-        IntrinsicValue::Int32(value) => Ok(f64::from(*value)),
-        IntrinsicValue::Int64(value) => Ok(*value as f64),
-        IntrinsicValue::UInt64(value) => Ok(*value as f64),
-        IntrinsicValue::Double(value) => Ok(*value),
-        _ => bail!(
-            "{member} requires a numeric argument, found {}",
-            argument.value.type_name()
-        ),
-    }
 }
 
 fn parse_boolean(value: &str, member: &str) -> Result<bool> {
@@ -4290,59 +4157,36 @@ fn parse_decimal_u64(value: &str) -> Result<u64> {
         .with_context(|| format!("'{value}' is outside the UInt64 range"))
 }
 
-fn parse_invariant_f64(value: &str) -> Result<f64> {
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("nan") {
-        return Ok(f64::NAN);
-    }
-    if value.eq_ignore_ascii_case("infinity") || value.eq_ignore_ascii_case("+infinity") {
-        return Ok(f64::INFINITY);
-    }
-    if value.eq_ignore_ascii_case("-infinity") {
-        return Ok(f64::NEG_INFINITY);
-    }
-    value
-        .parse()
-        .with_context(|| format!("'{value}' is not an invariant Double"))
-}
-
-fn checked_f64_to_i16(value: f64) -> Result<i16> {
-    let value = checked_rounded_f64(value, f64::from(i16::MIN), f64::from(i16::MAX) + 1.0)?;
-    Ok(value as i16)
-}
-
-fn checked_f64_to_i32(value: f64) -> Result<i32> {
-    let value = checked_rounded_f64(value, f64::from(i32::MIN), f64::from(i32::MAX) + 1.0)?;
-    Ok(value as i32)
-}
-
-fn checked_f64_to_i64(value: f64) -> Result<i64> {
-    let value = checked_rounded_f64(value, -(2f64.powi(63)), 2f64.powi(63))?;
-    Ok(value as i64)
-}
-
-fn checked_f64_to_u64(value: f64) -> Result<u64> {
-    let value = checked_rounded_f64(value, 0.0, 2f64.powi(64))?;
-    Ok(value as u64)
-}
-
-fn checked_rounded_f64(value: f64, minimum: f64, maximum_exclusive: f64) -> Result<f64> {
-    let value = value.round_ties_even();
-    if !value.is_finite() || value < minimum || value >= maximum_exclusive {
-        bail!("Double value is outside the requested integral range");
-    }
-    Ok(value)
+fn coerce_signed_radix_value(value: &IntrinsicValue, member: &str) -> Result<IntrinsicValue> {
+    let value = match value {
+        IntrinsicValue::Byte(value) => i64::from(*value),
+        IntrinsicValue::Int16(value) => i64::from(*value),
+        IntrinsicValue::Int32(value) => i64::from(*value),
+        IntrinsicValue::Int64(value) => *value,
+        IntrinsicValue::String(value) => parse_decimal_i64(value)?,
+        _ => bail!(
+            "{member} radix overload requires a signed integer, found {}",
+            value.type_name()
+        ),
+    };
+    Ok(if let Ok(value) = i16::try_from(value) {
+        IntrinsicValue::Int16(value)
+    } else if let Ok(value) = i32::try_from(value) {
+        IntrinsicValue::Int32(value)
+    } else {
+        IntrinsicValue::Int64(value)
+    })
 }
 
 fn convert_to_i32(value: &IntrinsicValue) -> Result<i32> {
     match value {
         IntrinsicValue::String(value) => parse_decimal_i32(value),
         IntrinsicValue::Boolean(value) => Ok(if *value { 1 } else { 0 }),
+        IntrinsicValue::Byte(value) => Ok(i32::from(*value)),
         IntrinsicValue::Int16(value) => Ok(i32::from(*value)),
         IntrinsicValue::Int32(value) => Ok(*value),
         IntrinsicValue::Int64(value) => Ok((*value).try_into()?),
         IntrinsicValue::UInt64(value) => Ok((*value).try_into()?),
-        IntrinsicValue::Double(value) => checked_f64_to_i32(*value),
         IntrinsicValue::Null => bail!("Convert.ToInt32(null) is ambiguous"),
         _ => bail!("Convert.ToInt32 does not support {}", value.type_name()),
     }
@@ -4352,11 +4196,11 @@ fn convert_to_i64(value: &IntrinsicValue) -> Result<i64> {
     match value {
         IntrinsicValue::String(value) => parse_decimal_i64(value),
         IntrinsicValue::Boolean(value) => Ok(if *value { 1 } else { 0 }),
+        IntrinsicValue::Byte(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int16(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int32(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int64(value) => Ok(*value),
         IntrinsicValue::UInt64(value) => Ok((*value).try_into()?),
-        IntrinsicValue::Double(value) => checked_f64_to_i64(*value),
         IntrinsicValue::Null => bail!("Convert.ToInt64(null) is ambiguous"),
         _ => bail!("Convert.ToInt64 does not support {}", value.type_name()),
     }
@@ -4366,27 +4210,13 @@ fn convert_to_u64(value: &IntrinsicValue) -> Result<u64> {
     match value {
         IntrinsicValue::String(value) => parse_decimal_u64(value),
         IntrinsicValue::Boolean(value) => Ok(if *value { 1 } else { 0 }),
+        IntrinsicValue::Byte(value) => Ok(u64::from(*value)),
         IntrinsicValue::Int16(value) => Ok((*value).try_into()?),
         IntrinsicValue::Int32(value) => Ok((*value).try_into()?),
         IntrinsicValue::Int64(value) => Ok((*value).try_into()?),
         IntrinsicValue::UInt64(value) => Ok(*value),
-        IntrinsicValue::Double(value) => checked_f64_to_u64(*value),
         IntrinsicValue::Null => bail!("Convert.ToUInt64(null) is ambiguous"),
         _ => bail!("Convert.ToUInt64 does not support {}", value.type_name()),
-    }
-}
-
-fn convert_to_f64(value: &IntrinsicValue) -> Result<f64> {
-    match value {
-        IntrinsicValue::String(value) => parse_invariant_f64(value),
-        IntrinsicValue::Boolean(value) => Ok(if *value { 1.0 } else { 0.0 }),
-        IntrinsicValue::Int16(value) => Ok(f64::from(*value)),
-        IntrinsicValue::Int32(value) => Ok(f64::from(*value)),
-        IntrinsicValue::Int64(value) => Ok(*value as f64),
-        IntrinsicValue::UInt64(value) => Ok(*value as f64),
-        IntrinsicValue::Double(value) => Ok(*value),
-        IntrinsicValue::Null => bail!("Convert.ToDouble(null) is ambiguous"),
-        _ => bail!("Convert.ToDouble does not support {}", value.type_name()),
     }
 }
 
@@ -4394,11 +4224,11 @@ fn convert_to_bool(value: &IntrinsicValue, member: &str) -> Result<bool> {
     match value {
         IntrinsicValue::String(value) => parse_boolean(value, member),
         IntrinsicValue::Boolean(value) => Ok(*value),
+        IntrinsicValue::Byte(value) => Ok(*value != 0),
         IntrinsicValue::Int16(value) => Ok(*value != 0),
         IntrinsicValue::Int32(value) => Ok(*value != 0),
         IntrinsicValue::Int64(value) => Ok(*value != 0),
         IntrinsicValue::UInt64(value) => Ok(*value != 0),
-        IntrinsicValue::Double(value) => Ok(*value != 0.0),
         IntrinsicValue::Null => bail!("Convert.ToBoolean(null) is ambiguous"),
         _ => bail!("Convert.ToBoolean does not support {}", value.type_name()),
     }
@@ -4482,21 +4312,10 @@ fn format_radix(value: &IntrinsicValue, radix: i32) -> Result<String> {
 fn numeric_compare(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<Ordering> {
     match (left, right) {
         (IntrinsicValue::Byte(left), IntrinsicValue::Byte(right)) => Ok(left.cmp(right)),
+        (IntrinsicValue::Int16(left), IntrinsicValue::Int16(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::Int32(left), IntrinsicValue::Int32(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::Int64(left), IntrinsicValue::Int64(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::UInt64(left), IntrinsicValue::UInt64(right)) => Ok(left.cmp(right)),
-        (IntrinsicValue::Double(left), IntrinsicValue::Double(right)) => {
-            Ok(if left.is_nan() && right.is_nan() {
-                Ordering::Equal
-            } else if left.is_nan() {
-                Ordering::Less
-            } else if right.is_nan() {
-                Ordering::Greater
-            } else {
-                left.partial_cmp(right)
-                    .ok_or_else(|| anyhow!("Double values could not be compared"))?
-            })
-        }
         _ => bail!("Numeric CompareTo received mismatched coerced types"),
     }
 }
@@ -4504,12 +4323,10 @@ fn numeric_compare(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<Orde
 fn numeric_equals(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<bool> {
     Ok(match (left, right) {
         (IntrinsicValue::Byte(left), IntrinsicValue::Byte(right)) => left == right,
+        (IntrinsicValue::Int16(left), IntrinsicValue::Int16(right)) => left == right,
         (IntrinsicValue::Int32(left), IntrinsicValue::Int32(right)) => left == right,
         (IntrinsicValue::Int64(left), IntrinsicValue::Int64(right)) => left == right,
         (IntrinsicValue::UInt64(left), IntrinsicValue::UInt64(right)) => left == right,
-        (IntrinsicValue::Double(left), IntrinsicValue::Double(right)) => {
-            left == right || (left.is_nan() && right.is_nan())
-        }
         _ => bail!("Numeric Equals received mismatched coerced types"),
     })
 }
@@ -4540,6 +4357,7 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
     if matches!(specifier, 'D' | 'd') {
         let (negative, magnitude) = match value {
             IntrinsicValue::Byte(value) => (false, u64::from(*value)),
+            IntrinsicValue::Int16(value) => (*value < 0, u64::from(value.unsigned_abs())),
             IntrinsicValue::Int32(value) => (*value < 0, u64::from(value.unsigned_abs())),
             IntrinsicValue::Int64(value) => (*value < 0, value.unsigned_abs()),
             IntrinsicValue::UInt64(value) => (false, *value),
@@ -4556,6 +4374,7 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
     if matches!(specifier, 'X' | 'x') {
         let integer = match value {
             IntrinsicValue::Byte(value) => u64::from(*value),
+            IntrinsicValue::Int16(value) => u64::from(*value as u16),
             IntrinsicValue::Int32(value) => u64::from(*value as u32),
             IntrinsicValue::Int64(value) => *value as u64,
             IntrinsicValue::UInt64(value) => *value,
@@ -4570,58 +4389,6 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
     bail!("MSB4184: Unsupported numeric format '{format}'")
 }
 
-fn format_double(value: f64) -> Result<String> {
-    if value.is_nan() {
-        return Ok("NaN".to_string());
-    }
-    if value == f64::INFINITY {
-        return Ok("Infinity".to_string());
-    }
-    if value == f64::NEG_INFINITY {
-        return Ok("-Infinity".to_string());
-    }
-    if value == 0.0 {
-        return Ok(if value.is_sign_negative() { "-0" } else { "0" }.to_string());
-    }
-
-    let exponent = value.abs().log10().floor() as i32;
-    if !(-4..17).contains(&exponent) {
-        let scientific = format!("{value:e}");
-        let (mantissa, exponent) = scientific
-            .split_once('e')
-            .ok_or_else(|| anyhow!("Rust produced an invalid scientific Double"))?;
-        let exponent: i32 = exponent.parse()?;
-        return Ok(format!("{mantissa}E{exponent:+03}"));
-    }
-
-    let text = value.to_string();
-    if let Some((mantissa, exponent)) = text.split_once('e') {
-        let exponent: i32 = exponent.parse()?;
-        return expand_scientific(mantissa, exponent);
-    }
-    Ok(text)
-}
-
-fn expand_scientific(mantissa: &str, exponent: i32) -> Result<String> {
-    let (sign, mantissa) = mantissa
-        .strip_prefix('-')
-        .map_or(("", mantissa), |value| ("-", value));
-    let decimal = mantissa.find('.').unwrap_or(mantissa.len());
-    let digits = mantissa.replace('.', "");
-    let decimal = i32::try_from(decimal)? + exponent;
-    let result = if decimal <= 0 {
-        format!("{sign}0.{}{digits}", "0".repeat(usize::try_from(-decimal)?))
-    } else {
-        let decimal = usize::try_from(decimal)?;
-        if decimal >= digits.len() {
-            format!("{sign}{digits}{}", "0".repeat(decimal - digits.len()))
-        } else {
-            format!("{sign}{}.{}", &digits[..decimal], &digits[decimal..])
-        }
-    };
-    Ok(result)
-}
-
 fn invariant_case(value: &str, uppercase: bool) -> String {
     let mapper = CaseMapper::new();
     value
@@ -4634,6 +4401,24 @@ fn invariant_case(value: &str, uppercase: bool) -> String {
             }
         })
         .collect()
+}
+
+pub(crate) fn dotnet_ordinal_ignore_case_key(value: &str) -> Vec<u16> {
+    let mut key = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        let folded = if matches!(character, '\u{131}' | '\u{17f}') {
+            character
+        } else {
+            let mut uppercase = character.to_uppercase();
+            match (uppercase.next(), uppercase.next()) {
+                (Some(single), None) => single,
+                _ => character,
+            }
+        };
+        let mut units = [0; 2];
+        key.extend_from_slice(folded.encode_utf16(&mut units));
+    }
+    key
 }
 
 fn compare_ordinal(left: &str, right: &str) -> i32 {
@@ -4658,70 +4443,42 @@ fn compare_ordinal(left: &str, right: &str) -> i32 {
 
 fn parse_guid(value: &str) -> Result<Uuid> {
     let value = value.trim();
-    if !value.starts_with("{0x") && !value.starts_with("{0X") {
-        let valid_shape = (value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            || (value.len() == 36
-                && value.bytes().enumerate().all(|(index, byte)| match index {
+    let compact = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    if compact.starts_with("{0x") || compact.starts_with("{0X") {
+        bail!(
+            "System.Guid X parsing is outside the native surface; X formatting remains supported"
+        );
+    }
+    let valid_shape = (value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || (value.len() == 36
+            && value.bytes().enumerate().all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            }))
+        || ((value.starts_with('{') && value.ends_with('}'))
+            || (value.starts_with('(') && value.ends_with(')')))
+            && value.len() == 38
+            && value[1..value.len() - 1]
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| match index {
                     8 | 13 | 18 | 23 => byte == b'-',
                     _ => byte.is_ascii_hexdigit(),
-                }))
-            || ((value.starts_with('{') && value.ends_with('}'))
-                || (value.starts_with('(') && value.ends_with(')')))
-                && value.len() == 38
-                && value[1..value.len() - 1]
-                    .bytes()
-                    .enumerate()
-                    .all(|(index, byte)| match index {
-                        8 | 13 | 18 | 23 => byte == b'-',
-                        _ => byte.is_ascii_hexdigit(),
-                    });
-        if !valid_shape {
-            bail!("Value is not in a supported Guid N, D, B, P, or X grammar");
-        }
-        let value = if (value.starts_with('{') && value.ends_with('}'))
-            || (value.starts_with('(') && value.ends_with(')'))
-        {
-            &value[1..value.len() - 1]
-        } else {
-            value
-        };
-        return Uuid::parse_str(value).map_err(Into::into);
+                });
+    if !valid_shape {
+        bail!("Value is not in the retained Guid N, D, B, or P grammar");
     }
-    let inner = value
-        .strip_prefix('{')
-        .and_then(|value| value.strip_suffix('}'))
-        .ok_or_else(|| anyhow!("Invalid Guid X format"))?;
-    let (head, bytes) = inner
-        .split_once(",{")
-        .ok_or_else(|| anyhow!("Invalid Guid X format"))?;
-    let bytes = bytes
-        .strip_suffix('}')
-        .ok_or_else(|| anyhow!("Invalid Guid X byte group"))?;
-    let head = head.split(',').collect::<Vec<_>>();
-    let bytes = bytes.split(',').collect::<Vec<_>>();
-    if head.len() != 3 || bytes.len() != 8 {
-        bail!("Invalid Guid X component count");
-    }
-    let a = parse_prefixed_hex(head[0], 8)? as u32;
-    let b = parse_prefixed_hex(head[1], 4)? as u16;
-    let c = parse_prefixed_hex(head[2], 4)? as u16;
-    let mut d = [0u8; 8];
-    for (target, source) in d.iter_mut().zip(bytes) {
-        *target = parse_prefixed_hex(source, 2)? as u8;
-    }
-    Ok(Uuid::from_fields(a, b, c, &d))
-}
-
-fn parse_prefixed_hex(value: &str, digits: usize) -> Result<u64> {
-    let value = value.trim();
-    let value = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .ok_or_else(|| anyhow!("Guid X component is missing its 0x prefix"))?;
-    if value.len() != digits || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("Guid X component must contain exactly {digits} hexadecimal digits");
-    }
-    Ok(u64::from_str_radix(value, 16)?)
+    let value = if (value.starts_with('{') && value.ends_with('}'))
+        || (value.starts_with('(') && value.ends_with(')'))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    Uuid::parse_str(value).map_err(Into::into)
 }
 
 fn utf16_substring(value: &str, start: usize, length: Option<usize>) -> Result<String> {
@@ -4868,18 +4625,18 @@ fn make_relative(base: &str, path: &str) -> Result<String> {
     )
 }
 
-fn find_file_above(start: &str, file_name: &str) -> Option<PathBuf> {
-    let mut directory = PathBuf::from(fix_file_path(start));
+fn find_file_above(start: &str, file_name: &str) -> Result<Option<PathBuf>> {
+    let mut directory = PathBuf::from(host_get_full_path(&fix_file_path(start), None)?);
     if directory.is_file() {
         directory.pop();
     }
     loop {
         let candidate = directory.join(file_name);
         if candidate.is_file() {
-            return Some(candidate);
+            return Ok(Some(candidate));
         }
         if !directory.pop() {
-            return None;
+            return Ok(None);
         }
     }
 }
@@ -4945,7 +4702,7 @@ mod tests {
         }
         assert!(allowed_intrinsics().iter().any(|entry| {
             entry.type_name == "System.Math"
-                && entry.member == "Max"
+                && entry.member == "Abs"
                 && entry.kind == InvocationKind::StaticMethod
         }));
         assert!(allowed_intrinsics().iter().all(|entry| {
@@ -5237,10 +4994,10 @@ mod tests {
 
     #[test]
     fn overload_arity_is_deterministic() {
-        let error = resolve("System.Math", "Max", InvocationKind::StaticMethod, 1)
+        let error = resolve("System.Math", "Abs", InvocationKind::StaticMethod, 2)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("no allowlisted overload accepting 1"));
+        assert!(error.contains("no allowlisted overload accepting 2"));
     }
 
     fn call(
@@ -5308,13 +5065,22 @@ mod tests {
         assert_eq!(
             call(
                 "System.Math",
-                "Max",
-                vec![
-                    IntrinsicValue::String("9007199254740992".to_string()),
-                    IntrinsicValue::String("9007199254740993".to_string()),
-                ],
+                "Abs",
+                vec![IntrinsicValue::String("-32769".to_string())],
             )?,
-            IntrinsicValue::Double(9_007_199_254_740_992.0)
+            IntrinsicValue::Int32(32769)
+        );
+        assert!(
+            call(
+                "System.Math",
+                "Abs",
+                vec![IntrinsicValue::String("-32768".to_string())],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            call("System.Math", "Abs", vec![IntrinsicValue::Int64(-32768)],)?,
+            IntrinsicValue::Int64(32768)
         );
         assert_eq!(
             call(
@@ -5357,16 +5123,80 @@ mod tests {
 
     #[test]
     fn null_overload_policy_is_explicit() {
-        for member in ["ToInt32", "ToString"] {
-            let error = call("System.Convert", member, vec![IntrinsicValue::Null])
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("Ambiguous native overload"));
-        }
+        let error = call("System.Convert", "ToString", vec![IntrinsicValue::Null])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Ambiguous native overload"));
+        let error = call("System.Convert", "ToInt32", vec![IntrinsicValue::Null])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No native overload"));
         let copy = call("System.String", "Copy", vec![IntrinsicValue::Null])
             .unwrap_err()
             .to_string();
         assert!(copy.contains("does not accept null"));
+    }
+
+    #[test]
+    fn culture_sensitive_floating_and_convert_members_are_pruned() -> Result<()> {
+        for member in [
+            "Max", "Min", "Ceiling", "Floor", "Truncate", "Round", "Pow", "Sqrt",
+        ] {
+            assert!(
+                !is_allowed("System.Math", member, InvocationKind::StaticMethod),
+                "{member}"
+            );
+        }
+        assert!(!is_allowed(
+            "System.Convert",
+            "ToDouble",
+            InvocationKind::StaticMethod
+        ));
+        assert!(!is_allowed(
+            "System.Double",
+            "ToString",
+            InvocationKind::InstanceMethod
+        ));
+        for value in ["inf", "1.5", "1,5"] {
+            assert!(
+                call(
+                    "MSBuild",
+                    "Add",
+                    vec![
+                        IntrinsicValue::String(value.into()),
+                        IntrinsicValue::String("1".into()),
+                    ],
+                )
+                .is_err(),
+                "{value}"
+            );
+        }
+        assert!(call("System.Math", "Abs", vec![IntrinsicValue::UInt64(1)],).is_err());
+
+        assert!(
+            call(
+                "System.Convert",
+                "ToInt32",
+                vec![IntrinsicValue::String("42".into())],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            call("System.Convert", "ToInt32", vec![IntrinsicValue::Int64(42)],)?,
+            IntrinsicValue::Int32(42)
+        );
+        assert_eq!(
+            call(
+                "System.Convert",
+                "ToString",
+                vec![
+                    IntrinsicValue::Int64(-1),
+                    IntrinsicValue::String("16".into())
+                ],
+            )?,
+            IntrinsicValue::String("ffff".into())
+        );
+        Ok(())
     }
 
     #[test]
@@ -5453,6 +5283,20 @@ mod tests {
             make_relative_with_current(PathStyle::Unix, r"C:\a\b", r"C:\a\c", "/cwd",)?,
             "C:/a/c"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn file_above_resolves_relative_starts_to_lexical_absolute_paths() -> Result<()> {
+        let current = std::env::current_dir()?;
+        let directory = tempfile::tempdir_in(&current)?;
+        let nested = directory.path().join("a").join("b");
+        std::fs::create_dir_all(&nested)?;
+        let marker = directory.path().join("marker.props");
+        std::fs::write(&marker, "<Project />")?;
+        let relative = nested.strip_prefix(&current)?.to_string_lossy();
+
+        assert_eq!(find_file_above(&relative, "marker.props")?, Some(marker));
         Ok(())
     }
 
@@ -5558,6 +5402,23 @@ mod tests {
             } else {
                 "%mixedcase%"
             }
+        );
+
+        let windows_environment = HashMap::from([(
+            environment_key_for_platform("Σ", true),
+            "UNICODE".to_string(),
+        )]);
+        assert_eq!(
+            expand_environment_variables_for_platform("%ς%", &windows_environment, true,),
+            "UNICODE"
+        );
+        assert_ne!(
+            environment_key_for_platform("K", true),
+            environment_key_for_platform("K", true)
+        );
+        assert_ne!(
+            environment_key_for_platform("i", true),
+            environment_key_for_platform("ı", true)
         );
     }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::escaping::{DecodedString, EscapedString, escape, unescape_once};
 use crate::native_functions::{
     ArgumentRule, IntrinsicArgument, IntrinsicContext, IntrinsicValue, InvocationKind, ResultRule,
-    invoke, is_allowed, resolve,
+    dotnet_ordinal_ignore_case_key, invoke, is_allowed, resolve,
 };
 use crate::object_model::{Item, ProjectModel};
 use crate::properties::this_file_property;
@@ -964,11 +964,6 @@ impl<'a> ExpressionEvaluator<'a> {
         // producing a better diagnostic, this guarantees a rejected receiver
         // cannot trigger nested work before it is blocked.
         let descriptor = resolve(type_name, member, kind, raw_arguments.len())?;
-        // These object/default and params-object arguments are the registry
-        // intrinsics' only route for retaining exact nested return types.
-        let preserve_typed_registry_argument = type_name.eq_ignore_ascii_case("MSBuild")
-            && (member.eq_ignore_ascii_case("GetRegistryValue")
-                || member.eq_ignore_ascii_case("GetRegistryValueFromView"));
         let arguments = raw_arguments
             .into_iter()
             .map(|raw| {
@@ -981,19 +976,26 @@ impl<'a> ExpressionEvaluator<'a> {
                     });
                 }
                 let expression = unquote(raw);
-                let evaluated = if preserve_typed_registry_argument
-                    && let Some(outcome) =
-                        self.evaluate_exact_static_function_outcome(&expression, depth + 1)?
+                if let Some(outcome) =
+                    self.evaluate_exact_static_function_outcome(&expression, depth + 1)?
                 {
-                    if !matches!(&outcome.value, IntrinsicValue::String(_)) {
+                    if matches!(&outcome.value, IntrinsicValue::String(_)) {
+                        let evaluated = render_intrinsic(outcome)?;
+                        let value = match descriptor.argument_rule {
+                            ArgumentRule::Decoded => {
+                                EscapedString::new(evaluated).decode().into_string()
+                            }
+                            ArgumentRule::Escaped => evaluated,
+                        };
                         return Ok(IntrinsicArgument {
-                            value: outcome.value,
+                            value: IntrinsicValue::String(value),
                         });
                     }
-                    render_intrinsic(outcome)?
-                } else {
-                    self.evaluate_with_depth(&expression, depth + 1)?
-                };
+                    return Ok(IntrinsicArgument {
+                        value: outcome.value,
+                    });
+                }
+                let evaluated = self.evaluate_with_depth(&expression, depth + 1)?;
                 let value = match descriptor.argument_rule {
                     ArgumentRule::Decoded => EscapedString::new(evaluated).decode().into_string(),
                     ArgumentRule::Escaped => evaluated,
@@ -1380,25 +1382,6 @@ fn ordinal_ignore_case(left: &str, right: &str) -> bool {
     dotnet_ordinal_ignore_case_key(left) == dotnet_ordinal_ignore_case_key(right)
 }
 
-fn dotnet_ordinal_ignore_case_key(value: &str) -> Vec<u16> {
-    let mut key = Vec::with_capacity(value.len());
-    for character in value.chars() {
-        // .NET's ordinal comparer excludes these compatibility folds.
-        let folded = if matches!(character, '\u{131}' | '\u{17f}') {
-            character
-        } else {
-            let mut uppercase = character.to_uppercase();
-            match (uppercase.next(), uppercase.next()) {
-                (Some(single), None) => single,
-                _ => character,
-            }
-        };
-        let mut units = [0; 2];
-        key.extend_from_slice(folded.encode_utf16(&mut units));
-    }
-    key
-}
-
 fn find_matching_parenthesis(input: &str, opening: usize) -> Result<usize> {
     let mut depth = 0usize;
     let mut quote = None;
@@ -1553,6 +1536,7 @@ fn render_intrinsic(outcome: IntrinsicOutcome) -> Result<String> {
     match (outcome.result_rule, outcome.value) {
         (ResultRule::Escape, IntrinsicValue::Strings(values)) => Ok(values
             .into_iter()
+            .skip_while(String::is_empty)
             .map(|value| DecodedString::new(value).into_escaped().into_string())
             .collect::<Vec<_>>()
             .join(";")),
@@ -2296,8 +2280,7 @@ mod tests {
             "0"
         );
         assert_eq!(
-            evaluator
-                .evaluate("$([System.Convert]::ToDouble($([MSBuild]::Add(1,2))).Equals(3.0))")?,
+            evaluator.evaluate("$([System.Convert]::ToInt32($([MSBuild]::Add(1,2))).Equals(3))")?,
             "True"
         );
         assert_eq!(evaluator.evaluate("$(a.Insert(0,'%28'))")?, "%28no");
@@ -2322,7 +2305,10 @@ mod tests {
         let model = ProjectModel::new();
         let evaluator = ExpressionEvaluator::new(&model);
 
-        assert_eq!(evaluator.evaluate("$([system.math]::mAx(1, 2))")?, "2");
+        assert_eq!(
+            evaluator.evaluate("$([system.math]::aBs(-32769))")?,
+            "32769"
+        );
         assert_eq!(
             evaluator.evaluate("$([System.Convert]::ToInt64('28', 16))")?,
             "40"
@@ -2379,20 +2365,11 @@ mod tests {
             ("$([MSBuild]::Multiply(9223372036854775807,2))", "-2"),
             ("$([MSBuild]::LeftShift(1,32))", "1"),
             ("$([MSBuild]::LeftShift(1,-1))", "-2147483648"),
-            ("$([MSBuild]::Divide(1.0,0.0))", "Infinity"),
-            ("$([MSBuild]::Divide(0.0,0.0))", "NaN"),
-            ("$([MSBuild]::Modulo(1.0,0.0))", "NaN"),
-            ("$([System.Math]::Sqrt(-1.0))", "NaN"),
-            ("$([System.Math]::Pow(1.0e308,2.0))", "Infinity"),
-            (
-                "$([System.Math]::Max(9007199254740992,9007199254740993))",
-                "9007199254740992",
-            ),
             ("$([System.Convert]::ToInt32('FFFFFFFF',16))", "-1"),
             ("$([System.Convert]::ToInt64('FFFFFFFFFFFFFFFF',16))", "-1"),
             ("$([System.Convert]::ToString(-1,16))", "ffff"),
             (
-                "$([System.Convert]::ToString($([System.Convert]::ToInt64('-1')),16))",
+                "$([System.Convert]::ToString($([System.Int64]::Parse('-1')),16))",
                 "ffff",
             ),
             ("$([System.IO.Path]::Combine())", ""),
@@ -2402,6 +2379,22 @@ mod tests {
             ("$([System.Version]::new(1,2))", "1.2"),
             ("$([System.Version]::new(1,2,3,4))", "1.2.3.4"),
             ("$([System.String]::Copy('a;b').Split(';'))", "a;b"),
+            (
+                "$([System.String]::Join(',', $([System.String]::Copy('a;b').Split(';'))))",
+                "a,b",
+            ),
+            (
+                "$([System.String]::Join($([System.String]::Copy(',')[0]), $([System.String]::Copy('a;b').Split(';'))))",
+                "a,b",
+            ),
+            (
+                "$([System.String]::Copy('a;b').Split($([System.String]::Copy(';')[0])))",
+                "a;b",
+            ),
+            ("$([System.String]::Copy(';;a;;').Split(';'))", "a;;"),
+            ("$([System.String]::Copy('a;;b;').Split(';'))", "a;;b;"),
+            ("$([System.String]::Copy(';;;').Split(';'))", ""),
+            ("$([System.String]::Copy('a b').Split())", "a;b"),
             ("$(S.Replace('b',null))", "aa"),
             ("$(SharpS.ToUpperInvariant())", "ß"),
             ("$(Sigma.ToLowerInvariant())", "οσ"),
@@ -2422,11 +2415,12 @@ mod tests {
             ("$([System.Int32]::Parse('42').ToString('D4'))", "0042"),
             ("$([System.Int32]::Parse('-1').ToString('X'))", "FFFFFFFF"),
             ("$([MSBuild]::Escape(null))", ""),
+            ("$([MSBuild]::Unescape(null))", ""),
+            ("$([System.String]::Copy($([MSBuild]::Escape(';'))))", "%3B"),
             ("$([MSBuild]::ValueOrDefault(null,'fallback'))", "fallback"),
             ("$([System.String]::IsNullOrEmpty(null))", "True"),
-            ("$([System.IO.Path]::GetFileName(null))", ""),
-            ("$([System.IO.Path]::IsPathRooted(null))", "False"),
             ("$([System.IO.Path]::ChangeExtension(null,'.txt'))", ""),
+            ("$([System.Math]::Abs(-32769))", "32769"),
         ];
         for (expression, expected) in cases {
             assert_eq!(
@@ -2473,7 +2467,17 @@ mod tests {
         let evaluator = ExpressionEvaluator::new(&model);
         for expression in [
             "$([System.String]::Copy(null))",
+            "$([System.String]::Copy($([System.String]::Copy('xy')[0])))",
+            "$([System.String]::Copy('a b').Split(null))",
+            "$([System.String]::Join(null, 'a', 'b'))",
             "$([System.IO.Path]::Combine('a',null))",
+            "$([System.IO.Path]::GetFileName(null))",
+            "$([System.IO.Path]::IsPathRooted(null))",
+            "$([System.IO.Path]::GetDirectoryName(null))",
+            "$([System.IO.Path]::GetFileNameWithoutExtension(null))",
+            "$([System.IO.Path]::GetExtension(null))",
+            "$([System.IO.Path]::GetPathRoot(null))",
+            "$([System.IO.Path]::HasExtension(null))",
             "$(S.Replace('','x'))",
             "$(S.Substring(-1))",
             "$(S.Remove(4))",
@@ -2481,9 +2485,12 @@ mod tests {
             "$(S[0].Length)",
             "$([System.Math]::Abs(-2147483648))",
             "$([System.Math]::Round(1.0,16))",
+            "$([System.Math]::Max(1,2))",
             "$([System.DateTime]::Parse('2023-02-29').ToString('yyyy-MM-dd'))",
             "$([System.DateTime]::Parse('12/25/2010'))",
             "$([System.Guid]::Parse('not-a-guid'))",
+            "$([System.Guid]::Parse('{0x00112233,0x4455,0x6677,{0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff}}'))",
+            "$([System.Guid]::Parse('{ 0x00112233, 0x4455, 0x6677, { 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff } }'))",
             "$([System.Guid]::Empty.ToString('Z'))",
             "$([System.Int32]::Parse('not-an-int'))",
             "$([System.Int32]::Parse('1').ToString('Q'))",
@@ -2493,8 +2500,15 @@ mod tests {
             "$([System.Version]::new(1,2).ToString(3))",
             "$([MSBuild]::Divide(-9223372036854775808,-1))",
             "$([MSBuild]::Modulo(-9223372036854775808,-1))",
+            "$([MSBuild]::Add(1.5,2.0))",
+            "$([MSBuild]::Divide(1.0,0.0))",
             "$([System.Convert]::ToInt32(null))",
+            "$([System.Convert]::ToInt32('42'))",
+            "$([System.Convert]::ToDouble('inf'))",
+            "$([System.Double]::Parse('inf'))",
             "$([System.Convert]::ToString(null))",
+            "$([MSBuild]::SubstringByAsciiChars('abc',1,2147483647))",
+            "$([MSBuild]::GetPathOfFileAbove('sub/file.props','.'))",
             "$([MSBuild]::VersionEquals('garbage','garbage'))",
             "$([MSBuild]::AreFeaturesEnabled('garbage'))",
             "$([MSBuild]::StableStringHash('abc','Fnv1a64bit'))",
@@ -2515,7 +2529,10 @@ mod tests {
         let variable = "MSBUILD_RS_PROPERTY_FUNCTION_BLOCK_TEST";
         let before = std::env::var_os(variable);
 
-        assert_eq!(evaluator.evaluate("$([System.Math]::Max(1, 2))")?, "2");
+        assert_eq!(
+            evaluator.evaluate("$([System.Math]::Abs(-32769))")?,
+            "32769"
+        );
         let error = evaluator
             .evaluate(
                 "$([System.Environment]::SetEnvironmentVariable('MSBUILD_RS_PROPERTY_FUNCTION_BLOCK_TEST', 'x'))",
@@ -2627,7 +2644,7 @@ mod tests {
             ),
         );
         let parent_path = ExpressionEvaluator::new(&model).evaluate(
-            "$([MSBuild]::GetPathOfFileAbove($(MSBuildThisFile), $(MSBuildThisFileDirectory)..))",
+            "$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', $(MSBuildThisFileDirectory)..))",
         )?;
         assert_eq!(
             PathBuf::from(parent_path).canonicalize()?,

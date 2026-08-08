@@ -17,23 +17,42 @@ impl RegistryView {
         // IntrinsicFunctions strips these two prefixes with case-sensitive
         // String.Replace calls, then asks Enum.Parse to match the leaf
         // case-insensitively.
-        let value = value
+        let parsed = value
             .replace("Microsoft.Win32.RegistryView.", "")
             .replace("RegistryView.", "");
-        if value.eq_ignore_ascii_case("Default") {
-            Ok(Self::Default)
-        } else if value.eq_ignore_ascii_case("Registry32") {
-            Ok(Self::Registry32)
-        } else if value.eq_ignore_ascii_case("Registry64") {
-            Ok(Self::Registry64)
-        } else if value == "0" {
-            Ok(Self::Default)
-        } else if value == "512" {
-            Ok(Self::Registry32)
-        } else if value == "256" {
-            Ok(Self::Registry64)
+        let parsed = parsed.trim();
+        let numeric = if !parsed.contains(',') {
+            let digits = parsed.strip_prefix(['+', '-']).unwrap_or(parsed);
+            (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| parsed.parse::<i32>())
+                .transpose()?
         } else {
-            bail!("MSB4184: '{value}' is not a valid Microsoft.Win32.RegistryView value")
+            None
+        };
+        let numeric = numeric.map_or_else(
+            || {
+                parsed.split(',').try_fold(0i32, |combined, name| {
+                    let value = if name.trim().eq_ignore_ascii_case("Default") {
+                        0
+                    } else if name.trim().eq_ignore_ascii_case("Registry32") {
+                        512
+                    } else if name.trim().eq_ignore_ascii_case("Registry64") {
+                        256
+                    } else {
+                        bail!(
+                            "MSB4184: '{value}' is not a valid Microsoft.Win32.RegistryView value"
+                        )
+                    };
+                    Ok(combined | value)
+                })
+            },
+            Ok,
+        )?;
+        match numeric {
+            0 => Ok(Self::Default),
+            512 => Ok(Self::Registry32),
+            256 => Ok(Self::Registry64),
+            _ => bail!("MSB4184: '{value}' is not a valid Microsoft.Win32.RegistryView value"),
         }
     }
 }
@@ -55,6 +74,7 @@ impl RegistryData {
             Self::QWord(value) => value.to_string(),
             Self::MultiString(values) => values
                 .into_iter()
+                .skip_while(String::is_empty)
                 .map(|value| escape(&value))
                 .collect::<Vec<_>>()
                 .join(";"),
@@ -218,57 +238,66 @@ mod windows {
         let value_pointer = value_name
             .as_ref()
             .map_or(ptr::null(), |value| value.as_ptr());
-        let mut kind = 0;
-        let mut byte_count = 0;
-        // SAFETY: all pointers are either null or point to live, nul-terminated
-        // UTF-16 buffers; the first call only asks Windows for the required size.
-        let status = unsafe {
-            RegGetValueW(
-                handle,
-                ptr::null(),
-                value_pointer,
-                RRF_RT_ANY,
-                &mut kind,
-                ptr::null_mut(),
-                &mut byte_count,
-            )
+        let (kind, bytes) = match query_value_bytes(|kind, data, byte_count| {
+            // SAFETY: the key/value pointers remain live, kind and byte_count
+            // point to writable storage, and data is either null for the size
+            // query or points to the byte_count-sized buffer supplied below.
+            unsafe {
+                RegGetValueW(
+                    handle,
+                    ptr::null(),
+                    value_pointer,
+                    RRF_RT_ANY,
+                    kind,
+                    data,
+                    byte_count,
+                )
+            }
+        }) {
+            Ok(value) => value,
+            Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
+                return Ok(RegistryReadResult::ValueMissing);
+            }
+            Err(status) => {
+                return Err(registry_error_wide(key, value_name.as_deref(), status));
+            }
         };
-        if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
-            return Ok(RegistryReadResult::ValueMissing);
-        }
-        if status != ERROR_SUCCESS && status != ERROR_MORE_DATA {
-            return Err(registry_error_wide(key, value_name.as_deref(), status));
-        }
-
-        let mut bytes = vec![0u8; byte_count as usize];
-        // A zero-byte registry value is legal. RegGetValueW still accepts a
-        // null data pointer for it.
-        let data_pointer = if bytes.is_empty() {
-            ptr::null_mut()
-        } else {
-            bytes.as_mut_ptr().cast::<c_void>()
-        };
-        // SAFETY: data_pointer references byte_count writable bytes and the
-        // key/value pointers remain live for the duration of the call.
-        let status = unsafe {
-            RegGetValueW(
-                handle,
-                ptr::null(),
-                value_pointer,
-                RRF_RT_ANY,
-                &mut kind,
-                data_pointer,
-                &mut byte_count,
-            )
-        };
-        if matches!(status, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
-            return Ok(RegistryReadResult::ValueMissing);
-        }
-        if status != ERROR_SUCCESS {
-            return Err(registry_error_wide(key, value_name.as_deref(), status));
-        }
-        bytes.truncate(byte_count as usize);
         decode(kind, &bytes).map(RegistryReadResult::Value)
+    }
+
+    const MAX_QUERY_ATTEMPTS: usize = 8;
+
+    fn query_value_bytes(
+        mut query: impl FnMut(*mut u32, *mut c_void, *mut u32) -> u32,
+    ) -> std::result::Result<(u32, Vec<u8>), u32> {
+        for _ in 0..MAX_QUERY_ATTEMPTS {
+            let mut kind = 0;
+            let mut byte_count = 0;
+            let status = query(&mut kind, ptr::null_mut(), &mut byte_count);
+            if status == ERROR_MORE_DATA {
+                continue;
+            }
+            if status != ERROR_SUCCESS {
+                return Err(status);
+            }
+
+            let mut bytes = vec![0u8; byte_count as usize];
+            let data = if bytes.is_empty() {
+                ptr::null_mut()
+            } else {
+                bytes.as_mut_ptr().cast::<c_void>()
+            };
+            let status = query(&mut kind, data, &mut byte_count);
+            if status == ERROR_MORE_DATA {
+                continue;
+            }
+            if status != ERROR_SUCCESS {
+                return Err(status);
+            }
+            bytes.truncate(byte_count as usize);
+            return Ok((kind, bytes));
+        }
+        Err(ERROR_MORE_DATA)
     }
 
     fn split_key(key: &str) -> Result<(HKEY, &str)> {
@@ -291,15 +320,17 @@ mod windows {
         Ok((root, subkey))
     }
 
-    fn decode(kind: u32, bytes: &[u8]) -> Result<RegistryData> {
+    pub(super) fn decode(kind: u32, bytes: &[u8]) -> Result<RegistryData> {
         match kind {
-            REG_SZ | REG_EXPAND_SZ => Ok(RegistryData::String(
-                decode_wide(bytes)?
-                    .split('\0')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string(),
-            )),
+            REG_SZ | REG_EXPAND_SZ => {
+                let mut decoded = decode_wide_units(bytes)?;
+                if decoded.last() == Some(&0) {
+                    decoded.pop();
+                }
+                Ok(RegistryData::String(String::from_utf16(&decoded).map_err(
+                    |error| anyhow!("MSB4184: Registry string is not valid UTF-16: {error}"),
+                )?))
+            }
             REG_DWORD if bytes.len() >= 4 => Ok(RegistryData::DWord(i32::from_le_bytes(
                 bytes[..4].try_into().expect("length was checked"),
             ))),
@@ -307,13 +338,20 @@ mod windows {
                 bytes[..8].try_into().expect("length was checked"),
             ))),
             REG_MULTI_SZ => {
-                let decoded = decode_wide(bytes)?;
+                let mut units = decode_wide_units(bytes)?;
+                for _ in 0..2 {
+                    if units.last() == Some(&0) {
+                        units.pop();
+                    }
+                }
+                if units.is_empty() {
+                    return Ok(RegistryData::MultiString(Vec::new()));
+                }
+                let decoded = String::from_utf16(&units).map_err(|error| {
+                    anyhow!("MSB4184: Registry string is not valid UTF-16: {error}")
+                })?;
                 Ok(RegistryData::MultiString(
-                    decoded
-                        .split('\0')
-                        .take_while(|value| !value.is_empty())
-                        .map(ToString::to_string)
-                        .collect(),
+                    decoded.split('\0').map(ToString::to_string).collect(),
                 ))
             }
             REG_BINARY | REG_NONE => Ok(RegistryData::Binary(bytes.to_vec())),
@@ -323,16 +361,14 @@ mod windows {
         }
     }
 
-    fn decode_wide(bytes: &[u8]) -> Result<String> {
+    fn decode_wide_units(bytes: &[u8]) -> Result<Vec<u16>> {
         if !bytes.len().is_multiple_of(2) {
             bail!("MSB4184: Registry string data has an odd byte length");
         }
-        let units = bytes
+        Ok(bytes
             .chunks_exact(2)
             .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-            .collect::<Vec<_>>();
-        String::from_utf16(&units)
-            .map_err(|error| anyhow!("MSB4184: Registry string is not valid UTF-16: {error}"))
+            .collect())
     }
 
     fn registry_error(key: &str, value_name: Option<&str>, status: u32) -> anyhow::Error {
@@ -372,6 +408,92 @@ mod windows {
             }
         }
     }
+
+    #[cfg(test)]
+    mod query_tests {
+        use super::*;
+
+        #[test]
+        fn registry_query_retries_size_and_data_growth_with_a_bound() {
+            let mut calls = 0;
+            let (kind, bytes) = query_value_bytes(|kind, data, byte_count| {
+                calls += 1;
+                // SAFETY: query_value_bytes supplies valid writable pointers and
+                // this test writes no more than its advertised byte count.
+                unsafe {
+                    match calls {
+                        1 => {
+                            assert!(data.is_null());
+                            *byte_count = 1;
+                            ERROR_MORE_DATA
+                        }
+                        2 => {
+                            assert!(data.is_null());
+                            *kind = REG_BINARY;
+                            *byte_count = 3;
+                            ERROR_SUCCESS
+                        }
+                        3 => {
+                            assert!(!data.is_null());
+                            std::ptr::copy_nonoverlapping([1u8, 2, 3].as_ptr(), data.cast(), 3);
+                            *byte_count = 3;
+                            ERROR_SUCCESS
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            })
+            .unwrap();
+            assert_eq!(kind, REG_BINARY);
+            assert_eq!(bytes, [1, 2, 3]);
+
+            calls = 0;
+            let (_, bytes) = query_value_bytes(|kind, data, byte_count| {
+                calls += 1;
+                // SAFETY: query_value_bytes supplies valid writable pointers and
+                // the successful data call follows a three-byte size query.
+                unsafe {
+                    *kind = REG_BINARY;
+                    match calls {
+                        1 => {
+                            assert!(data.is_null());
+                            *byte_count = 1;
+                            ERROR_SUCCESS
+                        }
+                        2 => {
+                            assert!(!data.is_null());
+                            *byte_count = 3;
+                            ERROR_MORE_DATA
+                        }
+                        3 => {
+                            assert!(data.is_null());
+                            *byte_count = 3;
+                            ERROR_SUCCESS
+                        }
+                        4 => {
+                            assert!(!data.is_null());
+                            std::ptr::copy_nonoverlapping([4u8, 5, 6].as_ptr(), data.cast(), 3);
+                            *byte_count = 3;
+                            ERROR_SUCCESS
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            })
+            .unwrap();
+            assert_eq!(bytes, [4, 5, 6]);
+
+            calls = 0;
+            assert_eq!(
+                query_value_bytes(|_, _, _| {
+                    calls += 1;
+                    ERROR_MORE_DATA
+                }),
+                Err(ERROR_MORE_DATA)
+            );
+            assert_eq!(calls, MAX_QUERY_ATTEMPTS);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +519,17 @@ mod tests {
             "A%3BX;B"
         );
         assert_eq!(
+            RegistryData::MultiString(vec![
+                String::new(),
+                String::new(),
+                "A".into(),
+                String::new(),
+                String::new(),
+            ])
+            .into_scalar_escaped_string(),
+            "A;;"
+        );
+        assert_eq!(
             RegistryData::Binary(b"String".to_vec()).into_scalar_escaped_string(),
             "83;116;114;105;110;103"
         );
@@ -407,6 +540,7 @@ mod tests {
         for (value, expected) in [
             ("Default", RegistryView::Default),
             ("default", RegistryView::Default),
+            ("  Default  ", RegistryView::Default),
             ("RegistryView.Default", RegistryView::Default),
             (
                 "Microsoft.Win32.RegistryView.Registry32",
@@ -414,8 +548,17 @@ mod tests {
             ),
             ("Registry64", RegistryView::Registry64),
             ("0", RegistryView::Default),
+            ("-0", RegistryView::Default),
+            ("+000", RegistryView::Default),
             ("512", RegistryView::Registry32),
+            ("000512", RegistryView::Registry32),
             ("256", RegistryView::Registry64),
+            (" +000256 ", RegistryView::Registry64),
+            ("Default, Registry64", RegistryView::Registry64),
+            (
+                "RegistryView.Default, RegistryView.Registry32",
+                RegistryView::Registry32,
+            ),
         ] {
             assert_eq!(RegistryView::parse(value).unwrap(), expected, "{value}");
         }
@@ -424,6 +567,8 @@ mod tests {
             "microsoft.win32.registryview.default",
             "513",
             "-1",
+            "Registry32, Registry64",
+            "Default,",
             "Bogus",
         ] {
             assert!(RegistryView::parse(value).is_err(), "{value}");
@@ -594,6 +739,7 @@ mod tests {
         #[test]
         fn registry_property_string() {
             assert_value(REG_SZ, &wide_bytes("String", false), "String");
+            assert_value(REG_SZ, &wide_bytes("A\0B", false), "A\0B");
         }
 
         #[test]
@@ -628,7 +774,27 @@ mod tests {
 
         #[test]
         fn registry_property_multi_string() {
-            assert_value(REG_MULTI_SZ, &wide_bytes("A\0B\0C\0D", true), "A;B;C;D");
+            assert_value(REG_MULTI_SZ, &wide_bytes("A\0\0B\0C\0D", true), "A;;B;C;D");
+        }
+
+        #[test]
+        fn registry_decoding_strips_only_required_terminal_nuls() {
+            assert_eq!(
+                super::super::windows::decode(REG_SZ, &wide_bytes("A\0B", false)).unwrap(),
+                RegistryData::String("A\0B".into())
+            );
+            assert_eq!(
+                super::super::windows::decode(REG_SZ, &wide_bytes("A", true)).unwrap(),
+                RegistryData::String("A\0".into())
+            );
+            assert_eq!(
+                super::super::windows::decode(REG_MULTI_SZ, &wide_bytes("A\0\0B", true),).unwrap(),
+                RegistryData::MultiString(vec!["A".into(), String::new(), "B".into()])
+            );
+            assert_eq!(
+                super::super::windows::decode(REG_MULTI_SZ, &wide_bytes("A\0", true),).unwrap(),
+                RegistryData::MultiString(vec!["A".into(), String::new()])
+            );
         }
 
         #[test]
@@ -701,7 +867,7 @@ mod tests {
             key.set(Some("DwordSigned"), REG_DWORD, &(-1i32).to_le_bytes());
             key.set(Some("Qword"), REG_QWORD, &42i64.to_le_bytes());
             key.set(Some("QwordSigned"), REG_QWORD, &(-1i64).to_le_bytes());
-            key.set(Some("Multi"), REG_MULTI_SZ, &wide_bytes("A;X\0B", true));
+            key.set(Some("Multi"), REG_MULTI_SZ, &wide_bytes("A;X\0\0B", true));
             key.set(Some("Binary"), REG_BINARY, &[1, 2, 3]);
             key.set(Some("None"), REG_NONE, &[1, 2, 3]);
             key.set(Some("Expand"), REG_EXPAND_SZ, &wide_bytes("%TEMP%", false));
@@ -722,6 +888,8 @@ mod tests {
     <QwordSigned>$([MSBuild]::GetRegistryValue('{path}', 'QwordSigned'))</QwordSigned>
     <MultiLength>$([MSBuild]::GetRegistryValue('{path}', 'Multi').Length)</MultiLength>
     <MultiFirst>$([MSBuild]::GetRegistryValue('{path}', 'Multi').GetValue(0))</MultiFirst>
+    <MultiInterior>$([MSBuild]::GetRegistryValue('{path}', 'Multi').GetValue(1))</MultiInterior>
+    <MultiLast>$([MSBuild]::GetRegistryValue('{path}', 'Multi').GetValue(2))</MultiLast>
     <BinaryLength>$([MSBuild]::GetRegistryValue('{path}', 'Binary').Length)</BinaryLength>
     <BinarySecond>$([MSBuild]::GetRegistryValue('{path}', 'Binary').GetValue(1))</BinarySecond>
     <BinaryFirstCompare>$([MSBuild]::GetRegistryValue('{path}', 'Binary')[0].CompareTo(2))</BinaryFirstCompare>
@@ -740,6 +908,8 @@ mod tests {
     <ViewOmitted>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK'))</ViewOmitted>
     <ViewDefaultValue>$([MSBuild]::GetRegistryValueFromView('{path}', null, 'FALLBACK', 0))</ViewDefaultValue>
     <View0>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', 0))</View0>
+    <ViewSignedZero>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', ' +000 '))</ViewSignedZero>
+    <ViewCombinedDefault>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', 'Default, Default'))</ViewCombinedDefault>
     <View256>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', 256))</View256>
     <View512>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', 512))</View512>
     <ViewNamed>$([MSBuild]::GetRegistryValueFromView('{path}', 'Dword', 'FALLBACK', RegistryView.Default))</ViewNamed>
@@ -769,8 +939,10 @@ mod tests {
                 ("DwordSigned", "-1"),
                 ("QwordCompare", "-1"),
                 ("QwordSigned", "-1"),
-                ("MultiLength", "2"),
+                ("MultiLength", "3"),
                 ("MultiFirst", "A;X"),
+                ("MultiInterior", ""),
+                ("MultiLast", "B"),
                 ("BinaryLength", "3"),
                 ("BinarySecond", "2"),
                 ("BinaryFirstCompare", "-1"),
@@ -789,6 +961,8 @@ mod tests {
                 ("ViewOmitted", "FALLBACK"),
                 ("ViewDefaultValue", expanded.as_str()),
                 ("View0", "42"),
+                ("ViewSignedZero", "42"),
+                ("ViewCombinedDefault", "42"),
                 ("View256", "42"),
                 ("View512", "42"),
                 ("ViewNamed", "42"),

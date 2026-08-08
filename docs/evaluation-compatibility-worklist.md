@@ -48,24 +48,35 @@ Both implementations now preserve aggregated project source, including unevaluat
 The native registry is initialized once and indexed by normalized type, member,
 and invocation kind. Overload arity, parameter/params coercion, and per-overload
 null policy are enforced before dispatch. Values retain `null`, arrays, numeric
-types, and `System.Char` boundaries through chains. Integral MSBuild arithmetic
-is unchecked/wrapping, shifts use CLR masks, floating operations retain IEEE
-NaN/infinity, and array results escape each element before joining with a raw
-semicolon.
+types, and `System.Char` boundaries through exact nested calls and chains.
+String arrays bind as arrays, while `Char` binds only to a retained `Char`
+overload and is not silently stringified. Final array rendering discards only
+leading empty elements, then preserves interior/trailing empties while escaping
+each element and joining with raw semicolons. Integral MSBuild arithmetic is
+unchecked/wrapping, and shifts use CLR masks.
 
 The retained correctness-tested core includes ordinal `System.String`
 operations (`Copy`, null predicates, `Join`, `CompareOrdinal`, `Contains`,
 `Substring`, invariant casing, parameterless trim, replace/split/equality,
 insertion/removal, length/indexer); host-lexical `System.IO.Path` filename,
-extension, root, combine, change-extension, and full-path members; selected
-`System.Math` and `System.Convert` overloads; all supported `Version`
-constructor shapes; Guid N/D/B/P/X formatting; invariant Int32/Int64/UInt64
-D/X formatting; and a deliberately narrow ISO DateTime parse plus numeric
+extension, root, combine, change-extension, and full-path members; integral
+`System.Math.Abs`; typed and radix-based `System.Convert` overloads that do not
+consult current culture; all supported `Version` constructor shapes; Guid
+N/D/B/P parsing and N/D/B/P/X formatting; invariant Int32/Int64/UInt64 D/X
+formatting; and a deliberately narrow ISO DateTime parse plus numeric
 custom-format subset. `Environment.ExpandEnvironmentVariables` scans `%name%`
-tokens once, preserves missing/malformed tokens, and uses Windows-insensitive
-or Unix-sensitive lookup against the evaluation environment snapshot.
+tokens once and preserves missing/malformed tokens. Windows keys use
+.NET-compatible Unicode ordinal-ignore-case folding; Unix keys remain
+case-sensitive.
 `StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
 UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
+
+`String.Split()` is retained, while explicit null `Split`, null `String.Join`
+separators, and null unary `Path` calls are rejected like direct MSBuild.
+`Path.ChangeExtension` retains its null behavior, and
+`MSBuild.Unescape(null)` returns empty. File-above searches make relative starts
+lexically absolute; `GetPathOfFileAbove` rejects file names containing a host
+directory separator.
 
 MSBuild version helpers use the upstream `SimpleVersion` grammar and reject
 invalid inputs. Feature-wave checks honor the resolved
@@ -80,11 +91,17 @@ msbuild-rs is a standalone host.
 Disallowed receivers and members are rejected before argument evaluation.
 There is no reflection, subprocess dispatch, or runtime startup.
 
-Native-tier backlog (rather than approximate behavior): current-culture
+Native-tier backlog (rather than approximate behavior): floating MSBuild
+arithmetic overloads, floating `System.Math` entries,
+`System.Convert.ToDouble`, culture-sensitive unary
+`Convert` string-to-number and number-to-string overloads, and
+`System.Double.ToString`; current-culture
 `String.StartsWith`, `EndsWith`, `CompareTo`, `IndexOf`, `LastIndexOf`,
 `ToLower`, and `ToUpper`; broad DateTime parsing/formatting; Guid equality
-binding; params-character trim overloads; Double custom formats; and unlisted
-CLR numeric overloads. The NuGet-backed MSBuild TFM helpers
+binding and Guid X parsing (X formatting remains); params-character trim
+overloads; Double custom formats; and unlisted CLR numeric overloads. Floating
+spellings including `inf` are rejected because no culture-sensitive floating
+overload is retained. The NuGet-backed MSBuild TFM helpers
 (`GetTargetFrameworkIdentifier`, `GetTargetFrameworkVersion`,
 `GetTargetPlatformIdentifier`, `GetTargetPlatformVersion`, and
 `IsTargetFrameworkCompatible`) were pruned instead of retaining simplified
@@ -106,9 +123,13 @@ The legacy `$(Registry:...)` scalar path intentionally differs for string
 values: a registry string `A;B` remains a two-item list, while the same string
 returned by `GetRegistryValue` is escaped as one string item. Full supported
 hive names are accepted (including `HKEY_PERFORMANCE_DATA`'s pseudo-hive
-missing behavior); unsupported short aliases are rejected. Registry views
-accept the named forms and numeric string forms `0`/`256`/`512`; typed
-non-string objects in the `params object[]` are ignored.
+missing behavior); unsupported short aliases are rejected. Registry views use
+`Enum.Parse`-compatible trimming, signs, leading zeroes, and comma-combined
+names, then accept only resulting values `0`/`256`/`512`; typed non-string
+objects in the `params object[]` are ignored. Registry strings retain embedded
+NULs, and multi-strings retain interior empty elements while removing only
+their required terminal NULs. Bounded retries cover `ERROR_MORE_DATA` races in
+both size and data query phases.
 
 Missing-state defaults follow the two distinct MSBuild implementations:
 `GetRegistryValue` returns null for a missing key but its supplied default for
@@ -138,7 +159,8 @@ Support will use two execution tiers:
 This work is intentionally late in the compatibility plan. The parser, evaluation order, items and metadata, imports, escaping, and native high-value intrinsic set should be stable first. Hosting CoreCLR must not become a prerequisite for projects that only use the native tier.
 
 - [ ] Inventory the .NET types and methods most common in representative evaluated projects.
-- [ ] Define the native Rust intrinsic registry and deterministic overload/coercion rules.
+- [x] Define the native Rust intrinsic registry and deterministic
+  overload/coercion rules for the retained representative subset.
 - [ ] Define the managed fallback contract, including CoreCLR discovery, startup, invocation, caching, exceptions, and diagnostics.
 - [ ] Match MSBuild's allowlist and reject types or members that MSBuild property functions do not permit.
 - [ ] Add parity fixtures for static methods, constructors, instance methods, overloads, nested expressions, metadata arguments, null/empty values, and exceptions.

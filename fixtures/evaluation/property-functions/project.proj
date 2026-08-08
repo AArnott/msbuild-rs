@@ -12,7 +12,7 @@
     <StaticChain>$([System.Version]::Parse('10.2.3.4').ToString(2))</StaticChain>
     <VersionBuild>$([System.Version]::Parse('10.2.3.4').Build)</VersionBuild>
     <VersionConstructor>$([System.Version]::new(1, 2, 3).ToString())</VersionConstructor>
-    <MathMaximum>$([System.Math]::Max(1, 2))</MathMaximum>
+    <MathAbsolute>$([System.Math]::Abs(-32769))</MathAbsolute>
     <ConvertedHex>$([System.Convert]::ToInt64('28', 16))</ConvertedHex>
     <GuidCompact>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('N'))</GuidCompact>
     <PathFileName>$([System.IO.Path]::GetFileName('dir/file.txt'))</PathFileName>
@@ -44,14 +44,12 @@
     <MultiplyWrap>$([MSBuild]::Multiply(9223372036854775807, 2))</MultiplyWrap>
     <MaskedLeftShift>$([MSBuild]::LeftShift(1, -1))</MaskedLeftShift>
     <MaskedRightShift>$([MSBuild]::RightShift(-2, 32))</MaskedRightShift>
-    <DivideInfinity>$([MSBuild]::Divide(1.0, 0.0))</DivideInfinity>
-    <DivideNaN>$([MSBuild]::Divide(0.0, 0.0))</DivideNaN>
-    <ModuloNaN>$([MSBuild]::Modulo(1.0, 0.0))</ModuloNaN>
-    <SqrtNaN>$([System.Math]::Sqrt(-1.0))</SqrtNaN>
-    <DoubleMaximum>$([System.Math]::Max(9007199254740992, 9007199254740993))</DoubleMaximum>
+    <DivideInteger>$([MSBuild]::Divide(7, 2))</DivideInteger>
+    <ModuloInteger>$([MSBuild]::Modulo(7, 2))</ModuloInteger>
+    <NestedTypedAbs>$([System.Math]::Abs($([System.Int64]::Parse('-32768'))))</NestedTypedAbs>
     <SignedRadixInt>$([System.Convert]::ToInt32('FFFFFFFF', 16))</SignedRadixInt>
     <SignedRadixString>$([System.Convert]::ToString(-1, 16))</SignedRadixString>
-    <NestedSignedRadix>$([System.Convert]::ToString($([System.Convert]::ToInt64('-1')), 16))</NestedSignedRadix>
+    <NestedSignedRadix>$([System.Convert]::ToString($([System.Int64]::Parse('-1')), 16))</NestedSignedRadix>
     <PathCombineEmpty>$([System.IO.Path]::Combine())</PathCombineEmpty>
     <PathCombineOne>$([System.IO.Path]::Combine('a'))</PathCombineOne>
     <PathCombineMany>$([System.IO.Path]::Combine('a', 'b', 'c', 'd', 'e'))</PathCombineMany>
@@ -61,6 +59,11 @@
     <VersionTwo>$([System.Version]::new(1, 2))</VersionTwo>
     <VersionFour>$([System.Version]::new(1, 2, 3, 4))</VersionFour>
     <SplitCopied>$([System.String]::Copy('a;b').Split(';'))</SplitCopied>
+    <NestedJoinArray>$([System.String]::Join(',', $([System.String]::Copy('a;b').Split(';'))))</NestedJoinArray>
+    <SplitNestedChar>$([System.String]::Copy('a;b').Split($([System.String]::Copy(';')[0])))</SplitNestedChar>
+    <LeadingEmptyArray>$([System.String]::Copy(';;a;;').Split(';'))</LeadingEmptyArray>
+    <InteriorTrailingArray>$([System.String]::Copy('a;;b;').Split(';'))</InteriorTrailingArray>
+    <SplitZero>$([System.String]::Copy('a b').Split())</SplitZero>
     <IndexedChar>$(Source[0])</IndexedChar>
     <SeparatorChar>$([System.IO.Path]::DirectorySeparatorChar)</SeparatorChar>
     <UpperSharpS>$(SharpS.ToUpperInvariant())</UpperSharpS>
@@ -71,6 +74,9 @@
     <IntD4>$([System.Int32]::Parse('42').ToString('D4'))</IntD4>
     <EscapeNull>$([MSBuild]::Escape(null))</EscapeNull>
     <DefaultNull>$([MSBuild]::ValueOrDefault(null, 'fallback'))</DefaultNull>
+    <UnescapeNull>$([MSBuild]::Unescape(null))</UnescapeNull>
+    <NestedEscapedString>$([System.String]::Copy($([MSBuild]::Escape(';'))))</NestedEscapedString>
+    <RelativeFileAbove>$([MSBuild]::GetPathOfFileAbove('Cargo.toml', '.'))</RelativeFileAbove>
   </PropertyGroup>
   <ItemGroup>
     <SplitItem Include="$([System.String]::Copy('a;b').Split(';'))" />

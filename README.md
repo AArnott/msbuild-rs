@@ -146,13 +146,17 @@ $([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'
 The compatibility plan uses an explicit, correctness-tested native Rust
 allowlist and, later, an in-process CoreCLR fallback for other legal MSBuild
 property functions. The native tier preserves typed overloads, null, params
-arrays, Char, and array-result boundaries. On Windows, its read-only registry
-intrinsics also preserve DWORD/QWORD numbers and multi-string/byte arrays
-through member chains; `REG_NONE` uses the same byte-list model as
-`REG_BINARY`. Culture-sensitive String members, broad CLR formatting, NuGet
-TFM helpers, and OS-bitness queries are deliberately pruned rather than
-approximated. These legal calls require a future exact native implementation or
-the currently excluded managed fallback; see the compatibility worklist.
+arrays, Char, and array-result boundaries across exact nested calls. On
+Windows, environment lookup uses Unicode ordinal-ignore-case keys, while
+read-only registry intrinsics preserve DWORD/QWORD numbers, embedded string
+NULs, and multi-string/byte arrays through member chains; `REG_NONE` uses the
+same byte-list model as `REG_BINARY`. Culture-sensitive floating MSBuild
+arithmetic and Math/Double/Convert overloads, Guid X parsing (X formatting
+remains), current-culture String members, broad CLR formatting, NuGet TFM
+helpers, and OS-bitness queries are deliberately pruned rather than
+approximated. These
+legal calls require a future exact native implementation or the currently
+excluded managed fallback; see the compatibility worklist.
 CoreCLR will load lazily so it does not affect projects that stay on native fast
 paths.
 

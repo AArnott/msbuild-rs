@@ -89,7 +89,9 @@ mod platform {
     use super::FileTimes;
     use std::fs::Metadata;
     use std::mem::zeroed;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     pub(super) fn format(metadata: &Metadata) -> FileTimes {
         let modified = metadata.modified().ok();
@@ -119,6 +121,7 @@ mod platform {
         metadata.modified().ok()
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn unix_system_time(seconds: i64, nanoseconds: i64) -> SystemTime {
         if seconds >= 0 {
             UNIX_EPOCH

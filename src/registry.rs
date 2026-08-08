@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow, bail};
 
-#[cfg(windows)]
 use crate::escaping::escape;
 #[cfg(windows)]
 use crate::escaping::unescape_once;
@@ -69,7 +68,7 @@ pub(crate) enum RegistryData {
 }
 
 impl RegistryData {
-    #[cfg(windows)]
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     fn into_scalar_escaped_string(self) -> String {
         match self {
             Self::String(value) => value,

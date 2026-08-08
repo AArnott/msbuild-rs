@@ -36,10 +36,10 @@ Both implementations now preserve aggregated project source, including unevaluat
   set, and synthesize current-file properties only from active evaluation context.
 - [x] Preserve lexical project/current-file paths and provide host-resolved
   active .NET SDK and toolset properties during preprocessing.
-- [ ] Complete the representative native property-function surface while
-  preserving MSBuild's receiver restrictions. The correctness-first core below
-  is implemented, but culture-sensitive members removed from the native tier
-  leave the original representative `EndsWith`/`CompareTo` surface incomplete.
+- [x] Implement an explicit representative native property-function allowlist
+  while preserving MSBuild's receiver restrictions. Representative upstream
+  allowed/rejected cases pass; deliberately pruned legal calls are not claimed
+  as implemented.
 - [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`,
   `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`, using host-specific
   lexical .NET path rules rather than filesystem canonicalization.
@@ -98,11 +98,29 @@ These legal calls await a maintained NuGet-compatible implementation, an exact
 native entry, or the excluded late-stage managed fallback.
 
 On Windows, `$(Registry:...)` and the native MSBuild registry intrinsics are
-read-only and support string/expanded-string, DWORD, QWORD, multi-string, and
-binary values, including 32/64-bit views. Missing keys/values expand to empty
-(or the supplied intrinsic default). On non-Windows, `$(Registry:...)` expands
-to empty before syntax validation, matching modern dotnet MSBuild's retained
-.NET Core behavior; intrinsic reads return empty/the supplied default.
+read-only and support string/expanded-string, signed DWORD/QWORD,
+multi-string, binary, and `REG_NONE` values. Property functions retain numbers
+and arrays through chains (`CompareTo`, `Length`, indexers, and `GetValue`);
+array rendering escapes each element while retaining raw list delimiters.
+The legacy `$(Registry:...)` scalar path intentionally differs for string
+values: a registry string `A;B` remains a two-item list, while the same string
+returned by `GetRegistryValue` is escaped as one string item. Full supported
+hive names are accepted (including `HKEY_PERFORMANCE_DATA`'s pseudo-hive
+missing behavior); unsupported short aliases are rejected. Registry views
+accept the named forms and numeric string forms `0`/`256`/`512`; typed
+non-string objects in the `params object[]` are ignored.
+
+Missing-state defaults follow the two distinct MSBuild implementations:
+`GetRegistryValue` returns null for a missing key but its supplied default for
+a missing value; `GetRegistryValueFromView` retains its default for missing
+keys but becomes null after finding an existing key without the value. Supplied
+typed defaults retain their type through subsequent chains. A null value name
+selects the default registry value. An omitted view retains the supplied
+default because MSBuild's synthesized boxed enum is ignored by its string-only
+view loop. On non-Windows,
+`$(Registry:...)` expands to empty before syntax validation, and both
+intrinsics return null/the supplied default before hive or view validation,
+matching modern dotnet MSBuild.
 
 #### .NET-backed intrinsic expressions (late-stage)
 

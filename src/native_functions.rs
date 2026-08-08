@@ -10,8 +10,7 @@ use uuid::Uuid;
 
 use crate::escaping::unescape_once;
 use crate::properties::display_path;
-#[cfg(windows)]
-use crate::registry::{RegistryView, read_registry_value};
+use crate::registry::{RegistryData, RegistryReadResult, RegistryView, read_registry_value};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 
@@ -55,6 +54,7 @@ pub(crate) enum Coercion {
     Any,
     String,
     Boolean,
+    Byte,
     Int16,
     Int32,
     Int64,
@@ -152,6 +152,8 @@ pub(crate) enum IntrinsicValue {
     Null,
     String(String),
     Strings(Vec<String>),
+    Byte(u8),
+    Bytes(Vec<u8>),
     Char(u16),
     Boolean(bool),
     Int16(i16),
@@ -170,6 +172,8 @@ impl IntrinsicValue {
             Self::Null => "System.Object",
             Self::String(_) => "System.String",
             Self::Strings(_) => "System.String[]",
+            Self::Byte(_) => "System.Byte",
+            Self::Bytes(_) => "System.Byte[]",
             Self::Char(_) => "System.Char",
             Self::Boolean(_) => "System.Boolean",
             Self::Int16(_) => "System.Int16",
@@ -188,6 +192,12 @@ impl IntrinsicValue {
             Self::Null => Ok(String::new()),
             Self::String(value) => Ok(value.clone()),
             Self::Strings(values) => Ok(values.join(";")),
+            Self::Byte(value) => Ok(value.to_string()),
+            Self::Bytes(values) => Ok(values
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(";")),
             Self::Char(value) => String::from_utf16(&[*value])
                 .map_err(|_| anyhow!("A lone UTF-16 surrogate cannot be rendered as UTF-8")),
             Self::Boolean(value) => Ok(dotnet_bool(*value).to_string()),
@@ -503,6 +513,7 @@ const O1_STRING_EMPTY_NULL: &[OverloadDescriptor] = &[overload!(
     [NullPolicy::EmptyString]
 )];
 const O1_VERSION: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Version])];
+const O1_BYTE: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Byte])];
 const O1_INT32: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int32])];
 const O1_INT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int64])];
 const O1_UINT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::UInt64])];
@@ -624,11 +635,19 @@ const O_JOIN: &[OverloadDescriptor] = &[overload!(
     [NullPolicy::EmptyString]
 )];
 const O_REGISTRY_VALUE: &[OverloadDescriptor] = &[
-    overload!(Arity::Exact(2), [Coercion::String, Coercion::String]),
+    overload!(
+        Arity::Exact(2),
+        [Coercion::String, Coercion::String],
+        [NullPolicy::Preserve, NullPolicy::Preserve]
+    ),
     overload!(
         Arity::Exact(3),
         [Coercion::String, Coercion::String, Coercion::Any],
-        [NullPolicy::Reject, NullPolicy::Reject, NullPolicy::Preserve]
+        [
+            NullPolicy::Preserve,
+            NullPolicy::Preserve,
+            NullPolicy::Preserve
+        ]
     ),
 ];
 const O_REGISTRY_VIEWS: &[OverloadDescriptor] = &[overload!(
@@ -640,10 +659,10 @@ const O_REGISTRY_VIEWS: &[OverloadDescriptor] = &[overload!(
         Coercion::RegistryView,
     ],
     [
-        NullPolicy::Reject,
-        NullPolicy::Reject,
         NullPolicy::Preserve,
-        NullPolicy::Reject,
+        NullPolicy::Preserve,
+        NullPolicy::Preserve,
+        NullPolicy::Preserve,
     ]
 )];
 
@@ -1247,6 +1266,46 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         handle_string_array
     ),
     intrinsic!(
+        "System.String[]",
+        "GetValue",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_INT32,
+        "System.String",
+        handle_string_array
+    ),
+    intrinsic!(
+        "System.Byte[]",
+        "Length",
+        InstanceProperty,
+        Decoded,
+        Escape,
+        O0,
+        "System.Int32",
+        handle_byte_array
+    ),
+    intrinsic!(
+        "System.Byte[]",
+        "Item",
+        Indexer,
+        Decoded,
+        Escape,
+        O1_INT32,
+        "System.Byte",
+        handle_byte_array
+    ),
+    intrinsic!(
+        "System.Byte[]",
+        "GetValue",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_INT32,
+        "System.Byte",
+        handle_byte_array
+    ),
+    intrinsic!(
         "System.Char",
         "ToString",
         InstanceMethod,
@@ -1255,6 +1314,36 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         O0,
         "System.String",
         handle_char_instance
+    ),
+    intrinsic!(
+        "System.Byte",
+        "CompareTo",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_BYTE,
+        "System.Int32",
+        handle_numeric_instance
+    ),
+    intrinsic!(
+        "System.Byte",
+        "Equals",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_BYTE,
+        "System.Boolean",
+        handle_numeric_instance
+    ),
+    intrinsic!(
+        "System.Byte",
+        "ToString",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O0_1_STRING,
+        "System.String",
+        handle_numeric_instance
     ),
     intrinsic!(
         "System.IO.Path",
@@ -2146,7 +2235,8 @@ fn coerce_argument(
 
     let result = match coercion {
         Coercion::Any => (value.clone(), 0),
-        Coercion::String | Coercion::Path | Coercion::RegistryView => match value {
+        Coercion::RegistryView => (value.clone(), 0),
+        Coercion::String | Coercion::Path => match value {
             IntrinsicValue::String(value) => (IntrinsicValue::String(value.clone()), 0),
             IntrinsicValue::Char(value) => (
                 IntrinsicValue::String(String::from_utf16(&[*value]).map_err(|_| {
@@ -2161,6 +2251,7 @@ fn coerce_argument(
             IntrinsicValue::String(value) => {
                 (IntrinsicValue::Boolean(parse_boolean(value, member)?), 20)
             }
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Boolean(*value != 0), 10),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Boolean(*value != 0), 10),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Boolean(*value != 0), 10),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Boolean(*value != 0), 10),
@@ -2168,7 +2259,23 @@ fn coerce_argument(
             IntrinsicValue::Double(value) => (IntrinsicValue::Boolean(*value != 0.0), 10),
             _ => bail!("{member} cannot coerce {} to Boolean", value.type_name()),
         },
+        Coercion::Byte => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Byte(*value), 0),
+            IntrinsicValue::Int16(value) => (IntrinsicValue::Byte((*value).try_into()?), 5),
+            IntrinsicValue::Int32(value) => (IntrinsicValue::Byte((*value).try_into()?), 5),
+            IntrinsicValue::Int64(value) => (IntrinsicValue::Byte((*value).try_into()?), 6),
+            IntrinsicValue::UInt64(value) => (IntrinsicValue::Byte((*value).try_into()?), 6),
+            IntrinsicValue::Double(value) => {
+                let value = checked_f64_to_i64(*value)?;
+                (IntrinsicValue::Byte(value.try_into()?), 8)
+            }
+            IntrinsicValue::String(value) => {
+                (IntrinsicValue::Byte(value.trim().parse::<u8>()?), 20)
+            }
+            _ => bail!("{member} cannot coerce {} to Byte", value.type_name()),
+        },
         Coercion::Int16 => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Int16(i16::from(*value)), 1),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int16(*value), 0),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int16((*value).try_into()?), 5),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int16((*value).try_into()?), 6),
@@ -2181,6 +2288,7 @@ fn coerce_argument(
         },
         Coercion::Int32 | Coercion::Radix => {
             let (value, score) = match value {
+                IntrinsicValue::Byte(value) => (i32::from(*value), 1),
                 IntrinsicValue::Int16(value) => (i32::from(*value), 1),
                 IntrinsicValue::Int32(value) => (*value, 0),
                 IntrinsicValue::Int64(value) => ((*value).try_into()?, 5),
@@ -2195,6 +2303,7 @@ fn coerce_argument(
             (IntrinsicValue::Int32(value), score)
         }
         Coercion::Int64 => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
@@ -2206,6 +2315,7 @@ fn coerce_argument(
             _ => bail!("{member} cannot coerce {} to Int64", value.type_name()),
         },
         Coercion::UInt64 => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::UInt64(u64::from(*value)), 1),
             IntrinsicValue::Int16(value) => (IntrinsicValue::UInt64((*value).try_into()?), 5),
             IntrinsicValue::Int32(value) => (IntrinsicValue::UInt64((*value).try_into()?), 5),
             IntrinsicValue::Int64(value) => (IntrinsicValue::UInt64((*value).try_into()?), 5),
@@ -2219,6 +2329,7 @@ fn coerce_argument(
             _ => bail!("{member} cannot coerce {} to UInt64", value.type_name()),
         },
         Coercion::Double => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Double(f64::from(*value)), 2),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Double(*value as f64), 2),
@@ -2230,6 +2341,7 @@ fn coerce_argument(
             _ => bail!("{member} cannot coerce {} to Double", value.type_name()),
         },
         Coercion::Number => match value {
+            IntrinsicValue::Byte(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int64(i64::from(*value)), 0),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
@@ -2468,6 +2580,32 @@ fn handle_string_array(
             .cloned()
             .map(IntrinsicValue::String)
             .ok_or_else(|| anyhow!("String array index {index} is out of range"))
+    }
+}
+
+fn handle_byte_array(
+    descriptor: &IntrinsicDescriptor,
+    _: &IntrinsicContext<'_>,
+    receiver: Option<&IntrinsicValue>,
+    arguments: &[IntrinsicArgument],
+) -> Result<IntrinsicValue> {
+    let Some(IntrinsicValue::Bytes(receiver)) = receiver else {
+        bail!("{} requires a System.Byte[] receiver", descriptor.member);
+    };
+    if descriptor.dispatch_code == member_code("Length") {
+        Ok(IntrinsicValue::Int32(
+            receiver
+                .len()
+                .try_into()
+                .context("Array length exceeds System.Int32")?,
+        ))
+    } else {
+        let index = argument_usize(&arguments[0], descriptor.member)?;
+        receiver
+            .get(index)
+            .copied()
+            .map(IntrinsicValue::Byte)
+            .ok_or_else(|| anyhow!("Byte array index {index} is out of range"))
     }
 }
 
@@ -3755,39 +3893,83 @@ fn registry_intrinsic(
     arguments: &[IntrinsicArgument],
     views_supplied: bool,
 ) -> Result<IntrinsicValue> {
-    let default = match arguments.get(2).map(|argument| &argument.value) {
-        None | Some(IntrinsicValue::Null) => None,
-        Some(value) => Some(value.to_msbuild_string()?),
-    };
+    registry_intrinsic_with_reader(
+        arguments,
+        views_supplied,
+        cfg!(windows),
+        read_registry_value,
+    )
+}
 
-    #[cfg(not(windows))]
-    {
-        let _ = views_supplied;
-        return Ok(IntrinsicValue::String(default.unwrap_or_default()));
+fn registry_intrinsic_with_reader(
+    arguments: &[IntrinsicArgument],
+    views_supplied: bool,
+    is_windows: bool,
+    mut reader: impl FnMut(&str, Option<&str>, RegistryView) -> Result<RegistryReadResult>,
+) -> Result<IntrinsicValue> {
+    let default = arguments
+        .get(2)
+        .map(|argument| argument.value.clone())
+        .unwrap_or(IntrinsicValue::Null);
+
+    // The .NET Core compatibility checks are the first statements in both
+    // intrinsics. In particular, invalid hives/views and null key names are
+    // not validated on non-Windows.
+    if !is_windows {
+        return Ok(default);
     }
 
-    #[cfg(windows)]
-    {
-        let views = if views_supplied {
-            arguments[3..]
-                .iter()
-                .map(|argument| {
-                    RegistryView::parse(argument_string(argument, "GetRegistryValueFromView")?)
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            vec![RegistryView::Default]
+    let member = if views_supplied {
+        "GetRegistryValueFromView"
+    } else {
+        "GetRegistryValue"
+    };
+
+    if !views_supplied {
+        let key = argument_optional_string(&arguments[0], member)?
+            .ok_or_else(|| anyhow!("MSB4184: {member} registry key name cannot be null"))?;
+        let value_name =
+            argument_optional_string(&arguments[1], member)?.filter(|name| !name.is_empty());
+        return Ok(registry_data_to_intrinsic(
+            match reader(key, value_name, RegistryView::Default)? {
+                RegistryReadResult::KeyMissing => return Ok(IntrinsicValue::Null),
+                RegistryReadResult::ValueMissing => return Ok(default),
+                RegistryReadResult::Value(value) => value,
+            },
+        ));
+    }
+
+    let mut result = default;
+    for argument in &arguments[3..] {
+        // IntrinsicFunctions only processes string objects in its params
+        // object[]. Its synthesized default is a boxed RegistryView, so an
+        // omitted view is ignored and the supplied default is returned.
+        let IntrinsicValue::String(value) = &argument.value else {
+            continue;
         };
-        Ok(IntrinsicValue::String(
-            read_registry_value(
-                argument_string(&arguments[0], "GetRegistryValue")?,
-                (!argument_string(&arguments[1], "GetRegistryValue")?.is_empty())
-                    .then_some(argument_string(&arguments[1], "GetRegistryValue")?),
-                &views,
-            )?
-            .or(default)
-            .unwrap_or_default(),
-        ))
+        let view = RegistryView::parse(value)?;
+        // Parsing is deliberately per-view and precedes key validation.
+        // Finding a value stops the loop before later views are validated.
+        let key = argument_optional_string(&arguments[0], member)?
+            .ok_or_else(|| anyhow!("MSB4184: {member} registry key name cannot be null"))?;
+        let value_name =
+            argument_optional_string(&arguments[1], member)?.filter(|name| !name.is_empty());
+        match reader(key, value_name, view)? {
+            RegistryReadResult::KeyMissing => {}
+            RegistryReadResult::ValueMissing => result = IntrinsicValue::Null,
+            RegistryReadResult::Value(value) => return Ok(registry_data_to_intrinsic(value)),
+        }
+    }
+    Ok(result)
+}
+
+fn registry_data_to_intrinsic(value: RegistryData) -> IntrinsicValue {
+    match value {
+        RegistryData::String(value) => IntrinsicValue::String(value),
+        RegistryData::DWord(value) => IntrinsicValue::Int32(value),
+        RegistryData::QWord(value) => IntrinsicValue::Int64(value),
+        RegistryData::MultiString(values) => IntrinsicValue::Strings(values),
+        RegistryData::Binary(values) => IntrinsicValue::Bytes(values),
     }
 }
 
@@ -3999,12 +4181,16 @@ fn argument_optional_string<'a>(
 fn is_integer_argument(argument: &IntrinsicArgument) -> bool {
     matches!(
         &argument.value,
-        IntrinsicValue::Int16(_) | IntrinsicValue::Int32(_) | IntrinsicValue::Int64(_)
+        IntrinsicValue::Byte(_)
+            | IntrinsicValue::Int16(_)
+            | IntrinsicValue::Int32(_)
+            | IntrinsicValue::Int64(_)
     )
 }
 
 fn argument_i32(argument: &IntrinsicArgument, member: &str) -> Result<i32> {
     match &argument.value {
+        IntrinsicValue::Byte(value) => Ok(i32::from(*value)),
         IntrinsicValue::Int16(value) => Ok(i32::from(*value)),
         IntrinsicValue::Int32(value) => Ok(*value),
         IntrinsicValue::Int64(value) => (*value)
@@ -4019,6 +4205,7 @@ fn argument_i32(argument: &IntrinsicArgument, member: &str) -> Result<i32> {
 
 fn argument_i64(argument: &IntrinsicArgument, member: &str) -> Result<i64> {
     match &argument.value {
+        IntrinsicValue::Byte(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int16(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int32(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int64(value) => Ok(*value),
@@ -4038,6 +4225,7 @@ fn argument_usize(argument: &IntrinsicArgument, member: &str) -> Result<usize> {
 
 fn argument_f64(argument: &IntrinsicArgument, member: &str) -> Result<f64> {
     match &argument.value {
+        IntrinsicValue::Byte(value) => Ok(f64::from(*value)),
         IntrinsicValue::Int16(value) => Ok(f64::from(*value)),
         IntrinsicValue::Int32(value) => Ok(f64::from(*value)),
         IntrinsicValue::Int64(value) => Ok(*value as f64),
@@ -4293,6 +4481,7 @@ fn format_radix(value: &IntrinsicValue, radix: i32) -> Result<String> {
 
 fn numeric_compare(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<Ordering> {
     match (left, right) {
+        (IntrinsicValue::Byte(left), IntrinsicValue::Byte(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::Int32(left), IntrinsicValue::Int32(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::Int64(left), IntrinsicValue::Int64(right)) => Ok(left.cmp(right)),
         (IntrinsicValue::UInt64(left), IntrinsicValue::UInt64(right)) => Ok(left.cmp(right)),
@@ -4314,6 +4503,7 @@ fn numeric_compare(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<Orde
 
 fn numeric_equals(left: &IntrinsicValue, right: &IntrinsicValue) -> Result<bool> {
     Ok(match (left, right) {
+        (IntrinsicValue::Byte(left), IntrinsicValue::Byte(right)) => left == right,
         (IntrinsicValue::Int32(left), IntrinsicValue::Int32(right)) => left == right,
         (IntrinsicValue::Int64(left), IntrinsicValue::Int64(right)) => left == right,
         (IntrinsicValue::UInt64(left), IntrinsicValue::UInt64(right)) => left == right,
@@ -4349,6 +4539,7 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
 
     if matches!(specifier, 'D' | 'd') {
         let (negative, magnitude) = match value {
+            IntrinsicValue::Byte(value) => (false, u64::from(*value)),
             IntrinsicValue::Int32(value) => (*value < 0, u64::from(value.unsigned_abs())),
             IntrinsicValue::Int64(value) => (*value < 0, value.unsigned_abs()),
             IntrinsicValue::UInt64(value) => (false, *value),
@@ -4364,6 +4555,7 @@ fn format_numeric(value: &IntrinsicValue, format: Option<&str>) -> Result<String
 
     if matches!(specifier, 'X' | 'x') {
         let integer = match value {
+            IntrinsicValue::Byte(value) => u64::from(*value),
             IntrinsicValue::Int32(value) => u64::from(*value as u32),
             IntrinsicValue::Int64(value) => *value as u64,
             IntrinsicValue::UInt64(value) => *value,
@@ -4798,6 +4990,189 @@ mod tests {
             "Is64BitOperatingSystem",
             InvocationKind::StaticProperty
         ));
+    }
+
+    #[test]
+    fn registry_intrinsic_missing_defaults_views_and_platform_order_match_msbuild() {
+        let arguments = |key: IntrinsicValue,
+                         name: IntrinsicValue,
+                         default: Option<IntrinsicValue>,
+                         views: Vec<IntrinsicValue>| {
+            let mut arguments = vec![
+                IntrinsicArgument { value: key },
+                IntrinsicArgument { value: name },
+            ];
+            if let Some(default) = default {
+                arguments.push(IntrinsicArgument { value: default });
+            }
+            arguments.extend(views.into_iter().map(|value| IntrinsicArgument { value }));
+            arguments
+        };
+        let key = || IntrinsicValue::String(r"HKEY_CURRENT_USER\Software\Test".into());
+        let name = || IntrinsicValue::String("Value".into());
+        let fallback = || IntrinsicValue::String("FALLBACK".into());
+
+        let get = arguments(key(), name(), Some(fallback()), vec![]);
+        assert_eq!(
+            registry_intrinsic_with_reader(&get, false, true, |_, _, _| {
+                Ok(RegistryReadResult::KeyMissing)
+            })
+            .unwrap(),
+            IntrinsicValue::Null
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&get, false, true, |_, _, _| {
+                Ok(RegistryReadResult::ValueMissing)
+            })
+            .unwrap(),
+            fallback()
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&get, false, true, |_, _, _| {
+                Ok(RegistryReadResult::Value(RegistryData::DWord(42)))
+            })
+            .unwrap(),
+            IntrinsicValue::Int32(42)
+        );
+
+        let from_view = arguments(
+            key(),
+            name(),
+            Some(fallback()),
+            vec![
+                IntrinsicValue::String("Registry64".into()),
+                IntrinsicValue::String("Registry32".into()),
+            ],
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&from_view, true, true, |_, _, _| {
+                Ok(RegistryReadResult::KeyMissing)
+            })
+            .unwrap(),
+            fallback()
+        );
+        let no_views = arguments(IntrinsicValue::Null, name(), Some(fallback()), vec![]);
+        assert_eq!(
+            registry_intrinsic_with_reader(
+                &no_views,
+                true,
+                true,
+                |_, _, _| -> Result<RegistryReadResult> {
+                    panic!("MSBuild's boxed synthesized default view is ignored")
+                },
+            )
+            .unwrap(),
+            fallback()
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&from_view, true, true, |_, _, view| {
+                Ok(if view == RegistryView::Registry64 {
+                    RegistryReadResult::ValueMissing
+                } else {
+                    RegistryReadResult::KeyMissing
+                })
+            })
+            .unwrap(),
+            IntrinsicValue::Null
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&from_view, true, true, |_, _, view| {
+                Ok(if view == RegistryView::Registry64 {
+                    RegistryReadResult::ValueMissing
+                } else {
+                    RegistryReadResult::Value(RegistryData::MultiString(vec![
+                        "A".into(),
+                        "B".into(),
+                    ]))
+                })
+            })
+            .unwrap(),
+            IntrinsicValue::Strings(vec!["A".into(), "B".into()])
+        );
+        let value_before_invalid_view = arguments(
+            key(),
+            name(),
+            Some(fallback()),
+            vec![
+                IntrinsicValue::String("Default".into()),
+                IntrinsicValue::String("not-a-view".into()),
+            ],
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(&value_before_invalid_view, true, true, |_, _, _| Ok(
+                RegistryReadResult::Value(RegistryData::DWord(42))
+            ),)
+            .unwrap(),
+            IntrinsicValue::Int32(42)
+        );
+
+        let null_name = arguments(key(), IntrinsicValue::Null, Some(fallback()), vec![]);
+        assert_eq!(
+            registry_intrinsic_with_reader(&null_name, false, true, |_, name, _| {
+                assert_eq!(name, None);
+                Ok(RegistryReadResult::Value(RegistryData::String(
+                    "DEFAULT".into(),
+                )))
+            })
+            .unwrap(),
+            IntrinsicValue::String("DEFAULT".into())
+        );
+
+        let invalid_non_windows = arguments(
+            IntrinsicValue::Null,
+            IntrinsicValue::Null,
+            Some(IntrinsicValue::Int32(7)),
+            vec![IntrinsicValue::String("not-a-view".into())],
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(
+                &invalid_non_windows,
+                true,
+                false,
+                |_, _, _| -> Result<RegistryReadResult> {
+                    panic!("non-Windows must return before registry validation")
+                },
+            )
+            .unwrap(),
+            IntrinsicValue::Int32(7)
+        );
+
+        let invalid_view_first = arguments(
+            IntrinsicValue::Null,
+            name(),
+            Some(fallback()),
+            vec![IntrinsicValue::String("not-a-view".into())],
+        );
+        let error = registry_intrinsic_with_reader(
+            &invalid_view_first,
+            true,
+            true,
+            |_, _, _| -> Result<RegistryReadResult> {
+                panic!("invalid view must fail before key validation")
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("RegistryView"));
+
+        let ignored_typed_view = arguments(
+            IntrinsicValue::Null,
+            name(),
+            Some(fallback()),
+            vec![IntrinsicValue::Null, IntrinsicValue::Int32(256)],
+        );
+        assert_eq!(
+            registry_intrinsic_with_reader(
+                &ignored_typed_view,
+                true,
+                true,
+                |_, _, _| -> Result<RegistryReadResult> {
+                    panic!("non-string object views are ignored")
+                },
+            )
+            .unwrap(),
+            fallback()
+        );
     }
 
     #[test]

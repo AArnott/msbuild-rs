@@ -762,7 +762,7 @@ impl<'a> ExpressionEvaluator<'a> {
             .get(..9)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Registry:"))
         {
-            return Ok(escape(&expand_registry_property(expression)?));
+            return expand_registry_property(expression);
         }
         if let Some(value) = missing_registry_prefix(expression)? {
             return Ok(value);
@@ -892,6 +892,28 @@ impl<'a> ExpressionEvaluator<'a> {
         })
     }
 
+    fn evaluate_exact_static_function_outcome(
+        &self,
+        expression: &str,
+        depth: usize,
+    ) -> Result<Option<IntrinsicOutcome>> {
+        if depth > MAX_EXPRESSION_NESTING || !expression.starts_with("$(") {
+            if depth > MAX_EXPRESSION_NESTING {
+                bail!("Expression nesting exceeds the supported limit of {MAX_EXPRESSION_NESTING}");
+            }
+            return Ok(None);
+        }
+        let end = find_matching_parenthesis(expression, 1)?;
+        if end + 1 != expression.len() {
+            return Ok(None);
+        }
+        let Some(function) = expression[2..end].strip_prefix('[') else {
+            return Ok(None);
+        };
+        self.evaluate_static_function_outcome(function, depth)
+            .map(Some)
+    }
+
     fn invoke_instance_operation(
         &self,
         receiver: IntrinsicValue,
@@ -942,6 +964,11 @@ impl<'a> ExpressionEvaluator<'a> {
         // producing a better diagnostic, this guarantees a rejected receiver
         // cannot trigger nested work before it is blocked.
         let descriptor = resolve(type_name, member, kind, raw_arguments.len())?;
+        // These object/default and params-object arguments are the registry
+        // intrinsics' only route for retaining exact nested return types.
+        let preserve_typed_registry_argument = type_name.eq_ignore_ascii_case("MSBuild")
+            && (member.eq_ignore_ascii_case("GetRegistryValue")
+                || member.eq_ignore_ascii_case("GetRegistryValueFromView"));
         let arguments = raw_arguments
             .into_iter()
             .map(|raw| {
@@ -954,7 +981,19 @@ impl<'a> ExpressionEvaluator<'a> {
                     });
                 }
                 let expression = unquote(raw);
-                let evaluated = self.evaluate_with_depth(&expression, depth + 1)?;
+                let evaluated = if preserve_typed_registry_argument
+                    && let Some(outcome) =
+                        self.evaluate_exact_static_function_outcome(&expression, depth + 1)?
+                {
+                    if !matches!(&outcome.value, IntrinsicValue::String(_)) {
+                        return Ok(IntrinsicArgument {
+                            value: outcome.value,
+                        });
+                    }
+                    render_intrinsic(outcome)?
+                } else {
+                    self.evaluate_with_depth(&expression, depth + 1)?
+                };
                 let value = match descriptor.argument_rule {
                     ArgumentRule::Decoded => EscapedString::new(evaluated).decode().into_string(),
                     ArgumentRule::Escaped => evaluated,
@@ -1515,6 +1554,11 @@ fn render_intrinsic(outcome: IntrinsicOutcome) -> Result<String> {
         (ResultRule::Escape, IntrinsicValue::Strings(values)) => Ok(values
             .into_iter()
             .map(|value| DecodedString::new(value).into_escaped().into_string())
+            .collect::<Vec<_>>()
+            .join(";")),
+        (ResultRule::Escape, IntrinsicValue::Bytes(values)) => Ok(values
+            .into_iter()
+            .map(|value| value.to_string())
             .collect::<Vec<_>>()
             .join(";")),
         (result_rule, value) => {
@@ -2533,6 +2577,12 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Registry:")
+        );
+        assert_eq!(
+            evaluator.evaluate(
+                "$([MSBuild]::GetRegistryValueFromView(null, null, $([System.Int32]::Parse('42'))).CompareTo(100))"
+            )?,
+            "-1"
         );
         Ok(())
     }

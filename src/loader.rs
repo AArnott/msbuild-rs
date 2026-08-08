@@ -4,6 +4,7 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,6 +41,7 @@ struct EvaluationState {
     filesystem_directory: PathBuf,
     item_glob_cache: HashMap<String, Arc<Vec<ItemGlobMatch>>>,
     item_identity_index: HashMap<String, HashMap<String, Vec<usize>>>,
+    preprocessed_import_initial_targets: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -302,7 +304,13 @@ pub(crate) fn load_project(
         sdk_root,
         toolset,
     )?;
-    let body = state.evaluate_file(&project_path, true)?;
+    let mut body = state.evaluate_file(&project_path, true)?;
+    if render_preprocessed && !state.preprocessed_import_initial_targets.is_empty() {
+        body = aggregate_preprocessed_initial_targets(
+            &body,
+            &state.preprocessed_import_initial_targets,
+        )?;
+    }
     state.model.compact_inactive_items();
     let preprocessed = render_preprocessed.then(|| {
         normalize_output(&format!(
@@ -390,6 +398,7 @@ impl EvaluationState {
                 .context("Failed to determine the process working directory")?,
             item_glob_cache: HashMap::new(),
             item_identity_index: HashMap::new(),
+            preprocessed_import_initial_targets: Vec::new(),
         })
     }
 
@@ -433,6 +442,7 @@ impl EvaluationState {
         validate_project_structure(&source, &lexical_path)?;
         let (content_start, content_end) =
             project_content_bounds(&source, include_project_element)?;
+        self.evaluate_project_initial_targets(&source, &lexical_path, include_project_element)?;
         self.evaluate_treat_as_local_property(&source, &lexical_path)?;
         let sdk_references = project_sdks(&source)?;
         let mut sdk_imports = Vec::with_capacity(sdk_references.len());
@@ -1047,6 +1057,35 @@ impl EvaluationState {
             })?;
         self.model
             .set_property("MSBuildProjectDefaultTargets".to_string(), evaluated);
+        Ok(())
+    }
+
+    fn evaluate_project_initial_targets(
+        &mut self,
+        source: &str,
+        current_file: &Path,
+        include_project_element: bool,
+    ) -> Result<()> {
+        let Some(initial_targets) = project_attribute(source, b"InitialTargets")? else {
+            return Ok(());
+        };
+
+        let trimmed = initial_targets.trim();
+        if self.render_preprocessed && !include_project_element && !trimmed.is_empty() {
+            self.preprocessed_import_initial_targets
+                .push(trimmed.to_string());
+        }
+
+        let evaluated = ExpressionEvaluator::with_current_file(&self.model, current_file)
+            .evaluate(&initial_targets)
+            .with_context(|| {
+                format!(
+                    "Failed to evaluate InitialTargets in {}",
+                    current_file.display()
+                )
+            })?;
+        self.model
+            .add_initial_targets(tokenize_list(&evaluated)?.into_iter().map(unescape_once));
         Ok(())
     }
 
@@ -2146,18 +2185,132 @@ fn project_content_bounds(source: &str, include_project_element: bool) -> Result
 }
 
 fn project_treat_as_local_property(source: &str) -> Result<Option<String>> {
+    project_attribute(source, b"TreatAsLocalProperty")
+}
+
+fn project_attribute(source: &str, name: &[u8]) -> Result<Option<String>> {
     let mut reader = Reader::from_str(source);
     loop {
         match reader.read_event()? {
             Event::Start(element) | Event::Empty(element)
                 if element.name().as_ref() == b"Project" =>
             {
-                return attribute_value(&element, &reader, b"TreatAsLocalProperty");
+                return attribute_value(&element, &reader, name);
             }
             Event::Eof => return Ok(None),
             _ => {}
         }
     }
+}
+
+fn aggregate_preprocessed_initial_targets(
+    source: &str,
+    imported_initial_targets: &[String],
+) -> Result<String> {
+    let mut aggregate = project_attribute(source, b"InitialTargets")?
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    for imported in imported_initial_targets {
+        if !aggregate.is_empty() {
+            aggregate.push(';');
+        }
+        aggregate.push_str(imported);
+    }
+
+    let mut reader = Reader::from_str(source);
+    loop {
+        let event_start = reader.buffer_position() as usize;
+        let event = reader.read_event()?;
+        let event_end = reader.buffer_position() as usize;
+        match event {
+            Event::Start(element) | Event::Empty(element)
+                if element.name().as_ref() == b"Project" =>
+            {
+                let opening = &source[event_start..event_end];
+                let escaped = quick_xml::escape::escape(&aggregate);
+                if let Some(range) = xml_attribute_value_range(opening, "InitialTargets") {
+                    let mut output =
+                        String::with_capacity(source.len() + escaped.len() - range.len());
+                    output.push_str(&source[..event_start + range.start]);
+                    output.push_str(&escaped);
+                    output.push_str(&source[event_start + range.end..]);
+                    return Ok(output);
+                }
+
+                let insertion = opening
+                    .rfind("/>")
+                    .unwrap_or_else(|| opening.rfind('>').expect("parsed Project tag has an end"));
+                let mut output = String::with_capacity(source.len() + escaped.len() + 18);
+                output.push_str(&source[..event_start + insertion]);
+                output.push_str(" InitialTargets=\"");
+                output.push_str(&escaped);
+                output.push('"');
+                output.push_str(&source[event_start + insertion..]);
+                return Ok(output);
+            }
+            Event::Eof => bail!("Project root element was not found"),
+            _ => {}
+        }
+    }
+}
+
+fn xml_attribute_value_range(opening: &str, sought_name: &str) -> Option<Range<usize>> {
+    let bytes = opening.as_bytes();
+    let mut position = 1;
+    while position < bytes.len()
+        && !bytes[position].is_ascii_whitespace()
+        && !matches!(bytes[position], b'>' | b'/')
+    {
+        position += 1;
+    }
+
+    while position < bytes.len() {
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        if position >= bytes.len() || matches!(bytes[position], b'>' | b'/') {
+            return None;
+        }
+
+        let name_start = position;
+        while position < bytes.len()
+            && !bytes[position].is_ascii_whitespace()
+            && !matches!(bytes[position], b'=' | b'>' | b'/')
+        {
+            position += 1;
+        }
+        let name_end = position;
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        if bytes.get(position) != Some(&b'=') {
+            return None;
+        }
+        position += 1;
+        while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+            position += 1;
+        }
+        let quote = *bytes.get(position)?;
+        if !matches!(quote, b'\'' | b'"') {
+            return None;
+        }
+        position += 1;
+        let value_start = position;
+        while position < bytes.len() && bytes[position] != quote {
+            position += 1;
+        }
+        if position >= bytes.len() {
+            return None;
+        }
+        let value_end = position;
+        position += 1;
+
+        if &opening[name_start..name_end] == sought_name {
+            return Some(value_start..value_end);
+        }
+    }
+    None
 }
 
 fn is_valid_xml_name(name: &str) -> bool {

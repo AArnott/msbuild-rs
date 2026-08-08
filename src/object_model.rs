@@ -699,6 +699,7 @@ pub struct ProjectModel {
     item_definitions: CaseInsensitiveMap<Arc<MetadataMap>>,
     all_evaluated_item_definition_metadata: Vec<EvaluatedItemDefinitionMetadata>,
     pub targets: IndexMap<String, Target>,
+    initial_targets: Vec<String>,
     pub imports: Vec<Import>,
     pub using_tasks: HashMap<String, String>,
     pub project_file_path: Option<PathBuf>,
@@ -840,6 +841,17 @@ impl ProjectModel {
 
     pub fn get_target(&self, name: &str) -> Option<&Target> {
         self.targets.get(name)
+    }
+
+    pub(crate) fn add_initial_targets<I>(&mut self, targets: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.initial_targets.extend(targets);
+    }
+
+    pub(crate) fn initial_targets(&self) -> &[String] {
+        &self.initial_targets
     }
 
     pub fn add_import(&mut self, import: Import) {

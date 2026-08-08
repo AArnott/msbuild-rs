@@ -104,12 +104,16 @@ spellings such as `10.0` for integral arithmetic overloads, the common
 `net`/`netcoreapp`/`netstandard`/short `net4x` TFM projection helpers, and
 empty-platform `ToolLocationHelper` probes. Those narrow inputs are retained
 and direct-fixture tested; broader culture-sensitive or NuGet compatibility
-behavior is not inferred. Casing first proves the complete receiver is ASCII,
-then maps ASCII bytes into one result allocation. Every non-ASCII receiver is
-rejected with an unsupported-native-input diagnostic reserved for a future
-CoreCLR fallback. This avoids the known .NET 10 mismatches, including U+019B,
-in Rust/ICU Unicode tables while making the common SDK and MicroBuild ASCII
-paths exact.
+behavior is not inferred. Invariant casing accepts every ASCII receiver.
+Current-culture casing accepts only the ASCII subset whose result is identical
+across supported .NET cultures: `ToUpper` rejects lowercase `i`, and `ToLower`
+rejects uppercase `I`, with a fallback-required diagnostic. A direct .NET
+10.0.302 scan of every reported neutral and specific culture found no other
+culture-sensitive ASCII input; Turkish and Azeri produce U+0130/U+0131 where
+en-US produces `I`/`i`. Every non-ASCII receiver is also rejected for a future
+CoreCLR fallback. This avoids known .NET 10 Unicode-table mismatches while
+keeping the common SDK, MicroBuild, and
+`ConfigAndSignBuildMetadata.ToUpper()` paths native.
 `StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
 UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
 
@@ -294,8 +298,9 @@ sorted ancestor union. Per-item string dispatch is a static allowlist:
 `Trim()`, `Trim/TrimStart/TrimEnd(string-as-char-set)`, `Replace`,
 `Substring`, `Contains`, ordinal `Equals`, `get_Length`, and the four
 zero-argument ASCII casing members. This includes the `Trim`, `TrimStart`,
-`Replace`, and casing forms present in the pinned .NET 10 SDK. Casing rejects
-non-ASCII item identities before mapping.
+`Replace`, and casing forms present in the pinned .NET 10 SDK. Per-item casing
+uses the same invariant-ASCII and conservative current-culture `i`/`I` policy
+as property functions, and rejects non-ASCII identities before mapping.
 
 Timestamp metadata follows MSBuild's unusual filesystem rooting: relative item
 identities are probed from the process working directory, not the root or
@@ -337,7 +342,22 @@ lock is retained, so finalized projects remain `Send + Sync`.
   `WorkloadManifest.targets`. Resolver state is built at most once per
   evaluation, never invokes a process per import, and never acquires NuGet
   packages.
+- [x] Aggregate nonempty imported `Project@InitialTargets` values onto the
+  preprocessed root in depth-first document/import order, retaining repeated
+  target names and raw property expressions while excluding skipped, duplicate,
+  and circular imports.
 - [x] Preserve an aggregated source representation equivalent to `/pp`.
+
+Each file's `InitialTargets` is separately property-expanded and split when
+that file is entered, then retained in the evaluated model. Explicit target
+execution runs this ordered list before the requested target and de-duplicates
+actual target execution through the shared target graph. `/pp` instead follows
+upstream `Preprocessor_Tests.InitialTargetsOuterAndInner`: it trims and
+semicolon-concatenates the raw attributes onto the root without expanding
+properties or de-duplicating target names. Other root attributes remain
+unchanged. Focused tests cover root, nested and sibling imports, false
+conditions, duplicate imports, repeated names, and source-position property
+expansion; the standalone NBGV fixture covers `NBGV_SetDefaults`.
 
 Workload-set selection distinguishes global.json pins, install-state pins, and
 automatic latest-set selection. `sdk.workloads-update-mode` supplies the
@@ -396,8 +416,9 @@ also explicitly deferred.
   `MSBuildItemGlob` items, and `GetAllGlobs` reporting remain deferred. Repeated
   identical eager patterns are cached within one evaluation.
 - Per-item .NET string functions intentionally expose only the deterministic
-  allowlist documented above. Non-ASCII casing, comparison/search overloads,
-  and every unlisted member remain pruned rather than being approximated.
+  allowlist documented above. Non-ASCII casing, current-culture casing inputs
+  requiring Turkish/Azeri-specific results, comparison/search overloads, and
+  every unlisted member remain pruned rather than being approximated.
 - Native property functions deliberately remain a supported subset of
   MSBuild's legal .NET receiver surface. Regex, URI/culture/time-span,
   directory/file enumeration, ToolLocationHelper, broad numeric/enum

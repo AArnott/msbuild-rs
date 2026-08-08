@@ -13,7 +13,8 @@ A MSBuild project reader and executor written in Rust.
 - **Expression Evaluation**: Supports `$(PropertyName)` and `@(ItemType)` syntax for property and item references
 - **Conditional Evaluation**: Supports boolean, equality, relational, version,
   filesystem, and selected intrinsic condition forms
-- **Target Dependencies**: Executes targets in dependency order using `DependsOnTargets`
+- **Target Dependencies**: Executes aggregated `InitialTargets`, then requested
+  targets in dependency order using `DependsOnTargets`
 - **Import Support**: Processes `<Import>` elements to include other project files
 - **SDK Imports**: Resolves the active .NET SDK through the `dotnet` host and
   supports `Project@Sdk` plus top-level `<Sdk Name="..." Version="..." />`.
@@ -161,12 +162,13 @@ read-only registry intrinsics preserve DWORD/QWORD numbers, embedded string
 NULs, and multi-string/byte arrays through member chains; `REG_NONE` uses the
 same byte-list model as `REG_BINARY`. Culture-sensitive floating MSBuild
 arithmetic and Math/Double/Convert overloads, Guid X parsing (X formatting
-remains), non-ASCII/current-culture casing, broad CLR formatting, full NuGet
-TFM compatibility, and OS-bitness queries are deliberately pruned rather than
-approximated. The four zero-argument String casing methods have an exact ASCII
-native path; non-ASCII input requires a managed fallback or a .NET-versioned
-Unicode table because the host Rust/ICU table is observably wrong for .NET 10
-cases such as U+019B. See the compatibility worklist.
+remains), non-ASCII casing, broad CLR formatting, full NuGet TFM compatibility,
+and OS-bitness queries are deliberately pruned rather than approximated. The
+four zero-argument String casing methods have a conservative exact ASCII native
+path: invariant calls accept all ASCII, while current-culture `ToUpper` rejects
+lowercase `i` and `ToLower` rejects uppercase `I` because Turkish/Azeri results
+differ. Non-ASCII and those culture-sensitive inputs require a managed fallback
+or a .NET-versioned Unicode table. See the compatibility worklist.
 CoreCLR will load lazily so it does not affect projects that stay on native fast
 paths.
 

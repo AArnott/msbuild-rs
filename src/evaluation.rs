@@ -235,6 +235,10 @@ impl ProjectEvaluator {
     pub fn execute_target(&self, target_name: &str) -> Result<()> {
         info!("Executing target: {target_name}");
         let mut executed_targets = HashSet::new();
+        let initial_targets = self.model()?.initial_targets().to_vec();
+        for initial_target in initial_targets {
+            self.execute_target_recursive(&initial_target, &mut executed_targets)?;
+        }
         self.execute_target_recursive(target_name, &mut executed_targets)
     }
 
@@ -2853,6 +2857,28 @@ mod tests {
         assert_eq!(identities("UpperInvariant"), ["AB-CD", "XYZ", "A;B"]);
         assert_eq!(identities("LowerInvariant"), ["ab-cd", "xyz", "a;b"]);
 
+        for (member, input) in [("ToUpper", "i"), ("ToLower", "I")] {
+            let project = write_project(
+                &directory,
+                "project.proj",
+                &format!(
+                    r#"<Project><ItemGroup>
+  <I Include="{input}" />
+  <Rejected Include="@(I->{member}())" />
+</ItemGroup></Project>"#
+                ),
+            );
+            let error = format!(
+                "{:#}",
+                ProjectEvaluator::new().load_project(project).unwrap_err()
+            );
+            assert!(error.contains("current-culture ASCII"), "{member}: {error}");
+            assert!(
+                error.contains("requires a CoreCLR fallback"),
+                "{member}: {error}"
+            );
+        }
+
         for member in ["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"] {
             let project = write_project(
                 &directory,
@@ -2873,6 +2899,83 @@ mod tests {
                 "{member}: {error}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn upstream_initial_targets_aggregate_for_preprocessing_and_execution() -> Result<()> {
+        let directory = TempDir::new()?;
+        write_project(
+            &directory,
+            "nested.props",
+            r#"<Project InitialTargets="Nested;Shared;$(Inside)">
+  <Target Name="Nested" />
+</Project>"#,
+        );
+        write_project(
+            &directory,
+            "first.props",
+            r#"<Project InitialTargets="First;Shared;$(Prefix);$(Inside)">
+  <PropertyGroup>
+    <Inside>Inside</Inside>
+    <FromFirst>yes</FromFirst>
+  </PropertyGroup>
+  <Import Project="nested.props" />
+  <Target Name="First" />
+</Project>"#,
+        );
+        write_project(
+            &directory,
+            "skipped.props",
+            r#"<Project InitialTargets="Skipped"><Target Name="Skipped" /></Project>"#,
+        );
+        write_project(
+            &directory,
+            "second.props",
+            r#"<Project InitialTargets="Second;Shared;$(Prefix);$(FromFirst)">
+  <Target Name="Second" />
+</Project>"#,
+        );
+        let project = write_project(
+            &directory,
+            "project.proj",
+            r#"<Project DefaultTargets="Main" InitialTargets=" Root;Shared;$(AtRoot) " ToolsVersion="Current" TreatAsLocalProperty="Local">
+  <PropertyGroup>
+    <Prefix>Parent</Prefix>
+    <EnableSecond>true</EnableSecond>
+  </PropertyGroup>
+  <Import Project="first.props" />
+  <PropertyGroup><Prefix>Between</Prefix></PropertyGroup>
+  <Import Project="skipped.props" Condition="false" />
+  <Import Project="second.props" Condition="'$(EnableSecond)' == 'true'" />
+  <Import Project="first.props" />
+  <Target Name="Root"><Error Text="initial target ran" /></Target>
+  <Target Name="Main" />
+</Project>"#,
+        );
+        let output_path = directory.path().join("preprocessed.xml");
+        let mut evaluator = ProjectEvaluator::new();
+        evaluator.load_project_and_write_preprocessed(&project, &output_path)?;
+
+        // Ports Preprocessor_Tests.InitialTargetsOuterAndInner and direct
+        // depth-first/conditional/duplicate/property-expansion probes.
+        assert_eq!(
+            evaluator.get_model().initial_targets(),
+            [
+                "Root", "Shared", "First", "Shared", "Parent", "Nested", "Shared", "Inside",
+                "Second", "Shared", "Between", "yes"
+            ]
+        );
+
+        let output = fs::read_to_string(output_path)?;
+        assert!(output.contains(
+            r#"<Project DefaultTargets="Main" InitialTargets="Root;Shared;$(AtRoot);First;Shared;$(Prefix);$(Inside);Nested;Shared;$(Inside);Second;Shared;$(Prefix);$(FromFirst)" ToolsVersion="Current" TreatAsLocalProperty="Local">"#
+        ));
+        assert!(!output.contains("InitialTargets=\"Skipped"));
+        assert_eq!(output.matches("InitialTargets=").count(), 1);
+
+        let error = evaluator.execute_target("Main").unwrap_err().to_string();
+        assert!(error.contains("initial target ran"), "{error}");
         Ok(())
     }
 

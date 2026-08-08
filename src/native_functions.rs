@@ -2765,6 +2765,17 @@ fn map_ascii_case(receiver: &str, member: &str) -> Result<String> {
         );
     }
 
+    if member.eq_ignore_ascii_case("ToUpper") && receiver.as_bytes().contains(&b'i') {
+        bail!(
+            "Unsupported native input for System.String.{member}: current-culture ASCII 'i' casing differs in Turkish and Azeri cultures and requires a CoreCLR fallback"
+        );
+    }
+    if member.eq_ignore_ascii_case("ToLower") && receiver.as_bytes().contains(&b'I') {
+        bail!(
+            "Unsupported native input for System.String.{member}: current-culture ASCII 'I' casing differs in Turkish and Azeri cultures and requires a CoreCLR fallback"
+        );
+    }
+
     let mut result = receiver.to_owned();
     if member.eq_ignore_ascii_case("ToUpper") || member.eq_ignore_ascii_case("ToUpperInvariant") {
         result.make_ascii_uppercase();
@@ -5718,12 +5729,13 @@ mod tests {
     }
 
     #[test]
-    fn ascii_casing_matches_clr_and_non_ascii_requires_coreclr_fallback() -> Result<()> {
+    fn ascii_casing_matches_exact_native_subset_and_requires_coreclr_when_uncertain() -> Result<()>
+    {
         for (member, input, expected) in [
             ("ToUpper", "Abc-123_z", "ABC-123_Z"),
             ("ToLower", "AbC-123_Z", "abc-123_z"),
-            ("ToUpperInvariant", "Abc-123_z", "ABC-123_Z"),
-            ("ToLowerInvariant", "AbC-123_Z", "abc-123_z"),
+            ("ToUpperInvariant", "Ascii-Ii", "ASCII-II"),
+            ("ToLowerInvariant", "Ascii-Ii", "ascii-ii"),
             ("ToUpper", "", ""),
             ("ToLowerInvariant", "", ""),
         ] {
@@ -5770,6 +5782,33 @@ mod tests {
             assert!(error.contains("non-ASCII casing"), "{member}: {error}");
             assert!(error.contains("CoreCLR fallback"), "{member}: {error}");
         }
+
+        // Direct .NET 10.0.302 research across every reported neutral and
+        // specific culture found these as the only culture-sensitive ASCII
+        // mappings. en-US produces I/i; Turkish and Azeri produce İ/ı.
+        for (member, input, en_us, turkish) in [
+            ("ToUpper", "i", "I", "\u{0130}"),
+            ("ToLower", "I", "i", "\u{0131}"),
+        ] {
+            assert_ne!(en_us, turkish);
+            let error = map_ascii_case(input, member).unwrap_err().to_string();
+            assert!(error.contains("current-culture ASCII"), "{member}: {error}");
+            assert!(error.contains("Turkish and Azeri"), "{member}: {error}");
+            assert!(
+                error.contains("requires a CoreCLR fallback"),
+                "{member}: {error}"
+            );
+
+            let item_error = invoke_item_string_function(member, input, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                item_error.contains("requires a CoreCLR fallback"),
+                "{member}: {item_error}"
+            );
+        }
+        assert_eq!(map_ascii_case("i", "ToUpperInvariant")?, "I");
+        assert_eq!(map_ascii_case("I", "ToLowerInvariant")?, "i");
         Ok(())
     }
 

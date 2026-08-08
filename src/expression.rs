@@ -2305,6 +2305,8 @@ mod tests {
         model.set_property("Mixed".to_string(), "Ab-Cd_123".to_string());
         model.set_property("Escaped".to_string(), "a%3bb".to_string());
         model.set_property("Unicode".to_string(), "Straße".to_string());
+        model.set_property("TurkishUpper".to_string(), "i".to_string());
+        model.set_property("TurkishLower".to_string(), "I".to_string());
         let evaluator = ExpressionEvaluator::new(&model);
 
         // Direct dotnet MSBuild comparisons on .NET SDK 10.0.302.
@@ -2320,6 +2322,30 @@ mod tests {
             evaluator.evaluate("$([System.String]::Copy('aBc').ToLowerInvariant().Length)")?,
             "3"
         );
+        assert_eq!(
+            evaluator.evaluate("$(TurkishUpper.ToUpperInvariant())")?,
+            "I"
+        );
+        assert_eq!(
+            evaluator.evaluate("$(TurkishLower.ToLowerInvariant())")?,
+            "i"
+        );
+
+        // Direct .NET 10.0.302: en-US maps i/I to I/i, while tr-TR and
+        // Azeri map them to U+0130/U+0131. Current-culture calls must fall back.
+        for (property, member) in [("TurkishUpper", "ToUpper"), ("TurkishLower", "ToLower")] {
+            let error = format!(
+                "{:#}",
+                evaluator
+                    .evaluate(&format!("$({property}.{member}())"))
+                    .unwrap_err()
+            );
+            assert!(error.contains("current-culture ASCII"), "{member}: {error}");
+            assert!(
+                error.contains("requires a CoreCLR fallback"),
+                "{member}: {error}"
+            );
+        }
 
         for member in ["ToUpper", "ToLower", "ToUpperInvariant", "ToLowerInvariant"] {
             let error = format!(

@@ -1,0 +1,8 @@
+<Project DefaultTargets="Build" ToolsVersion="Current">
+  <PropertyGroup>
+    <EnableNbgv>true</EnableNbgv>
+  </PropertyGroup>
+  <Import Project="imports/Nerdbank.GitVersioning.Tasks.targets"
+          Condition="'$(EnableNbgv)' == 'true'" />
+  <Target Name="Build" />
+</Project>

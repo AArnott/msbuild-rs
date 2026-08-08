@@ -186,13 +186,14 @@ cargo test
 # Run with sample projects
 cargo run -- --demo
 
-# Compare fresh-process preprocessing performance. Normalized /pp parity is a
+# Compare fresh-process end-to-end preprocessing. Normalized /pp parity is a
 # mandatory gate before warmups or measurements.
 cargo build --release
 ./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
 
 # Generate fixed-seed large fixtures, verify their manifest/hashes, and run the
-# simple case plus properties, items, conditions, imports, and mixed cases.
+# fresh-process preprocess and evaluation-query modes for simple plus every
+# generated properties, items, conditions, imports, and representative case.
 ./scripts/generate-performance-fixtures.ps1 -Preset Benchmark
 ./scripts/generate-performance-fixtures.ps1 -VerifyOnly
 ./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
@@ -220,6 +221,9 @@ text, and order.
 Performance generation, parity eligibility, interleaved process timing, peak
 working set, artifact schemas, scale knobs, and interpretation guidance are
 documented in [the performance benchmarking guide](docs/performance-benchmarking.md).
+Reported ratios are fresh-process end-to-end preprocess or target-free
+evaluation-query measurements, not in-process Rust library throughput. The
+suite applies no hard performance threshold.
 
 ## Sample Projects
 

@@ -228,6 +228,12 @@ for ($index = 0; $index -lt $presetConfiguration.propertyCount; $index++) {
     $propertyLines.Add(('    <GeneratedProperty{0:D6}>value-{1}%3B$({2})%2525</GeneratedProperty{0:D6}>' -f $index, $token, $previous)) | Out-Null
 }
 $propertyLines.Add("  </PropertyGroup>") | Out-Null
+$lastPropertyName = "GeneratedProperty{0:D6}" -f ($presetConfiguration.propertyCount - 1)
+$propertyLines.Add("  <ItemGroup>") | Out-Null
+$propertyLines.Add('    <BenchmarkProbe Include="properties">') | Out-Null
+$propertyLines.Add("      <FinalValue>`$($lastPropertyName)</FinalValue>") | Out-Null
+$propertyLines.Add("    </BenchmarkProbe>") | Out-Null
+$propertyLines.Add("  </ItemGroup>") | Out-Null
 $propertyLines.Add("</Project>") | Out-Null
 Write-DeterministicFile (Join-Path $propertiesDirectory "project.proj") (Join-Lines $propertyLines)
 $caseSpecifications.Add([pscustomobject][ordered]@{
@@ -235,6 +241,15 @@ $caseSpecifications.Add([pscustomobject][ordered]@{
         kind = "properties"
         project = "properties/project.proj"
         parameters = [ordered]@{ propertyCount = $presetConfiguration.propertyCount }
+        query = [ordered]@{
+            properties = @("EscapedValue", $lastPropertyName)
+            items = @(
+                [ordered]@{
+                    type = "BenchmarkProbe"
+                    metadata = @("FinalValue")
+                }
+            )
+        }
     }) | Out-Null
 
 # Items, item definitions, metadata, escaped specs, and globs.
@@ -282,6 +297,10 @@ for ($start = 0; $start -lt $presetConfiguration.itemCount; $start += $chunkSize
     $itemLines.Add("    </GeneratedAsset>") | Out-Null
 }
 $itemLines.Add("    <GeneratedNames Include=`"@(GeneratedAsset->'%(Filename)')`" />") | Out-Null
+$itemLines.Add('    <BenchmarkProbe Include="items">') | Out-Null
+$itemLines.Add("      <EvaluatedCount>@(GeneratedAsset-&gt;Count())</EvaluatedCount>") | Out-Null
+$itemLines.Add("      <ProjectedCount>@(GeneratedNames-&gt;Count())</ProjectedCount>") | Out-Null
+$itemLines.Add("    </BenchmarkProbe>") | Out-Null
 $itemLines.Add("  </ItemGroup>") | Out-Null
 $itemLines.Add("</Project>") | Out-Null
 Write-DeterministicFile (Join-Path $itemsDirectory "project.proj") (Join-Lines $itemLines)
@@ -292,6 +311,15 @@ $caseSpecifications.Add([pscustomobject][ordered]@{
         parameters = [ordered]@{
             itemCount = $presetConfiguration.itemCount
             globFileCount = $presetConfiguration.globFileCount
+        }
+        query = [ordered]@{
+            properties = @("GeneratedSeed")
+            items = @(
+                [ordered]@{
+                    type = "BenchmarkProbe"
+                    metadata = @("EvaluatedCount", "ProjectedCount")
+                }
+            )
         }
     }) | Out-Null
 
@@ -313,6 +341,12 @@ for ($index = 0; $index -lt $presetConfiguration.conditionCount; $index++) {
     $conditionLines.Add(('    <GeneratedCondition{0:D6} Condition="{1}">condition-{2}%3Bvalue</GeneratedCondition{0:D6}>' -f $index, $condition, $token)) | Out-Null
 }
 $conditionLines.Add("  </PropertyGroup>") | Out-Null
+$lastConditionName = "GeneratedCondition{0:D6}" -f ($presetConfiguration.conditionCount - 1)
+$conditionLines.Add("  <ItemGroup>") | Out-Null
+$conditionLines.Add('    <BenchmarkProbe Include="conditions">') | Out-Null
+$conditionLines.Add("      <FinalValue>`$($lastConditionName)</FinalValue>") | Out-Null
+$conditionLines.Add("    </BenchmarkProbe>") | Out-Null
+$conditionLines.Add("  </ItemGroup>") | Out-Null
 $conditionLines.Add("</Project>") | Out-Null
 Write-DeterministicFile (Join-Path $conditionsDirectory "project.proj") (Join-Lines $conditionLines)
 $caseSpecifications.Add([pscustomobject][ordered]@{
@@ -320,6 +354,15 @@ $caseSpecifications.Add([pscustomobject][ordered]@{
         kind = "conditions"
         project = "conditions/project.proj"
         parameters = [ordered]@{ conditionCount = $presetConfiguration.conditionCount }
+        query = [ordered]@{
+            properties = @($lastConditionName)
+            items = @(
+                [ordered]@{
+                    type = "BenchmarkProbe"
+                    metadata = @("FinalValue")
+                }
+            )
+        }
     }) | Out-Null
 
 # Import graph: independent lanes provide deterministic breadth and each lane has the requested depth.
@@ -336,6 +379,14 @@ for ($lane = 0; $lane -lt $presetConfiguration.importWidth; $lane++) {
     $importRootLines.Add(('    <Import Project="graph/depth-000-lane-{0:D3}.props" />' -f $lane)) | Out-Null
 }
 $importRootLines.Add("  </ImportGroup>") | Out-Null
+$lastImportProperty = "ImportLane{0:D3}Depth{1:D3}" -f (
+    $presetConfiguration.importWidth - 1), ($presetConfiguration.importDepth - 1)
+$importRootLines.Add("  <ItemGroup>") | Out-Null
+$importRootLines.Add('    <BenchmarkProbe Include="imports">') | Out-Null
+$importRootLines.Add("      <ImportedCount>@(ImportedNode-&gt;Count())</ImportedCount>") | Out-Null
+$importRootLines.Add("      <FinalValue>`$($lastImportProperty)</FinalValue>") | Out-Null
+$importRootLines.Add("    </BenchmarkProbe>") | Out-Null
+$importRootLines.Add("  </ItemGroup>") | Out-Null
 $importRootLines.Add("</Project>") | Out-Null
 Write-DeterministicFile (Join-Path $importsDirectory "project.proj") (Join-Lines $importRootLines)
 for ($lane = 0; $lane -lt $presetConfiguration.importWidth; $lane++) {
@@ -369,6 +420,15 @@ $caseSpecifications.Add([pscustomobject][ordered]@{
             importDepth = $presetConfiguration.importDepth
             importWidth = $presetConfiguration.importWidth
             importedFileCount = $presetConfiguration.importDepth * $presetConfiguration.importWidth
+        }
+        query = [ordered]@{
+            properties = @($lastImportProperty)
+            items = @(
+                [ordered]@{
+                    type = "BenchmarkProbe"
+                    metadata = @("ImportedCount", "FinalValue")
+                }
+            )
         }
     }) | Out-Null
 
@@ -443,6 +503,14 @@ for ($start = 0; $start -lt $mixedItemCount; $start += $chunkSize) {
     $mixedLines.Add("    </MixedAsset>") | Out-Null
 }
 $mixedLines.Add("    <MixedNames Include=`"@(MixedAsset->'%(Filename)')`" />") | Out-Null
+$lastMixedProperty = "MixedProperty{0:D6}" -f ($mixedPropertyCount - 1)
+$lastMixedCondition = "MixedCondition{0:D6}" -f ($mixedConditionCount - 1)
+$lastMixedImport = "MixedImport{0:D3}" -f ($mixedImportDepth - 1)
+$mixedLines.Add('    <BenchmarkProbe Include="representative">') | Out-Null
+$mixedLines.Add("      <EvaluatedCount>@(MixedAsset-&gt;Count())</EvaluatedCount>") | Out-Null
+$mixedLines.Add("      <ProjectedCount>@(MixedNames-&gt;Count())</ProjectedCount>") | Out-Null
+$mixedLines.Add("      <FinalValue>`$($lastMixedProperty)|`$($lastMixedCondition)|`$($lastMixedImport)</FinalValue>") | Out-Null
+$mixedLines.Add("    </BenchmarkProbe>") | Out-Null
 $mixedLines.Add("  </ItemGroup>") | Out-Null
 $mixedLines.Add("</Project>") | Out-Null
 Write-DeterministicFile (Join-Path $representativeDirectory "project.proj") (Join-Lines $mixedLines)
@@ -456,6 +524,15 @@ $caseSpecifications.Add([pscustomobject][ordered]@{
             conditionCount = $mixedConditionCount
             importDepth = $mixedImportDepth
             globFileCount = $mixedGlobCount
+        }
+        query = [ordered]@{
+            properties = @($lastMixedProperty, $lastMixedCondition, $lastMixedImport)
+            items = @(
+                [ordered]@{
+                    type = "BenchmarkProbe"
+                    metadata = @("EvaluatedCount", "ProjectedCount", "FinalValue")
+                }
+            )
         }
     }) | Out-Null
 
@@ -472,12 +549,13 @@ foreach ($case in $caseSpecifications) {
             fileCount = $caseRecords.Count
             byteCount = [long](($caseRecords | Measure-Object bytes -Sum).Sum)
             parameters = $case.parameters
+            query = $case.query
         }) | Out-Null
 }
 
 $manifest = [pscustomobject][ordered]@{
-    schemaVersion = 1
-    generatorVersion = "1.0.0"
+    schemaVersion = 2
+    generatorVersion = "1.1.0"
     seed = $Seed
     preset = $Preset
     configuration = $presetConfiguration

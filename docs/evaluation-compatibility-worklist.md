@@ -14,12 +14,17 @@ normalized preprocess fixture pass against dotnet MSBuild and msbuild-rs.
 - [x] Add larger generated fixtures for properties, items, conditions, and import graphs.
 - [x] Report wall-clock distribution.
 - [x] Report peak working set.
+- [x] Compare target-free finalized property/item evaluation through equivalent
+  `-getProperty`/`-getItem` and msbuild-rs query selections.
+- [x] Run and summarize simple plus every generated manifest case in both
+  preprocess and evaluation-query modes.
 
 The performance-finalization baseline is complete. Generated inputs use a
 fixed seed/configuration with per-file, per-fixture, aggregate, and manifest
 SHA-256 values. Timed processes are interleaved and record elapsed wall time
-and `PeakWorkingSet64`; timing is ineligible unless normalized `/pp` parity
-passes first.
+and `PeakWorkingSet64`; timing is ineligible unless normalized mode-specific
+parity passes first. Both ratios are fresh-process end-to-end CLI measurements,
+not in-process library throughput, and no hard CI speed threshold is applied.
 
 Run the current baseline after `cargo build --release`:
 

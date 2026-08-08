@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::escaping::{EscapedString, ItemSpecKind, classify_item_spec, escape, unescape_once};
 use crate::file_times::FileTimes;
@@ -104,22 +104,36 @@ fn hash_name<H: Hasher>(name: &str, state: &mut H) {
 #[derive(Debug, Clone)]
 pub struct EscapedValue {
     escaped: EscapedString,
-    value: String,
+    value: OnceLock<String>,
 }
 
 impl EscapedValue {
     pub fn new(escaped: String) -> Self {
         let escaped = EscapedString::new(escaped);
-        let value = escaped.decode().into_string();
-        Self { escaped, value }
+        Self {
+            escaped,
+            value: OnceLock::new(),
+        }
     }
 
     pub fn value(&self) -> &str {
-        &self.value
+        self.value_string()
+    }
+
+    fn value_string(&self) -> &String {
+        self.value
+            .get_or_init(|| self.escaped.decode().into_string())
     }
 
     pub fn escaped(&self) -> &str {
         self.escaped.as_str()
+    }
+
+    fn into_value(self) -> String {
+        let Self { escaped, value } = self;
+        value
+            .into_inner()
+            .unwrap_or_else(|| escaped.decode().into_string())
     }
 }
 
@@ -136,11 +150,11 @@ impl PropertyMap {
     pub fn insert(&mut self, name: String, value: String) -> Option<String> {
         self.entries
             .insert(name, EscapedValue::new(value))
-            .map(|value| value.value)
+            .map(EscapedValue::into_value)
     }
 
     pub fn get(&self, name: &str) -> Option<&String> {
-        self.entries.get(name).map(|value| &value.value)
+        self.entries.get(name).map(EscapedValue::value_string)
     }
 
     pub fn get_escaped(&self, name: &str) -> Option<&str> {
@@ -158,7 +172,7 @@ impl PropertyMap {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
         self.entries
             .iter()
-            .map(|(name, value)| (name, &value.value))
+            .map(|(name, value)| (name, value.value_string()))
     }
 
     pub fn iter_escaped(&self) -> impl Iterator<Item = (&String, &str)> {
@@ -194,7 +208,7 @@ impl MetadataMap {
     pub fn insert(&mut self, name: String, escaped_value: String) -> Option<String> {
         self.entries
             .insert(name, MetadataValue::new(escaped_value))
-            .map(|value| value.value.value)
+            .map(|value| value.value.into_value())
     }
 
     pub fn get(&self, name: &str) -> Option<&str> {
@@ -853,6 +867,15 @@ mod tests {
     use crate::file_times::{reset_stat_calls, stat_calls};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn escaped_values_decode_lazily() {
+        let value = EscapedValue::new("left%3Bright".to_string());
+
+        assert!(value.value.get().is_none());
+        assert_eq!(value.value(), "left;right");
+        assert!(value.value.get().is_some());
+    }
 
     #[test]
     fn property_lookup_is_case_insensitive_and_decodes_once() {

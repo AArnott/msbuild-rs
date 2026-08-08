@@ -10,6 +10,8 @@ param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "..\benchmark-results"),
     [string]$FixtureName,
     [string]$FixtureHash,
+    [string]$FixtureManifestPath,
+    [string]$FixtureManifestCase,
     [switch]$ParityOnly,
     [switch]$CompareOutput,
     [switch]$FailOnMismatch,
@@ -19,6 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "path-normalization.ps1")
+. (Join-Path $PSScriptRoot "performance-common.ps1")
 
 $script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
@@ -361,9 +364,7 @@ foreach ($staleFile in @("samples.csv", "summary.csv", "summary.json", "parity.j
 if ([string]::IsNullOrWhiteSpace($FixtureName)) {
     $FixtureName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
 }
-if ([string]::IsNullOrWhiteSpace($FixtureHash)) {
-    $FixtureHash = (Get-FileHash -LiteralPath $projectPath -Algorithm SHA256).Hash.ToLowerInvariant()
-}
+$expectedFixtureHash = $FixtureHash
 
 $dotnetSdkVersion = (& $dotnetPath --version).Trim()
 if ($LASTEXITCODE -ne 0) {
@@ -392,7 +393,7 @@ $rustParityArguments = @("--project", $projectPath, "--preprocess", $rustRawOutp
 $dotnetParityCommand = Format-Command $dotnetPath $dotnetParityArguments
 $rustParityCommand = Format-Command $rustPath $rustParityArguments
 
-Write-Host "Fixture: $FixtureName ($FixtureHash)"
+Write-Host "Fixture: $FixtureName"
 Write-Host ".NET SDK: $dotnetSdkVersion"
 Write-Host "MSBuildSDKsPath: $sdkPath"
 Write-Host "Establishing normalized preprocess parity before timing..."
@@ -409,6 +410,20 @@ $rustParity = Invoke-DirectProcess `
     -WorkingDirectory $projectDirectory `
     -StdoutPath (Join-Path $rawPath "rust-parity.stdout.txt") `
     -StderrPath (Join-Path $rawPath "rust-parity.stderr.txt")
+
+$fixtureIdentityArguments = @{
+    ProjectPath = $projectPath
+    ManifestPath = $FixtureManifestPath
+    ManifestCase = $FixtureManifestCase
+    SdkPath = $sdkPath
+    ExpectedHash = $expectedFixtureHash
+}
+if (Test-Path -LiteralPath $dotnetRawOutput) {
+    $fixtureIdentityArguments.AggregatePreprocessPath = $dotnetRawOutput
+}
+$fixtureIdentity = Get-PerformanceFixtureIdentity @fixtureIdentityArguments
+$FixtureHash = $fixtureIdentity.fixtureHash
+Write-Host "Fixture identity: $FixtureHash ($($fixtureIdentity.source), $($fixtureIdentity.inputCount) input file(s))"
 
 $parityPassed = $false
 $parityMessage = ""
@@ -444,8 +459,10 @@ else {
 $parity = [pscustomobject][ordered]@{
     status = if ($parityPassed) { "passed" } else { "failed" }
     message = $parityMessage
+    mode = "preprocess"
     fixture = $FixtureName
     fixtureHash = $FixtureHash
+    fixtureIdentity = $fixtureIdentity
     comparison = if ($SemanticXmlComparison) { "semanticXml" } else { "normalizedText" }
     dotnet = [ordered]@{
         command = $dotnetParityCommand
@@ -463,10 +480,13 @@ $parity = [pscustomobject][ordered]@{
 Write-JsonFile (Join-Path $outputPath "parity.json") $parity
 
 $runMetadata = [pscustomobject][ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     startedAtUtc = $startedAtUtc
+    mode = "preprocess"
+    measurementKind = "fresh-process end-to-end preprocess"
     fixture = $FixtureName
     fixtureHash = $FixtureHash
+    fixtureIdentity = $fixtureIdentity
     project = $projectPath
     commitSha = $commitSha
     repositoryDirty = $repositoryDirty
@@ -545,6 +565,8 @@ function Invoke-BenchmarkSample {
         Phase = $Phase
         Iteration = $Iteration
         OrderInIteration = $OrderInIteration
+        Mode = "preprocess"
+        MeasurementKind = "fresh-process end-to-end preprocess"
         Implementation = $Implementation
         ElapsedWallMs = [Math]::Round($result.elapsedWallMs, 3)
         PeakWorkingSetBytes = $result.peakWorkingSetBytes
@@ -634,9 +656,12 @@ $dotnetSummary = $implementationSummaries | Where-Object { $_.implementation -eq
 $rustSummary = $implementationSummaries | Where-Object { $_.implementation -eq "msbuild-rs" }
 $medianSpeedRatio = [double]$dotnetSummary.wallTimeMs.median / [double]$rustSummary.wallTimeMs.median
 $summary = [pscustomobject][ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
+    mode = "preprocess"
+    measurementKind = "fresh-process end-to-end preprocess"
     fixture = $FixtureName
     fixtureHash = $FixtureHash
+    fixtureIdentity = $fixtureIdentity
     eligible = $true
     parityStatus = "passed"
     commitSha = $commitSha
@@ -653,6 +678,8 @@ Write-JsonFile (Join-Path $outputPath "summary.json") $summary
 $summaryRows = @(
     $implementationSummaries | ForEach-Object {
         [pscustomobject][ordered]@{
+            Mode = "preprocess"
+            MeasurementKind = "fresh-process end-to-end preprocess"
             Fixture = $FixtureName
             FixtureHash = $FixtureHash
             Implementation = $_.implementation

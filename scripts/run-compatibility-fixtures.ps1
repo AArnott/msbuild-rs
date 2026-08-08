@@ -7,9 +7,9 @@ param(
 $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($RustExecutable)) {
-    $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows)
-    $executableName = if ($isWindows) { "msbuild-rs.exe" } else { "msbuild-rs" }
+    $executableName = if ($runningOnWindows) { "msbuild-rs.exe" } else { "msbuild-rs" }
     $debugDirectory = Join-Path (Join-Path $repositoryRoot "target") "debug"
     $RustExecutable = Join-Path $debugDirectory $executableName
 }

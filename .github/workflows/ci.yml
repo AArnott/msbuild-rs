@@ -80,13 +80,17 @@ jobs:
             -Project (Join-Path $generated $fixture.project) `
             -FixtureName $fixture.name `
             -FixtureHash $fixture.fixtureHash `
+            -FixtureManifestPath (Join-Path $generated "manifest.json") `
+            -FixtureManifestCase $fixture.name `
             -RustExecutable target/debug/msbuild-rs `
             -OutputDirectory benchmark-results/generated-smoke-parity `
             -ParityOnly
 
       - name: Test path normalization
         shell: pwsh
-        run: ./scripts/tests/path-normalization.tests.ps1
+        run: |
+          ./scripts/tests/path-normalization.tests.ps1
+          ./scripts/tests/performance-fixture-identity.tests.ps1
 
       - name: Run demo mode
         run: cargo run -- --demo

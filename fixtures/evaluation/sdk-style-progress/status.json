@@ -1,6 +1,0 @@
-{
-  "status": "known-loader-blocker",
-  "reaches": "Microsoft.NET.Sdk.ImportWorkloads.props",
-  "blocker": "virtual Microsoft.NET.SDK.WorkloadAutoImportPropsLocator SDK resolution",
-  "note": "Retained native property functions and semicolon-separated SDK imports evaluate before this point. NuGet-backed TFM helpers are intentionally pruned but are not reached before this blocker; full SDK project evaluation is not yet claimed."
-}

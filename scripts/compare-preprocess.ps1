@@ -12,7 +12,8 @@ param(
     [string]$FixtureHash,
     [switch]$ParityOnly,
     [switch]$CompareOutput,
-    [switch]$FailOnMismatch
+    [switch]$FailOnMismatch,
+    [switch]$SemanticXmlComparison
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,9 +65,55 @@ function Normalize-PreprocessedOutput {
         if (-not [string]::IsNullOrWhiteSpace($replacement.Path)) {
             $content = Replace-PathForComparison $content $replacement.Path $replacement.Token
         }
+
     }
     Write-Utf8File $NormalizedPath ($content.Replace("`n", [Environment]::NewLine))
     return $content
+}
+
+function ConvertTo-SemanticXmlProjection {
+    param([Parameter(Mandatory = $true)][string]$Content)
+
+    $document = [System.Xml.XmlDocument]::new()
+    $document.PreserveWhitespace = $true
+    $document.XmlResolver = $null
+    $document.LoadXml($Content)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $visit = {
+        param([System.Xml.XmlNode]$Node, [int]$Depth)
+
+        if ($Node.NodeType -eq [System.Xml.XmlNodeType]::Element) {
+            $attributes = @(
+                $Node.Attributes |
+                    Where-Object {
+                        $_.Prefix -ne "xmlns" -and
+                        $_.Name -ne "xmlns" -and
+                        -not ($Depth -eq 0 -and $Node.LocalName -eq "Project" -and
+                            $_.LocalName -in @("Sdk", "DefaultTargets"))
+                    } |
+                    ForEach-Object {
+                        "$($_.LocalName)=$($_.Value.Replace("`r`n", "`n").Replace("`r", "`n"))"
+                    } |
+                    Sort-Object
+            )
+            $lines.Add("$("  " * $Depth)E:$($Node.LocalName)|$($attributes -join "|")") | Out-Null
+            foreach ($child in $Node.ChildNodes) {
+                & $visit $child ($Depth + 1)
+            }
+            $lines.Add("$("  " * $Depth)X:$($Node.LocalName)") | Out-Null
+        }
+        elseif ($Node.NodeType -in @(
+                [System.Xml.XmlNodeType]::Text,
+                [System.Xml.XmlNodeType]::CDATA
+            )) {
+            $value = $Node.Value.Replace("`r`n", "`n").Replace("`r", "`n")
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $lines.Add("$("  " * $Depth)T:$($value.Trim())") | Out-Null
+            }
+        }
+    }
+    & $visit $document.DocumentElement 0
+    return [string]::Join("`n", $lines)
 }
 
 function Write-PreprocessMismatchDiagnostic {
@@ -376,9 +423,17 @@ else {
     $rustNormalizedOutput = Join-Path $normalizedPath "rust-preprocessed.xml"
     $dotnetNormalized = Normalize-PreprocessedOutput $dotnetRawOutput $dotnetNormalizedOutput $projectDirectory $sdkPath
     $rustNormalized = Normalize-PreprocessedOutput $rustRawOutput $rustNormalizedOutput $projectDirectory $sdkPath
+    if ($SemanticXmlComparison) {
+        $dotnetNormalized = ConvertTo-SemanticXmlProjection $dotnetNormalized
+        $rustNormalized = ConvertTo-SemanticXmlProjection $rustNormalized
+    }
     if ($dotnetNormalized -ceq $rustNormalized) {
         $parityPassed = $true
-        $parityMessage = "Normalized preprocess parity passed."
+        $parityMessage = if ($SemanticXmlComparison) {
+            "Semantic XML preprocess parity passed."
+        } else {
+            "Normalized preprocess parity passed."
+        }
     }
     else {
         $diagnosticPath = Join-Path $outputPath "preprocess-mismatch.txt"
@@ -391,6 +446,7 @@ $parity = [pscustomobject][ordered]@{
     message = $parityMessage
     fixture = $FixtureName
     fixtureHash = $FixtureHash
+    comparison = if ($SemanticXmlComparison) { "semanticXml" } else { "normalizedText" }
     dotnet = [ordered]@{
         command = $dotnetParityCommand
         exitCode = $dotnetParity.exitCode

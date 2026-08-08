@@ -43,7 +43,9 @@
     <EscapedSemicolon Include="semi%3Bcolon.txt" />
     <OperationCondition Include="a;b" Condition="'@(OperationCondition)' == ''">
       <Seen>@(OperationCondition)</Seen>
-      <OnlyA Condition="'%(Identity)' == 'a'">yes</OnlyA>
+      <OnlyA Condition="%(Identity) == a">yes</OnlyA>
+      <Tag>true</Tag>
+      <CustomCondition Condition="%(Tag) == true">yes</CustomCondition>
     </OperationCondition>
     <ConditionUpdate Include="a;b">
       <State>old-%(Identity)</State>

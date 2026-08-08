@@ -191,6 +191,10 @@ impl MsBuildGlob {
         let mut seen_paths = HashSet::new();
         let mut seen_states = HashSet::new();
         let mut directory_cache = HashMap::new();
+        let mut canonical_ancestors = HashSet::new();
+        if let Some(identity) = canonical_directory_identity(&self.fixed_root) {
+            canonical_ancestors.insert(identity);
+        }
         self.walk(
             &self.fixed_root,
             0,
@@ -199,6 +203,7 @@ impl MsBuildGlob {
             &mut seen_paths,
             &mut seen_states,
             &mut directory_cache,
+            &mut canonical_ancestors,
         );
 
         paths
@@ -231,6 +236,7 @@ impl MsBuildGlob {
         seen_paths: &mut HashSet<String>,
         seen_states: &mut HashSet<(String, usize)>,
         directory_cache: &mut HashMap<PathBuf, DirectoryEntries>,
+        canonical_ancestors: &mut HashSet<String>,
     ) {
         let logical_directory = self.identity_for_path(directory);
         if excludes
@@ -280,10 +286,11 @@ impl MsBuildGlob {
                 seen_paths,
                 seen_states,
                 directory_cache,
+                canonical_ancestors,
             );
             let entries = read_directory(directory, directory_cache);
             for child in &entries.directories {
-                self.walk(
+                self.walk_child(
                     child,
                     component_index,
                     excludes,
@@ -291,6 +298,7 @@ impl MsBuildGlob {
                     seen_paths,
                     seen_states,
                     directory_cache,
+                    canonical_ancestors,
                 );
             }
             return;
@@ -302,7 +310,7 @@ impl MsBuildGlob {
                 continue;
             };
             if component_matches(name, &component.pattern, false) {
-                self.walk(
+                self.walk_child(
                     child,
                     component_index + 1,
                     excludes,
@@ -310,8 +318,43 @@ impl MsBuildGlob {
                     seen_paths,
                     seen_states,
                     directory_cache,
+                    canonical_ancestors,
                 );
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_child(
+        &self,
+        child: &Path,
+        component_index: usize,
+        excludes: &[MsBuildGlob],
+        paths: &mut Vec<PathBuf>,
+        seen_paths: &mut HashSet<String>,
+        seen_states: &mut HashSet<(String, usize)>,
+        directory_cache: &mut HashMap<PathBuf, DirectoryEntries>,
+        canonical_ancestors: &mut HashSet<String>,
+    ) {
+        let canonical_identity = canonical_directory_identity(child);
+        if canonical_identity
+            .as_ref()
+            .is_some_and(|identity| !canonical_ancestors.insert(identity.clone()))
+        {
+            return;
+        }
+        self.walk(
+            child,
+            component_index,
+            excludes,
+            paths,
+            seen_paths,
+            seen_states,
+            directory_cache,
+            canonical_ancestors,
+        );
+        if let Some(identity) = canonical_identity {
+            canonical_ancestors.remove(&identity);
         }
     }
 
@@ -625,6 +668,12 @@ fn path_sort_key(path: &Path) -> (String, String) {
     (path_compare_key(path), display_path(path))
 }
 
+fn canonical_directory_identity(path: &Path) -> Option<String> {
+    path.canonicalize()
+        .ok()
+        .map(|canonical| path_compare_key(&canonical))
+}
+
 fn matches_components(
     patterns: &[GlobComponent],
     values: &[String],
@@ -761,8 +810,12 @@ fn read_directory(
             match entry.file_type() {
                 Ok(file_type) if file_type.is_dir() => result.directories.push(path),
                 Ok(file_type) if file_type.is_file() => result.files.push(path),
-                Ok(file_type) if file_type.is_symlink() && path.is_file() => {
-                    result.files.push(path);
+                Ok(file_type) if file_type.is_symlink() => {
+                    if path.is_dir() {
+                        result.directories.push(path);
+                    } else if path.is_file() {
+                        result.files.push(path);
+                    }
                 }
                 _ => {}
             }
@@ -779,6 +832,7 @@ fn read_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn component_matching_uses_msbuild_filename_rules() {
@@ -824,6 +878,99 @@ mod tests {
         assert!(anywhere.covers_logical_directory("src/node_modules"));
         assert!(anywhere.covers_logical_directory("src/node_modules/package"));
         assert!(!anywhere.covers_logical_directory("src/packages"));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn recursive_globs_follow_directory_symlinks_without_cycles() -> Result<()> {
+        let directory = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))?;
+        let real = directory.path().join("real");
+        fs::create_dir_all(real.join("deep"))?;
+        fs::write(real.join("deep").join("input.txt"), "input")?;
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, directory.path().join("alias"))?;
+            std::os::unix::fs::symlink(&real, real.join("loop"))?;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::symlink_dir;
+            if symlink_dir(&real, directory.path().join("alias")).is_err()
+                || symlink_dir(&real, real.join("loop")).is_err()
+            {
+                return Ok(());
+            }
+        }
+
+        let ItemSpec::Glob(pattern) = ItemSpec::parse(directory.path(), "alias/**/*.txt")? else {
+            panic!("expected a glob");
+        };
+        let identities = pattern
+            .enumerate(&[])
+            .iter()
+            .map(|matched| pattern.identity_for_path(&matched.path))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            [display_path(
+                &PathBuf::from("alias").join("deep").join("input.txt")
+            )]
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recursive_symlink_glob_identities_match_dotnet_msbuild() -> Result<()> {
+        use std::process::Command;
+
+        let directory = TempDir::new_in(env!("CARGO_MANIFEST_DIR"))?;
+        let real = directory.path().join("real");
+        fs::create_dir_all(real.join("deep"))?;
+        fs::write(real.join("deep").join("input.txt"), "input")?;
+        std::os::unix::fs::symlink(&real, directory.path().join("alias"))?;
+        let project = directory.path().join("project.proj");
+        fs::write(
+            &project,
+            r#"<Project><ItemGroup><I Include="**/*.txt" /></ItemGroup></Project>"#,
+        )?;
+
+        let ItemSpec::Glob(pattern) = ItemSpec::parse(directory.path(), "**/*.txt")? else {
+            panic!("expected a glob");
+        };
+        let rust = pattern
+            .enumerate(&[])
+            .iter()
+            .map(|matched| pattern.identity_for_path(&matched.path))
+            .collect::<Vec<_>>();
+        let output = match Command::new("dotnet")
+            .args([
+                "msbuild",
+                project.to_str().unwrap(),
+                "-nologo",
+                "-getItem:I",
+            ])
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let dotnet = result["Items"]["I"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["Identity"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(rust, dotnet);
         Ok(())
     }
 }

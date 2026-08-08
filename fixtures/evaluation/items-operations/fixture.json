@@ -117,7 +117,7 @@
     },
     {
       "type": "OperationCondition",
-      "metadata": ["Seen", "OnlyA"]
+      "metadata": ["Seen", "OnlyA", "Tag", "CustomCondition"]
     },
     {
       "type": "ConditionUpdate",

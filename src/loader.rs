@@ -18,6 +18,7 @@ use crate::object_model::{
 use crate::properties::{
     display_path, is_reserved_property, lexical_absolute, set_reserved_project_properties,
 };
+use crate::workload::{InstalledWorkloadSdkResolver, WorkloadResolverConfig};
 
 const BOUNDARY: &str = "============================================================================================================================================";
 
@@ -34,6 +35,8 @@ struct EvaluationState {
     completed_imports: HashSet<PathBuf>,
     render_preprocessed: bool,
     sdk_root: Option<PathBuf>,
+    workload_resolver_config: Option<WorkloadResolverConfig>,
+    workload_resolver: Option<InstalledWorkloadSdkResolver>,
     filesystem_directory: PathBuf,
     item_glob_cache: HashMap<String, Arc<Vec<ItemGlobMatch>>>,
     item_identity_index: HashMap<String, HashMap<String, Vec<usize>>>,
@@ -81,6 +84,7 @@ struct PendingMetadata {
 struct ImportAttributes {
     project: String,
     condition: Option<String>,
+    sdk: Option<String>,
 }
 
 #[derive(Debug)]
@@ -357,6 +361,9 @@ impl EvaluationState {
         if let Some(sdk_root) = &sdk_root {
             set_default_property(&mut model, "MSBuildSDKsPath", display_path(sdk_root));
         }
+        let workload_resolver_config = toolset.as_ref().and_then(|toolset| {
+            WorkloadResolverConfig::new(context.environment(), toolset, project_path)
+        });
 
         set_reserved_project_properties(&mut model, project_path);
 
@@ -377,6 +384,8 @@ impl EvaluationState {
             completed_imports: HashSet::new(),
             render_preprocessed,
             sdk_root,
+            workload_resolver_config,
+            workload_resolver: None,
             filesystem_directory: std::env::current_dir()
                 .context("Failed to determine the process working directory")?,
             item_glob_cache: HashMap::new(),
@@ -429,12 +438,13 @@ impl EvaluationState {
         let mut sdk_imports = Vec::with_capacity(sdk_references.len());
         for sdk in sdk_references {
             let specification = sdk.specification();
-            let sdk_directory = self.resolve_sdk(&specification)?;
-            sdk_imports.push((
-                specification,
-                sdk_directory.join("Sdk.props"),
-                sdk_directory.join("Sdk.targets"),
-            ));
+            for sdk_directory in self.resolve_sdk(&specification)? {
+                sdk_imports.push((
+                    specification.clone(),
+                    sdk_directory.join("Sdk.props"),
+                    sdk_directory.join("Sdk.targets"),
+                ));
+            }
         }
 
         let mut rendered_sdk_props = Vec::with_capacity(sdk_imports.len());
@@ -1590,6 +1600,12 @@ impl EvaluationState {
         }
 
         let evaluated_project_escaped = evaluator.evaluate(&import.project)?;
+        let evaluated_sdk = import
+            .sdk
+            .as_deref()
+            .map(|sdk| evaluator.evaluate(sdk))
+            .transpose()?;
+        drop(evaluator);
         if evaluated_project_escaped.contains("$(") || evaluated_project_escaped.contains("@(") {
             bail!(
                 "Import path '{evaluated_project_escaped}' contains an unexpanded expression in {}",
@@ -1597,31 +1613,42 @@ impl EvaluationState {
             );
         }
         let import_root = importing_path.parent().unwrap_or_else(|| Path::new(""));
+        let sdk_roots = if let Some(sdk) = evaluated_sdk {
+            let mut roots = Vec::new();
+            for specification in tokenize_list(&sdk)? {
+                roots.extend(self.resolve_sdk(&unescape_once(specification))?);
+            }
+            roots
+        } else {
+            vec![import_root.to_path_buf()]
+        };
         let mut paths = Vec::new();
-        for project in tokenize_list(&evaluated_project_escaped)? {
-            match ItemSpec::parse(import_root, project)? {
-                ItemSpec::Literal { value } => {
-                    let import_path = lexical_absolute(&import_root.join(value))?;
-                    paths.extend(resolve_import_path(&import_path, importing_path)?);
-                }
-                ItemSpec::Glob(pattern) => {
-                    let mut matches = pattern
-                        .enumerate(&[])
-                        .into_iter()
-                        .map(|matched| matched.path)
-                        .collect::<Vec<_>>();
-                    matches.sort_by_cached_key(|path| {
-                        (
-                            normalized_lexical_file_identity(path)
-                                .unwrap_or_else(|_| path.to_path_buf()),
-                            path.to_path_buf(),
-                        )
-                    });
-                    matches.dedup_by(|left, right| {
-                        normalized_lexical_file_identity(left).ok()
-                            == normalized_lexical_file_identity(right).ok()
-                    });
-                    paths.extend(matches);
+        for root in sdk_roots {
+            for project in tokenize_list(&evaluated_project_escaped)? {
+                match ItemSpec::parse(&root, project)? {
+                    ItemSpec::Literal { value } => {
+                        let import_path = lexical_absolute(&root.join(value))?;
+                        paths.extend(resolve_import_path(&import_path, importing_path)?);
+                    }
+                    ItemSpec::Glob(pattern) => {
+                        let mut matches = pattern
+                            .enumerate(&[])
+                            .into_iter()
+                            .map(|matched| matched.path)
+                            .collect::<Vec<_>>();
+                        matches.sort_by_cached_key(|path| {
+                            (
+                                normalized_lexical_file_identity(path)
+                                    .unwrap_or_else(|_| path.to_path_buf()),
+                                path.to_path_buf(),
+                            )
+                        });
+                        matches.dedup_by(|left, right| {
+                            normalized_lexical_file_identity(left).ok()
+                                == normalized_lexical_file_identity(right).ok()
+                        });
+                        paths.extend(matches);
+                    }
                 }
             }
         }
@@ -1672,7 +1699,7 @@ impl EvaluationState {
         Ok(())
     }
 
-    fn resolve_sdk(&self, sdk: &str) -> Result<PathBuf> {
+    fn resolve_sdk(&mut self, sdk: &str) -> Result<Vec<PathBuf>> {
         let sdk_name = sdk.split('/').next().unwrap_or(sdk);
         let sdk_root = self.sdk_root.as_ref().ok_or_else(|| {
             anyhow!(
@@ -1680,13 +1707,25 @@ impl EvaluationState {
             )
         })?;
         let sdk_directory = sdk_root.join(sdk_name).join("Sdk");
-        if !sdk_directory.is_dir() {
-            bail!(
-                "SDK '{sdk_name}' was not found under {}",
-                sdk_root.display()
-            );
+        if sdk_directory.is_dir() {
+            return Ok(vec![sdk_directory]);
         }
-        Ok(sdk_directory)
+        if self.workload_resolver.is_none()
+            && let Some(config) = &self.workload_resolver_config
+        {
+            self.workload_resolver = Some(InstalledWorkloadSdkResolver::discover(config)?);
+        }
+        if let Some(paths) = self
+            .workload_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve(sdk_name))
+        {
+            return Ok(paths.to_vec());
+        }
+        bail!(
+            "SDK '{sdk_name}' was not found under {} or in the installed workload manifests",
+            sdk_root.display()
+        )
     }
 }
 
@@ -1794,6 +1833,7 @@ fn parse_import(element: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<Impo
         project: attribute_value(element, reader, b"Project")?
             .ok_or_else(|| anyhow!("Import is missing its Project attribute"))?,
         condition: attribute_value(element, reader, b"Condition")?,
+        sdk: attribute_value(element, reader, b"Sdk")?,
     })
 }
 

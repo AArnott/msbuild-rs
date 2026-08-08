@@ -5,6 +5,8 @@
     <List>a;b;c;d;e</List>
     <SharpS>ß</SharpS>
     <Sigma>ΟΣ</Sigma>
+    <DotlessI>ı</DotlessI>
+    <DottedI>İ</DottedI>
 
     <NoArguments>$(Source.ToUpperInvariant())</NoArguments>
     <NestedAndChained>$(Source.Substring(1$(Index)).ToLowerInvariant().Substring($(Index)))</NestedAndChained>
@@ -28,6 +30,7 @@
     <PathTrailingFile>$([System.IO.Path]::GetFileName('dir/'))</PathTrailingFile>
     <PathDriveRooted>$([System.IO.Path]::IsPathRooted('C:relative'))</PathDriveRooted>
     <PathRelative>$([MSBuild]::MakeRelative('C:\a\b', 'C:\a\c'))</PathRelative>
+    <PathRelativeUnicode>$([MSBuild]::MakeRelative('C:\Ärea\base', 'c:\ärea\child'))</PathRelativeUnicode>
     <PathFull>$([System.IO.Path]::GetFullPath('child/../file.txt', '$(MSBuildProjectDirectory)'))</PathFull>
     <ExpandedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('%msbuild_rs_expand_case%-%MISSING%'))</ExpandedEnvironment>
     <MalformedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('prefix%MISSING'))</MalformedEnvironment>
@@ -68,6 +71,8 @@
     <SeparatorChar>$([System.IO.Path]::DirectorySeparatorChar)</SeparatorChar>
     <UpperSharpS>$(SharpS.ToUpperInvariant())</UpperSharpS>
     <LowerSigma>$(Sigma.ToLowerInvariant())</LowerSigma>
+    <UpperDotlessI>$(DotlessI.ToUpperInvariant())</UpperDotlessI>
+    <LowerDottedI>$(DottedI.ToLowerInvariant())</LowerDottedI>
     <OrdinalCompare>$([System.String]::CompareOrdinal('😀', '�'))</OrdinalCompare>
     <IsoDate>$([System.DateTime]::Parse('2010-12-25T01:02:03').ToString('yyyy-MM-dd HH:mm:ss'))</IsoDate>
     <GuidX>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('X'))</GuidX>
@@ -79,6 +84,12 @@
     <RelativeFileAbove>$([MSBuild]::GetPathOfFileAbove('Cargo.toml', '.'))</RelativeFileAbove>
     <RegistryPrefixMissing>$(Registry:HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__@Value)</RegistryPrefixMissing>
     <RegistryViewMissingDefault>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__', 'Value', 'fallback', 'RegistryView.Default'))</RegistryViewMissingDefault>
+    <TypedNullConvert>$([System.Convert]::ToString($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullConvert>
+    <TypedNullPredicate>$([System.String]::IsNullOrEmpty($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullPredicate>
+    <IntegralDecimalAdd>$([MSBuild]::Add(10.0, 1))</IntegralDecimalAdd>
+    <TargetFrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</TargetFrameworkIdentifier>
+    <TargetFrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 4))</TargetFrameworkVersion>
+    <TargetPlatformVersion>$([MSBuild]::GetTargetPlatformVersion('net10.0-windows10.0.19041.0', 2))</TargetPlatformVersion>
   </PropertyGroup>
   <ItemGroup>
     <SplitItem Include="$([System.String]::Copy('a;b').Split(';'))" />

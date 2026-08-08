@@ -259,6 +259,11 @@ if ((Get-Item $dotnetErrorPath).Length -gt 0 -or (Get-Item $rustErrorPath).Lengt
 }
 finally {
     foreach ($name in $environmentBackups.Keys) {
-        [System.Environment]::SetEnvironmentVariable($name, $environmentBackups[$name])
+        if ($null -eq $environmentBackups[$name]) {
+            Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+        }
+        else {
+            [System.Environment]::SetEnvironmentVariable($name, $environmentBackups[$name])
+        }
     }
 }

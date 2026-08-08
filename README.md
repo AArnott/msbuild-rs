@@ -15,7 +15,10 @@ A MSBuild project reader and executor written in Rust.
 - **Target Dependencies**: Executes targets in dependency order using `DependsOnTargets`
 - **Import Support**: Processes `<Import>` elements to include other project files
 - **SDK Imports**: Resolves the active .NET SDK through the `dotnet` host and
-  supports `Project@Sdk` plus top-level `<Sdk Name="..." Version="..." />`
+  supports `Project@Sdk` plus top-level `<Sdk Name="..." Version="..." />`.
+  Installed workload locator SDKs are resolved natively from the selected
+  toolset's manifests and packs, without per-import subprocesses or NuGet
+  acquisition.
 - **Built-in Tasks**:
   - `<Message>` - Logs messages to output
   - `<Copy>` - Copies files from source to destination
@@ -148,15 +151,16 @@ $([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'
 
 The compatibility plan uses an explicit, correctness-tested native Rust
 allowlist and, later, an in-process CoreCLR fallback for other legal MSBuild
-property functions. The native tier preserves typed overloads, null, params
+property functions. The native tier preserves typed overloads, declared type
+provenance for native null results, untyped literal null, params
 arrays, Char, and array-result boundaries across exact nested calls. On
 Windows, environment lookup uses Unicode ordinal-ignore-case keys, while
 read-only registry intrinsics preserve DWORD/QWORD numbers, embedded string
 NULs, and multi-string/byte arrays through member chains; `REG_NONE` uses the
 same byte-list model as `REG_BINARY`. Culture-sensitive floating MSBuild
 arithmetic and Math/Double/Convert overloads, Guid X parsing (X formatting
-remains), current-culture String members, broad CLR formatting, NuGet TFM
-helpers, and OS-bitness queries are deliberately pruned rather than
+remains), broad CLR formatting, full NuGet TFM compatibility, and OS-bitness
+queries are deliberately pruned rather than
 approximated. These
 legal calls require a future exact native implementation or the currently
 excluded managed fallback; see the compatibility worklist.
@@ -209,6 +213,10 @@ path-normalized JSON
 to `benchmark-results/evaluation`; fixtures with `expectedFailure` compare
 controlled rejection diagnostics and require both evaluators to fail.
 The all-fixture runner is also the cross-platform semantic CI entry point.
+The installed-SDK preprocess fixture compares a semantic XML projection of the
+fully expanded tree, ignoring comments/layout, namespace serialization, and
+equivalent root SDK/default-target syntax while retaining elements, attributes,
+text, and order.
 Performance generation, parity eligibility, interleaved process timing, peak
 working set, artifact schemas, scale knobs, and interpretation guidance are
 documented in [the performance benchmarking guide](docs/performance-benchmarking.md).
@@ -240,7 +248,11 @@ This is a simplified MSBuild implementation focused on core functionality:
 
 - Limited condition expression support (basic equality only)
 - SDK evaluation is limited to the implemented expression/item surface; versioned
-  third-party SDK acquisition through NuGet is not yet supported
+  third-party SDK acquisition through NuGet and missing-workload resolver item
+  injection are not yet supported
+- Evaluation still applies item operations in source position rather than a
+  separate final item pass, so some SDK default globs enabled by later
+  properties can differ even though ordinary installed SDK projects load fully
 - No advanced MSBuild features like item transformations
 - Limited task ecosystem (only Message, Copy, Error built-in)
 - No parallel target execution

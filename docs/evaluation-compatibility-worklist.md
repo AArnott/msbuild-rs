@@ -71,6 +71,9 @@ The native registry is initialized once and indexed by normalized type, member,
 and invocation kind. Overload arity, parameter/params coercion, and per-overload
 null policy are enforced before dispatch. Values retain `null`, arrays, numeric
 types, and `System.Char` boundaries through exact nested calls and chains.
+Native nulls also retain their descriptor's declared result type, so a missing
+`Environment.GetEnvironmentVariable` remains a nullable `System.String` for
+later overload selection; an authored `null` literal remains untyped.
 String arrays bind as arrays, while `Char` binds only to a retained `Char`
 overload and is not silently stringified. Final array rendering discards only
 leading empty elements, then preserves interior/trailing empties while escaping
@@ -79,7 +82,7 @@ unchecked/wrapping, and shifts use CLR masks.
 
 The retained correctness-tested core includes ordinal `System.String`
 operations (`Copy`, null predicates, `Join`, `CompareOrdinal`, `Contains`,
-`Substring`, invariant casing, parameterless trim, replace/split/equality,
+`Substring`, invariant casing, trim character sets, replace/split/equality,
 insertion/removal, length/indexer); host-lexical `System.IO.Path` filename,
 extension, root, combine, change-extension, and full-path members; integral
 `System.Math.Abs`; typed and radix-based `System.Convert` overloads that do not
@@ -90,6 +93,16 @@ custom-format subset. `Environment.ExpandEnvironmentVariables` scans `%name%`
 tokens once and preserves missing/malformed tokens. Windows keys use
 .NET-compatible Unicode ordinal-ignore-case folding; Unix keys remain
 case-sensitive.
+The pinned SDK also requires ASCII `StartsWith`/`EndsWith`, integral decimal
+spellings such as `10.0` for integral arithmetic overloads, the common
+`net`/`netcoreapp`/`netstandard`/short `net4x` TFM projection helpers, and
+empty-platform `ToolLocationHelper` probes. Those narrow inputs are retained
+and direct-fixture tested; broader culture-sensitive or NuGet compatibility
+behavior is not inferred.
+Invariant casing follows ICU simple one-scalar mappings plus .NET invariant
+special handling for dotted/dotless I, as verified against .NET 10's
+[`InvariantModeCasing`](https://github.com/dotnet/runtime/blob/v10.0.10/src/libraries/System.Private.CoreLib/src/System/Globalization/InvariantModeCasing.cs);
+the direct fixture covers `ß`, Greek sigma, `İ`, and `ı`.
 `StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
 UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
 
@@ -118,21 +131,16 @@ arithmetic overloads, floating `System.Math` entries,
 `System.Convert.ToDouble`, culture-sensitive unary
 `Convert` string-to-number and number-to-string overloads, and
 `System.Double.ToString`; current-culture
-`String.StartsWith`, `EndsWith`, `CompareTo`, `IndexOf`, `LastIndexOf`,
+`non-ASCII/current-culture `String.StartsWith` and `EndsWith`, plus `CompareTo`,
+`IndexOf`, `LastIndexOf`,
 `ToLower`, and `ToUpper`; broad DateTime parsing/formatting; Guid equality
-binding and Guid X parsing (X formatting remains); params-character trim
-overloads; Double custom formats; and unlisted CLR numeric overloads. Floating
+binding and Guid X parsing (X formatting remains); Double custom formats; and
+unlisted CLR numeric overloads. Floating
 spellings including `inf` are rejected because no culture-sensitive floating
-overload is retained. The NuGet-backed MSBuild TFM helpers
-(`GetTargetFrameworkIdentifier`, `GetTargetFrameworkVersion`,
-`GetTargetPlatformIdentifier`, `GetTargetPlatformVersion`, and
-`IsTargetFrameworkCompatible`) were pruned instead of retaining simplified
-identifier/version ordering; `Environment.Is64BitOperatingSystem` was likewise
-pruned because process bitness is not an OS-bitness answer on every host.
-The pinned direct baselines retained in the pruning test are
-`net8.0-windows10` platform `10.0`, `net48` platform `0.0`, `net48` compatible
-with `netstandard2.0`, and `netcoreapp1.0` incompatible with
-`netstandard2.1`.
+overload is retained. `IsTargetFrameworkCompatible` and TFM grammars outside
+the explicitly tested projection subset remain pruned rather than approximated;
+`Environment.Is64BitOperatingSystem` is likewise pruned because process
+bitness is not an OS-bitness answer on every host.
 These legal calls await a maintained NuGet-compatible implementation, an exact
 native entry, or the excluded late-stage managed fallback.
 
@@ -244,8 +252,11 @@ and nonstandard runtime platform identifiers.
   matching (including absolute/relative and Windows drive/root-relative
   equivalence), preserve authored `./`, `../`, and root-relative glob identity
   separately from normalized traversal paths, prune safely excluded recursive
-  directory subtrees, and index exact item mutations without resolving
-  symlinks.
+  directory subtrees, and index exact item mutations without globally
+  canonicalizing authored identities.
+- [x] Follow directory symlinks during recursive traversal while suppressing
+  only canonical identities already present in the active ancestor chain, so
+  logical symlink paths remain distinct and cycles terminate.
 - [x] Preserve terminal directory separators so `tree/*/` and `tree/**/`
   enumerate no files, and apply the extensionless-file special case only to
   the exact filename pattern `*.*`.
@@ -284,8 +295,10 @@ time in `yyyy-MM-dd HH:mm:ss.fffffff` form. Windows uses creation/write/access
 file times; macOS uses birth/modify/access times; Linux uses filesystem birth
 time when reported and otherwise, like .NET, synthesizes creation as the older
 of change and modification time. Host access-time mount policy is preserved.
-Each immutable item lazily caches one metadata/stat result shared by all three
-timestamp names; no filesystem call occurs unless timestamp metadata is read.
+Each individual timestamp metadata lookup reads current filesystem state.
+`evaluated_metadata` and evaluation-query projections share one local stat
+across all three timestamp names. No mutable item cache or read-serializing
+lock is retained, so finalized projects remain `Send + Sync`.
 
 ### Imports and Project Structure
 
@@ -308,6 +321,12 @@ timestamp names; no filesystem call occurs unless timestamp metadata is read.
 - [x] Implement ordered implicit `Sdk.props` and `Sdk.targets` imports for
   `Project@Sdk` and top-level `Sdk Name/Version` declarations, with cached
   `dotnet` host discovery that honors `global.json`.
+- [x] Resolve the installed workload virtual SDKs natively from the selected
+  host SDK: manifest and pack roots, workload sets/install state, RID aliases,
+  installed SDK packs with `AutoImport.props`, and manifest
+  `WorkloadManifest.targets`. Resolver state is built at most once per
+  evaluation, never invokes a process per import, and never acquires NuGet
+  packages.
 - [x] Preserve an aggregated source representation equivalent to `/pp`.
 
 ### Escaping and Parsing
@@ -334,6 +353,10 @@ The upstream-test mapping and fixture status are maintained in
 [the evaluation compatibility matrix](evaluation-compatibility-matrix.md).
 `scripts/run-compatibility-fixtures.ps1` discovers every semantic and
 preprocess manifest; CI runs that same entry point on Windows, Linux, and macOS.
+The installed-SDK preprocess fixture uses a semantic XML projection: it compares
+the complete expanded element/attribute/text tree while ignoring comments,
+layout, namespace serialization, and the equivalent root `Sdk` versus inferred
+`DefaultTargets` spelling.
 
 ## Explicitly deferred gaps
 
@@ -363,11 +386,17 @@ also explicitly deferred.
   culture-sensitive .NET formatting remain deferred to additional exact native
   entries or the untouched late-stage CoreCLR plan. Removed members are not
   approximated by ordinal Rust operations.
-- SDK-style evaluation now passes the native property-function and
-  semicolon-separated import stages and reaches
-  `Microsoft.NET.Sdk.ImportWorkloads.props`. Resolution of the virtual
-  `Microsoft.NET.SDK.WorkloadAutoImportPropsLocator` SDK remains a loader
-  backlog item, so full SDK project evaluation is not claimed.
+- Ordinary installed `Microsoft.NET.Sdk` projects now complete through both
+  workload locator SDKs, with direct semantic and preprocess-tree parity for
+  reserved/SDK properties and `KnownFrameworkReference` identities. Versioned
+  third-party SDK acquisition, missing-workload `MissingWorkloadPack` resolver
+  item injection, and the full NuGet TFM compatibility surface remain deferred.
+- Item operations still execute in the loader's source-position pass rather
+  than MSBuild's separate property/item passes. Consequently, an SDK default
+  item glob whose enablement properties are assigned later can be absent even
+  though installed-SDK evaluation completes; the SDK fixture intentionally
+  gates SDK-defined `KnownFrameworkReference` identities instead of claiming
+  implicit `Compile` parity.
 - Target-execution-only item mutation features (`KeepDuplicates`,
   `KeepMetadata`, `RemoveMetadata`, `MatchOnMetadata`, and
   `MatchOnMetadataOptions`) are outside evaluation scope.

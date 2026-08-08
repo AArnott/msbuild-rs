@@ -11,6 +11,7 @@ mod properties;
 mod registry;
 mod tasks;
 mod tests;
+mod workload;
 
 use anyhow::Result;
 use clap::Parser;

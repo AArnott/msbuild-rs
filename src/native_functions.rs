@@ -59,6 +59,7 @@ pub(crate) enum Coercion {
     Int16,
     Int32,
     Int64,
+    ArithmeticInt64,
     UInt64,
     Version,
     Path,
@@ -156,6 +157,7 @@ pub(crate) struct IntrinsicArgument {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IntrinsicValue {
     Null,
+    TypedNull(&'static str),
     String(String),
     Strings(Vec<String>),
     Byte(u8),
@@ -175,6 +177,7 @@ impl IntrinsicValue {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Self::Null => "System.Object",
+            Self::TypedNull(type_name) => type_name,
             Self::String(_) => "System.String",
             Self::Strings(_) => "System.String[]",
             Self::Byte(_) => "System.Byte",
@@ -193,7 +196,7 @@ impl IntrinsicValue {
 
     pub(crate) fn to_msbuild_string(&self) -> Result<String> {
         match self {
-            Self::Null => Ok(String::new()),
+            Self::Null | Self::TypedNull(_) => Ok(String::new()),
             Self::String(value) => Ok(value.clone()),
             Self::Strings(values) => Ok(values.join(";")),
             Self::Byte(value) => Ok(value.to_string()),
@@ -215,6 +218,10 @@ impl IntrinsicValue {
                 "Direct System.DateTime rendering is outside the native surface; use an allowlisted invariant ToString format"
             ),
         }
+    }
+
+    fn is_null(&self) -> bool {
+        matches!(self, Self::Null | Self::TypedNull(_))
     }
 }
 
@@ -547,7 +554,7 @@ const O2_REPLACE: &[OverloadDescriptor] = &[overload!(
 )];
 const O2_INT64: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
-    [Coercion::Int64, Coercion::Int64]
+    [Coercion::ArithmeticInt64, Coercion::ArithmeticInt64]
 )];
 const O2_INT32: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
@@ -557,6 +564,10 @@ const O_INT32_STRING: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
     [Coercion::Int32, Coercion::String]
 )];
+const O_TFM_VERSION: &[OverloadDescriptor] = &[
+    overload!(Arity::Exact(1), [Coercion::String]),
+    overload!(Arity::Exact(2), [Coercion::String, Coercion::Int32]),
+];
 const O3_STRING_INT32: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(3),
     [Coercion::String, Coercion::Int32, Coercion::Int32]
@@ -797,6 +808,46 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         Escape,
         O2_STRING,
         "System.Boolean",
+        handle_msbuild
+    ),
+    intrinsic!(
+        "MSBuild",
+        "GetTargetFrameworkIdentifier",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O1_STRING,
+        "System.String",
+        handle_msbuild
+    ),
+    intrinsic!(
+        "MSBuild",
+        "GetTargetFrameworkVersion",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O_TFM_VERSION,
+        "System.String",
+        handle_msbuild
+    ),
+    intrinsic!(
+        "MSBuild",
+        "GetTargetPlatformIdentifier",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O1_STRING,
+        "System.String",
+        handle_msbuild
+    ),
+    intrinsic!(
+        "MSBuild",
+        "GetTargetPlatformVersion",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O_TFM_VERSION,
+        "System.String",
         handle_msbuild
     ),
     intrinsic!(
@@ -1121,6 +1172,26 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
     ),
     intrinsic!(
         "System.String",
+        "StartsWith",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_STRING,
+        "System.Boolean",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
+        "EndsWith",
+        InstanceMethod,
+        Decoded,
+        Escape,
+        O1_STRING,
+        "System.Boolean",
+        handle_string_instance
+    ),
+    intrinsic!(
+        "System.String",
         "Substring",
         InstanceMethod,
         Decoded,
@@ -1155,7 +1226,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         InstanceMethod,
         Decoded,
         Escape,
-        O0,
+        O0_1_STRING_NULL,
         "System.String",
         handle_string_instance
     ),
@@ -1165,7 +1236,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         InstanceMethod,
         Decoded,
         Escape,
-        O0,
+        O0_1_STRING_NULL,
         "System.String",
         handle_string_instance
     ),
@@ -1175,7 +1246,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         InstanceMethod,
         Decoded,
         Escape,
-        O0,
+        O0_1_STRING_NULL,
         "System.String",
         handle_string_instance
     ),
@@ -1578,6 +1649,26 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         O0,
         "System.Int32",
         handle_environment
+    ),
+    intrinsic!(
+        "Microsoft.Build.Utilities.ToolLocationHelper",
+        "GetPlatformSDKLocation",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O2_STRING_NULL,
+        "System.String",
+        handle_tool_location
+    ),
+    intrinsic!(
+        "Microsoft.Build.Utilities.ToolLocationHelper",
+        "GetPlatformSDKDisplayName",
+        StaticMethod,
+        Decoded,
+        Escape,
+        O2_STRING_NULL,
+        "System.String",
+        handle_tool_location
     ),
     intrinsic!(
         "System.Math",
@@ -2056,11 +2147,17 @@ pub(crate) fn invoke(
     arguments: &[IntrinsicArgument],
 ) -> Result<IntrinsicValue> {
     let arguments = select_and_coerce_overload(descriptor, arguments)?;
-    (descriptor.handler)(descriptor, context, receiver, &arguments).with_context(|| {
-        format!(
-            "MSB4184: The expression invoking [{}]::{} could not be evaluated",
-            descriptor.type_name, descriptor.member
-        )
+    let value =
+        (descriptor.handler)(descriptor, context, receiver, &arguments).with_context(|| {
+            format!(
+                "MSB4184: The expression invoking [{}]::{} could not be evaluated",
+                descriptor.type_name, descriptor.member
+            )
+        })?;
+    Ok(if matches!(value, IntrinsicValue::Null) {
+        IntrinsicValue::TypedNull(descriptor.result_type)
+    } else {
+        value
     })
 }
 
@@ -2245,10 +2342,23 @@ fn coerce_argument(
     null_policy: NullPolicy,
     member: &str,
 ) -> Result<(IntrinsicValue, u32)> {
-    if matches!(value, IntrinsicValue::Null) {
+    if value.is_null() {
         return match null_policy {
             NullPolicy::Reject => bail!("{member} does not accept null for this overload"),
-            NullPolicy::Preserve => Ok((IntrinsicValue::Null, 0)),
+            NullPolicy::Preserve => match value {
+                IntrinsicValue::Null => Ok((IntrinsicValue::Null, 0)),
+                IntrinsicValue::TypedNull(type_name) => {
+                    let score =
+                        typed_null_conversion_score(type_name, coercion).ok_or_else(|| {
+                            anyhow!(
+                                "{member} cannot bind null declared as {type_name} to {}",
+                                coercion_type_name(coercion)
+                            )
+                        })?;
+                    Ok((value.clone(), score))
+                }
+                _ => unreachable!(),
+            },
             NullPolicy::EmptyString => Ok((IntrinsicValue::String(String::new()), 0)),
         };
     }
@@ -2276,6 +2386,7 @@ fn coerce_argument(
                     .ok_or_else(|| anyhow!("{member} requires a single UTF-16 character"))?;
                 (IntrinsicValue::Char(character), 1)
             }
+
             _ => bail!("{member} cannot coerce {} to Char", value.type_name()),
         },
         Coercion::Byte => match value {
@@ -2311,12 +2422,19 @@ fn coerce_argument(
             }
             (IntrinsicValue::Int32(value), score)
         }
-        Coercion::Int64 => match value {
+        Coercion::Int64 | Coercion::ArithmeticInt64 => match value {
             IntrinsicValue::Byte(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int16(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int32(value) => (IntrinsicValue::Int64(i64::from(*value)), 1),
             IntrinsicValue::Int64(value) => (IntrinsicValue::Int64(*value), 0),
-            IntrinsicValue::String(value) => (IntrinsicValue::Int64(parse_decimal_i64(value)?), 22),
+            IntrinsicValue::String(value) => (
+                IntrinsicValue::Int64(if coercion == Coercion::ArithmeticInt64 {
+                    parse_arithmetic_i64(value)?
+                } else {
+                    parse_decimal_i64(value)?
+                }),
+                22,
+            ),
             _ => bail!("{member} cannot coerce {} to Int64", value.type_name()),
         },
         Coercion::UInt64 => match value {
@@ -2366,6 +2484,33 @@ fn coerce_argument(
     Ok(result)
 }
 
+fn coercion_type_name(coercion: Coercion) -> &'static str {
+    match coercion {
+        Coercion::Any => "System.Object",
+        Coercion::String | Coercion::Path => "System.String",
+        Coercion::StringArray => "System.String[]",
+        Coercion::Char => "System.Char",
+        Coercion::Byte | Coercion::ExactByte => "System.Byte",
+        Coercion::Int16 | Coercion::ExactInt16 => "System.Int16",
+        Coercion::Int32 | Coercion::ExactInt32 | Coercion::Radix => "System.Int32",
+        Coercion::Int64 | Coercion::ArithmeticInt64 | Coercion::ExactInt64 => "System.Int64",
+        Coercion::UInt64 | Coercion::ExactUInt64 => "System.UInt64",
+        Coercion::Version => "System.Version",
+        Coercion::RegistryView => "Microsoft.Win32.RegistryView",
+        Coercion::ExactBoolean => "System.Boolean",
+        Coercion::SignedRadixValue => "System.Int64",
+    }
+}
+
+fn typed_null_conversion_score(type_name: &str, coercion: Coercion) -> Option<u32> {
+    if coercion == Coercion::Any {
+        return Some(10);
+    }
+    type_name
+        .eq_ignore_ascii_case(coercion_type_name(coercion))
+        .then_some(0)
+}
+
 fn handle_string_static(
     descriptor: &IntrinsicDescriptor,
     _: &IntrinsicContext<'_>,
@@ -2375,13 +2520,13 @@ fn handle_string_static(
     let operation = descriptor.dispatch_code;
     if operation == member_code("IsNullOrEmpty") {
         Ok(IntrinsicValue::Boolean(match &arguments[0].value {
-            IntrinsicValue::Null => true,
+            IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => true,
             IntrinsicValue::String(value) => value.is_empty(),
             _ => false,
         }))
     } else if operation == member_code("IsNullOrWhiteSpace") {
         Ok(IntrinsicValue::Boolean(match &arguments[0].value {
-            IntrinsicValue::Null => true,
+            IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => true,
             IntrinsicValue::String(value) => value.chars().all(char::is_whitespace),
             _ => false,
         }))
@@ -2440,6 +2585,18 @@ fn handle_string_instance(
         Ok(IntrinsicValue::Boolean(
             receiver.contains(argument_string(&arguments[0], member)?),
         ))
+    } else if operation == member_code("StartsWith") || operation == member_code("EndsWith") {
+        let argument = argument_string(&arguments[0], member)?;
+        if !receiver.is_ascii() || !argument.is_ascii() {
+            bail!("{member} is retained only for deterministic ASCII SDK inputs");
+        }
+        Ok(IntrinsicValue::Boolean(
+            if operation == member_code("StartsWith") {
+                receiver.starts_with(argument)
+            } else {
+                receiver.ends_with(argument)
+            },
+        ))
     } else if operation == member_code("Substring") {
         let start = argument_usize(&arguments[0], member)?;
         let length = arguments
@@ -2462,34 +2619,13 @@ fn handle_string_instance(
     ) {
         let characters = arguments
             .first()
-            .map(|argument| {
-                argument_optional_string(argument, member)
-                    .map(|value| value.map(ToString::to_string))
-            })
-            .transpose()?;
-        let characters = characters.flatten();
-        let matches = |character| {
-            characters
-                .as_ref()
-                .is_some_and(|value| value.contains(character))
-        };
-        let value = if operation == member_code("TrimStart") {
-            characters.as_ref().map_or_else(
-                || receiver.trim_start_matches(char::is_whitespace),
-                |_| receiver.trim_start_matches(matches),
-            )
-        } else if operation == member_code("TrimEnd") {
-            characters.as_ref().map_or_else(
-                || receiver.trim_end_matches(char::is_whitespace),
-                |_| receiver.trim_end_matches(matches),
-            )
-        } else {
-            characters.as_ref().map_or_else(
-                || receiver.trim_matches(char::is_whitespace),
-                |_| receiver.trim_matches(matches),
-            )
-        };
-        Ok(IntrinsicValue::String(value.to_string()))
+            .map(|argument| argument_optional_string(argument, member))
+            .transpose()?
+            .flatten()
+            .unwrap_or_default();
+        Ok(IntrinsicValue::String(trim_utf16(
+            receiver, characters, member,
+        )?))
     } else if operation == member_code("Replace") {
         let old = argument_string(&arguments[0], member)?;
         if old.is_empty() {
@@ -2533,7 +2669,7 @@ fn handle_string_instance(
     } else if operation == member_code("Equals") {
         Ok(IntrinsicValue::Boolean(match &arguments[0].value {
             IntrinsicValue::String(value) => receiver == value,
-            IntrinsicValue::Null => false,
+            IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => false,
             _ => false,
         }))
     } else if operation == member_code("Insert") {
@@ -3330,6 +3466,24 @@ fn handle_environment(
     }
 }
 
+fn handle_tool_location(
+    descriptor: &IntrinsicDescriptor,
+    _: &IntrinsicContext<'_>,
+    _: Option<&IntrinsicValue>,
+    arguments: &[IntrinsicArgument],
+) -> Result<IntrinsicValue> {
+    let identifier = argument_optional_string(&arguments[0], descriptor.member)?;
+    let version = argument_optional_string(&arguments[1], descriptor.member)?;
+    if identifier.is_none_or(str::is_empty) && version.is_none_or(str::is_empty) {
+        Ok(IntrinsicValue::String(String::new()))
+    } else {
+        bail!(
+            "{} is retained only for the empty platform probe used by ordinary SDK-style projects",
+            descriptor.member
+        )
+    }
+}
+
 fn environment_key_for_platform(name: &str, windows_case_insensitive: bool) -> Vec<u16> {
     if windows_case_insensitive {
         dotnet_ordinal_ignore_case_key(name)
@@ -3443,7 +3597,7 @@ fn handle_convert(
             Ok(IntrinsicValue::String(match &arguments[0].value {
                 IntrinsicValue::String(value) => value.clone(),
                 IntrinsicValue::Boolean(value) => dotnet_bool(*value).to_string(),
-                IntrinsicValue::Null => String::new(),
+                IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => String::new(),
                 value => value.to_msbuild_string()?,
             }))
         }
@@ -3494,7 +3648,7 @@ fn handle_version(
         Ok(IntrinsicValue::String(version.format_fields(fields)?))
     } else {
         let other = match &arguments[0].value {
-            IntrinsicValue::Null => {
+            IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => {
                 return Ok(if operation == member_code("CompareTo") {
                     IntrinsicValue::Int32(1)
                 } else {
@@ -3536,7 +3690,7 @@ fn handle_guid(
         bail!("{} requires a System.Guid receiver", descriptor.member);
     };
     let format = match arguments.first().map(|argument| &argument.value) {
-        None | Some(IntrinsicValue::Null) => "D",
+        None | Some(IntrinsicValue::Null | IntrinsicValue::TypedNull(_)) => "D",
         Some(IntrinsicValue::String(value)) => value.as_str(),
         Some(_) => bail!("System.Guid.ToString format must be a String"),
     };
@@ -3715,6 +3869,39 @@ fn handle_msbuild(
             ordering.is_eq()
         };
         Ok(IntrinsicValue::Boolean(result))
+    } else if matches!(
+        operation,
+        value
+            if value == member_code("GetTargetFrameworkIdentifier")
+                || value == member_code("GetTargetFrameworkVersion")
+                || value == member_code("GetTargetPlatformIdentifier")
+                || value == member_code("GetTargetPlatformVersion")
+    ) {
+        let framework = parse_target_framework(argument_string(&arguments[0], member)?)?;
+        let value = if operation == member_code("GetTargetFrameworkIdentifier") {
+            framework.identifier
+        } else if operation == member_code("GetTargetPlatformIdentifier") {
+            framework.platform_identifier.unwrap_or_default()
+        } else {
+            let minimum_parts = arguments
+                .get(1)
+                .map(|argument| argument_i32(argument, member))
+                .transpose()?
+                .unwrap_or(2);
+            let minimum_parts = usize::try_from(minimum_parts)
+                .ok()
+                .filter(|count| (1..=4).contains(count))
+                .ok_or_else(|| anyhow!("{member} version part count must be between 1 and 4"))?;
+            if operation == member_code("GetTargetFrameworkVersion") {
+                format_short_version(framework.version, minimum_parts)
+            } else {
+                format_short_version(
+                    framework.platform_version.unwrap_or_else(|| vec![0, 0]),
+                    minimum_parts,
+                )
+            }
+        };
+        Ok(IntrinsicValue::String(value))
     } else if operation == member_code("GetDirectoryNameOfFileAbove") {
         Ok(IntrinsicValue::String(
             find_file_above(
@@ -4157,7 +4344,7 @@ fn argument_optional_string<'a>(
     member: &str,
 ) -> Result<Option<&'a str>> {
     match &argument.value {
-        IntrinsicValue::Null => Ok(None),
+        IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => Ok(None),
         IntrinsicValue::String(value) => Ok(Some(value)),
         value => bail!(
             "{member} requires a String or null, found {}",
@@ -4228,6 +4415,19 @@ fn parse_decimal_i64(value: &str) -> Result<i64> {
     parse_signed_decimal(value, "Int64")
 }
 
+fn parse_arithmetic_i64(value: &str) -> Result<i64> {
+    let value = value.trim();
+    let integral = if let Some((integral, fractional)) = value.split_once('.') {
+        if fractional.is_empty() || !fractional.bytes().all(|byte| byte == b'0') {
+            bail!("'{value}' is not an integral MSBuild arithmetic value");
+        }
+        integral
+    } else {
+        value
+    };
+    parse_signed_decimal(integral, "Int64")
+}
+
 fn parse_signed_decimal(value: &str, type_name: &str) -> Result<i64> {
     let value = value.trim();
     let digits = value
@@ -4283,7 +4483,9 @@ fn convert_to_i32(value: &IntrinsicValue) -> Result<i32> {
         IntrinsicValue::Int32(value) => Ok(*value),
         IntrinsicValue::Int64(value) => Ok((*value).try_into()?),
         IntrinsicValue::UInt64(value) => Ok((*value).try_into()?),
-        IntrinsicValue::Null => bail!("Convert.ToInt32(null) is ambiguous"),
+        IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => {
+            bail!("Convert.ToInt32(null) is ambiguous")
+        }
         _ => bail!("Convert.ToInt32 does not support {}", value.type_name()),
     }
 }
@@ -4297,7 +4499,9 @@ fn convert_to_i64(value: &IntrinsicValue) -> Result<i64> {
         IntrinsicValue::Int32(value) => Ok(i64::from(*value)),
         IntrinsicValue::Int64(value) => Ok(*value),
         IntrinsicValue::UInt64(value) => Ok((*value).try_into()?),
-        IntrinsicValue::Null => bail!("Convert.ToInt64(null) is ambiguous"),
+        IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => {
+            bail!("Convert.ToInt64(null) is ambiguous")
+        }
         _ => bail!("Convert.ToInt64 does not support {}", value.type_name()),
     }
 }
@@ -4311,7 +4515,9 @@ fn convert_to_u64(value: &IntrinsicValue) -> Result<u64> {
         IntrinsicValue::Int32(value) => Ok((*value).try_into()?),
         IntrinsicValue::Int64(value) => Ok((*value).try_into()?),
         IntrinsicValue::UInt64(value) => Ok(*value),
-        IntrinsicValue::Null => bail!("Convert.ToUInt64(null) is ambiguous"),
+        IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => {
+            bail!("Convert.ToUInt64(null) is ambiguous")
+        }
         _ => bail!("Convert.ToUInt64 does not support {}", value.type_name()),
     }
 }
@@ -4325,7 +4531,9 @@ fn convert_to_bool(value: &IntrinsicValue, member: &str) -> Result<bool> {
         IntrinsicValue::Int32(value) => Ok(*value != 0),
         IntrinsicValue::Int64(value) => Ok(*value != 0),
         IntrinsicValue::UInt64(value) => Ok(*value != 0),
-        IntrinsicValue::Null => bail!("Convert.ToBoolean(null) is ambiguous"),
+        IntrinsicValue::Null | IntrinsicValue::TypedNull(_) => {
+            bail!("Convert.ToBoolean(null) is ambiguous")
+        }
         _ => bail!("Convert.ToBoolean does not support {}", value.type_name()),
     }
 }
@@ -4490,7 +4698,9 @@ fn invariant_case(value: &str, uppercase: bool) -> String {
     value
         .chars()
         .map(|character| {
-            if uppercase {
+            if matches!(character, '\u{130}' | '\u{131}') {
+                character
+            } else if uppercase {
                 mapper.simple_uppercase(character)
             } else {
                 mapper.simple_lowercase(character)
@@ -4635,6 +4845,100 @@ fn compare_sdk_versions(left: &str, right: &str) -> Result<Ordering> {
     Ok(parse_simple_version(left)?.cmp(&parse_simple_version(right)?))
 }
 
+struct ParsedTargetFramework {
+    identifier: String,
+    version: Vec<u32>,
+    platform_identifier: Option<String>,
+    platform_version: Option<Vec<u32>>,
+}
+
+fn parse_target_framework(value: &str) -> Result<ParsedTargetFramework> {
+    let value = value.trim();
+    let (framework, platform) = value
+        .split_once('-')
+        .map_or((value, None), |(framework, platform)| {
+            (framework, Some(platform))
+        });
+    let lower = framework.to_ascii_lowercase();
+    let (identifier, version) = if let Some(version) = lower.strip_prefix("netstandard") {
+        (".NETStandard", parse_tfm_version(version)?)
+    } else if let Some(version) = lower.strip_prefix("netcoreapp") {
+        (".NETCoreApp", parse_tfm_version(version)?)
+    } else if let Some(version) = lower.strip_prefix("net") {
+        if version.contains('.') {
+            let parsed = parse_tfm_version(version)?;
+            if parsed.first().copied().unwrap_or_default() < 5 {
+                bail!("Unsupported abbreviated target framework '{value}'");
+            }
+            (".NETCoreApp", parsed)
+        } else if version.len() >= 2 && version.bytes().all(|byte| byte.is_ascii_digit()) {
+            let mut digits = version.bytes().map(|byte| u32::from(byte - b'0'));
+            let major = digits.next().unwrap_or_default();
+            let mut parsed = vec![major, digits.next().unwrap_or_default()];
+            parsed.extend(digits);
+            (".NETFramework", parsed)
+        } else {
+            bail!("Unsupported target framework '{value}'");
+        }
+    } else {
+        bail!("Unsupported target framework '{value}'");
+    };
+
+    let (platform_identifier, platform_version) = if let Some(platform) = platform {
+        let identifier_end = platform
+            .find(|character: char| character.is_ascii_digit())
+            .unwrap_or(platform.len());
+        let identifier = platform[..identifier_end].to_ascii_lowercase();
+        let version = &platform[identifier_end..];
+        let version = (!version.is_empty())
+            .then(|| parse_tfm_version(version))
+            .transpose()?;
+        ((!identifier.is_empty()).then_some(identifier), version)
+    } else {
+        (None, None)
+    };
+    if platform.is_some() && platform_identifier.is_none() {
+        bail!("Unsupported target platform in '{value}'");
+    }
+    Ok(ParsedTargetFramework {
+        identifier: identifier.to_string(),
+        version,
+        platform_identifier,
+        platform_version,
+    })
+}
+
+fn parse_tfm_version(value: &str) -> Result<Vec<u32>> {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.is_empty()
+        || parts.len() > 4
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("'{value}' is not a supported target-framework version");
+    }
+    parts
+        .iter()
+        .map(|part| {
+            part.parse::<u32>()
+                .with_context(|| format!("'{value}' is not a supported target-framework version"))
+        })
+        .collect()
+}
+
+fn format_short_version(mut version: Vec<u32>, minimum_parts: usize) -> String {
+    version.resize(version.len().max(minimum_parts), 0);
+    while version.len() > minimum_parts && version.last() == Some(&0) {
+        version.pop();
+    }
+    version
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn fix_file_path_for_style(style: PathStyle, value: &str) -> String {
     if style == PathStyle::Unix {
         value.replace('\\', "/")
@@ -4645,7 +4949,7 @@ fn fix_file_path_for_style(style: PathStyle, value: &str) -> String {
 
 fn path_component_equals(style: PathStyle, left: &str, right: &str) -> bool {
     if style == PathStyle::Windows {
-        left.eq_ignore_ascii_case(right)
+        dotnet_ordinal_ignore_case_key(left) == dotnet_ordinal_ignore_case_key(right)
     } else {
         left == right
     }
@@ -4829,15 +5133,11 @@ mod tests {
             "ToString",
             InvocationKind::InstanceMethod
         ));
-        for member in [
-            "GetTargetFrameworkIdentifier",
-            "GetTargetFrameworkVersion",
-            "GetTargetPlatformIdentifier",
-            "GetTargetPlatformVersion",
+        assert!(!is_allowed(
+            "MSBuild",
             "IsTargetFrameworkCompatible",
-        ] {
-            assert!(!is_allowed("MSBuild", member, InvocationKind::StaticMethod));
-        }
+            InvocationKind::StaticMethod
+        ));
         assert!(!is_allowed(
             "System.Environment",
             "Is64BitOperatingSystem",
@@ -5053,14 +5353,8 @@ mod tests {
     }
 
     #[test]
-    fn nuget_tfm_reviewer_cases_are_pruned_instead_of_approximated() {
+    fn unsupported_nuget_tfm_compatibility_is_pruned_instead_of_approximated() {
         for (member, inputs, direct_result) in [
-            (
-                "GetTargetPlatformVersion",
-                &["net8.0-windows10"][..],
-                "10.0",
-            ),
-            ("GetTargetPlatformVersion", &["net48"][..], "0.0"),
             (
                 "IsTargetFrameworkCompatible",
                 &["net48", "netstandard2.0"][..],
@@ -5086,6 +5380,57 @@ mod tests {
                 inputs.join(", ")
             );
         }
+    }
+
+    #[test]
+    fn common_target_framework_helpers_match_sdk_inputs() -> Result<()> {
+        assert_eq!(
+            call(
+                "MSBuild",
+                "GetTargetFrameworkIdentifier",
+                vec![IntrinsicValue::String("net10.0".into())],
+            )?,
+            IntrinsicValue::String(".NETCoreApp".into())
+        );
+        assert_eq!(
+            call(
+                "MSBuild",
+                "GetTargetFrameworkVersion",
+                vec![
+                    IntrinsicValue::String("net10.0".into()),
+                    IntrinsicValue::String("4".into()),
+                ],
+            )?,
+            IntrinsicValue::String("10.0.0.0".into())
+        );
+        assert_eq!(
+            call(
+                "MSBuild",
+                "GetTargetPlatformIdentifier",
+                vec![IntrinsicValue::String("net10.0-windows10.0.19041.0".into())],
+            )?,
+            IntrinsicValue::String("windows".into())
+        );
+        assert_eq!(
+            call(
+                "MSBuild",
+                "GetTargetPlatformVersion",
+                vec![
+                    IntrinsicValue::String("net10.0-windows10.0.19041.0".into()),
+                    IntrinsicValue::String("2".into()),
+                ],
+            )?,
+            IntrinsicValue::String("10.0.19041".into())
+        );
+        assert_eq!(
+            call(
+                "MSBuild",
+                "GetTargetPlatformVersion",
+                vec![IntrinsicValue::String("net10.0".into())],
+            )?,
+            IntrinsicValue::String("0.0".into())
+        );
+        Ok(())
     }
 
     #[test]
@@ -5366,6 +5711,15 @@ mod tests {
         assert_eq!(
             make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:\a\c", r"C:\cwd",)?,
             r"..\c"
+        );
+        assert_eq!(
+            make_relative_with_current(
+                PathStyle::Windows,
+                r"C:\Ärea\base",
+                r"c:\ärea\child",
+                r"C:\cwd",
+            )?,
+            r"..\child"
         );
         assert_eq!(
             make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:relative", r"D:\cwd",)?,

@@ -1074,26 +1074,29 @@ mod tests {
     }
 
     #[test]
-    fn sdk_style_fixture_reaches_the_known_virtual_workload_sdk_boundary() -> Result<()> {
+    fn installed_sdk_style_fixture_completes_workload_aware_evaluation() -> Result<()> {
         let project = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/evaluation/sdk-style-progress/project.proj");
+            .join("fixtures/evaluation/sdk-style-progress/project.csproj");
         let mut evaluator = ProjectEvaluator::new();
-        match evaluator.load_project(project) {
-            Ok(()) => {
-                assert_eq!(
-                    evaluator
-                        .get_model()
-                        .get_property("TargetFramework")
-                        .map(String::as_str),
-                    Some("net10.0")
-                );
-            }
-            Err(error) => {
-                let error = format!("{error:#}");
-                assert!(error.contains("AutoImport.props"), "{error}");
-                assert!(!error.contains("MSB4185"), "{error}");
-            }
-        }
+        evaluator.load_project(project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model.get_property("TargetFramework").map(String::as_str),
+            Some("net10.0")
+        );
+        assert_eq!(
+            model
+                .get_property("TargetFrameworkIdentifier")
+                .map(String::as_str),
+            Some(".NETCoreApp")
+        );
+        assert!(
+            model
+                .get_items("KnownFrameworkReference")
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.name == "Microsoft.NETCore.App"))
+        );
         Ok(())
     }
 
@@ -3094,13 +3097,15 @@ mod tests {
         let child = write_project(
             &directory,
             "child.proj",
-            r#"<Project><ItemGroup><I Include="a;b"><M Condition="'%(Identity)' == 'a'">yes</M></I></ItemGroup></Project>"#,
+            r#"<Project><ItemGroup><I Include="a;b"><M Condition="%(Identity) == a">yes</M><N Condition="%(M) == yes">custom</N></I></ItemGroup></Project>"#,
         );
         let mut evaluator = ProjectEvaluator::new();
         evaluator.load_project(child)?;
         let items = evaluator.get_model().get_items("I").unwrap();
         assert_eq!(items[0].get_metadata("M").as_deref(), Some("yes"));
+        assert_eq!(items[0].get_metadata("N").as_deref(), Some("custom"));
         assert!(items[1].get_metadata("M").is_none());
+        assert!(items[1].get_metadata("N").is_none());
         Ok(())
     }
 

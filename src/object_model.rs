@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::escaping::{EscapedString, ItemSpecKind, classify_item_spec, escape, unescape_once};
 use crate::file_times::FileTimes;
@@ -230,7 +230,6 @@ pub struct Item {
     filesystem_directory: PathBuf,
     defining_project: PathBuf,
     escaped_recursive_dir: String,
-    file_times: OnceLock<FileTimes>,
     active: bool,
 }
 
@@ -254,7 +253,6 @@ impl Item {
             evaluation_directory,
             defining_project,
             escaped_recursive_dir: String::new(),
-            file_times: OnceLock::new(),
             active: true,
         }
     }
@@ -451,12 +449,19 @@ impl Item {
         for (name, value) in self.metadata.iter() {
             result.insert(name.clone(), value.to_string());
         }
+        let file_times = self.read_file_times(&self.name);
         for name in WELL_KNOWN_METADATA {
-            result.insert(
-                (*name).to_string(),
+            let value = if name.eq_ignore_ascii_case("ModifiedTime") {
+                file_times.modified.clone()
+            } else if name.eq_ignore_ascii_case("CreatedTime") {
+                file_times.created.clone()
+            } else if name.eq_ignore_ascii_case("AccessedTime") {
+                file_times.accessed.clone()
+            } else {
                 self.well_known_metadata_for_identity(name, &self.name, false)
-                    .unwrap_or_default(),
-            );
+                    .unwrap_or_default()
+            };
+            result.insert((*name).to_string(), value);
         }
         result
     }
@@ -543,18 +548,6 @@ impl Item {
             || name.eq_ignore_ascii_case("CreatedTime")
             || name.eq_ignore_ascii_case("AccessedTime")
         {
-            if identity == self.name {
-                let times = self
-                    .file_times
-                    .get_or_init(|| self.read_file_times(identity));
-                return Some(if name.eq_ignore_ascii_case("ModifiedTime") {
-                    times.modified.clone()
-                } else if name.eq_ignore_ascii_case("CreatedTime") {
-                    times.created.clone()
-                } else {
-                    times.accessed.clone()
-                });
-            }
             let times = self.read_file_times(identity);
             return Some(if name.eq_ignore_ascii_case("ModifiedTime") {
                 times.modified
@@ -893,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_metadata_is_lazy_and_uses_one_cached_stat_per_item() -> anyhow::Result<()> {
+    fn timestamp_metadata_is_lazy_fresh_and_bulk_queries_share_one_stat() -> anyhow::Result<()> {
         let directory = TempDir::new()?;
         let path = directory.path().join("timestamp.txt");
         fs::write(&path, "timestamp")?;
@@ -915,6 +908,25 @@ mod tests {
         assert_file_time_format(&modified);
         assert_file_time_format(&item.get_metadata("CreatedTime").unwrap());
         assert_file_time_format(&item.get_metadata("AccessedTime").unwrap());
+        assert_eq!(stat_calls(), 3);
+
+        let file = fs::OpenOptions::new().write(true).open(&path)?;
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)),
+        )?;
+        let refreshed = item.get_metadata("ModifiedTime").unwrap();
+        assert_ne!(modified, refreshed);
+        assert_eq!(stat_calls(), 4);
+
+        reset_stat_calls();
+        let evaluated = item.evaluated_metadata();
+        assert_eq!(
+            evaluated.get("ModifiedTime").map(String::as_str),
+            Some(refreshed.as_ref())
+        );
+        assert_file_time_format(evaluated.get("CreatedTime").unwrap());
+        assert_file_time_format(evaluated.get("AccessedTime").unwrap());
         assert_eq!(stat_calls(), 1);
 
         let missing = Item::new(
@@ -928,7 +940,7 @@ mod tests {
         assert_eq!(missing.get_metadata("ModifiedTime").as_deref(), Some(""));
         assert_eq!(missing.get_metadata("CreatedTime").as_deref(), Some(""));
         assert_eq!(missing.get_metadata("AccessedTime").as_deref(), Some(""));
-        assert_eq!(stat_calls(), 2);
+        assert_eq!(stat_calls(), 4);
         Ok(())
     }
 

@@ -290,7 +290,8 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
                     if chars[position] == quote {
                         break;
                     }
-                    if matches!(chars[position], '$' | '@') && chars.get(position + 1) == Some(&'(')
+                    if matches!(chars[position], '$' | '@' | '%')
+                        && chars.get(position + 1) == Some(&'(')
                     {
                         let end = find_matching_condition_parenthesis(&chars, position + 1)?;
                         value.extend(chars[position..=end].iter());
@@ -306,7 +307,7 @@ fn tokenize_condition(input: &str) -> Result<Vec<ConditionToken>> {
                 tokens.push(ConditionToken::Value(value));
                 position += 1;
             }
-            '$' | '@' if chars.get(position + 1) == Some(&'(') => {
+            '$' | '@' | '%' if chars.get(position + 1) == Some(&'(') => {
                 let end = find_matching_condition_parenthesis(&chars, position + 1)?;
                 tokens.push(ConditionToken::Value(
                     chars[position..=end].iter().collect(),
@@ -2328,11 +2329,7 @@ mod tests {
         let evaluator = ExpressionEvaluator::new(&model);
 
         assert!(evaluator.evaluate_condition("'$(PathRoot2.Contains('\\'))' == 'true'")?);
-        let error = evaluator
-            .evaluate_condition("$(PathRoot.EndsWith('\\'))")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not in the native MSBuild property-function allowlist"));
+        assert!(!evaluator.evaluate_condition("$(PathRoot.EndsWith('\\'))")?);
         Ok(())
     }
 
@@ -2428,6 +2425,8 @@ mod tests {
         let mut model = ProjectModel::new();
         model.set_property("SharpS".to_string(), "ß".to_string());
         model.set_property("Sigma".to_string(), "ΟΣ".to_string());
+        model.set_property("DotlessI".to_string(), "ı".to_string());
+        model.set_property("DottedI".to_string(), "İ".to_string());
         model.set_property("S".to_string(), "aba".to_string());
         let evaluator = ExpressionEvaluator::new(&model);
         let cases = [
@@ -2435,6 +2434,7 @@ mod tests {
                 "$([MSBuild]::Add(9223372036854775807,1))",
                 "-9223372036854775808",
             ),
+            ("$([MSBuild]::Add(10.0,1))", "11"),
             (
                 "$([MSBuild]::Subtract(-9223372036854775808,1))",
                 "9223372036854775807",
@@ -2473,8 +2473,11 @@ mod tests {
             ("$([System.String]::Copy(';;;').Split(';'))", ""),
             ("$([System.String]::Copy('a b').Split())", "a;b"),
             ("$(S.Replace('b',null))", "aa"),
+            ("$(S.Trim('a'))", "b"),
             ("$(SharpS.ToUpperInvariant())", "ß"),
             ("$(Sigma.ToLowerInvariant())", "οσ"),
+            ("$(DotlessI.ToUpperInvariant())", "ı"),
+            ("$(DottedI.ToLowerInvariant())", "İ"),
             ("$([System.String]::CompareOrdinal('😀','�'))", "-10176"),
             ("$([System.String]::CompareOrdinal(null,'a'))", "-1"),
             (
@@ -2558,7 +2561,6 @@ mod tests {
             "$(S.Replace('','x'))",
             "$(S.Substring(-1))",
             "$(S.Remove(4))",
-            "$(S.Trim('a'))",
             "$(S[0].Length)",
             "$([System.Math]::Abs(-2147483648))",
             "$([System.Math]::Round(1.0,16))",
@@ -2590,13 +2592,39 @@ mod tests {
             "$([MSBuild]::AreFeaturesEnabled('garbage'))",
             "$([MSBuild]::StableStringHash('abc','Fnv1a64bit'))",
             "$([System.IO.Path]::GetFullPath('child','relative-base'))",
-            "$([MSBuild]::GetTargetFrameworkIdentifier('net8.0'))",
         ] {
             assert!(
                 evaluator.evaluate(expression).is_err(),
                 "expression should fail: {expression}"
             );
         }
+    }
+
+    #[test]
+    fn native_null_results_retain_declared_type_for_nested_binding() -> Result<()> {
+        let model = ProjectModel::new();
+        let evaluator = ExpressionEvaluator::new(&model);
+        let missing = "MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST";
+
+        assert_eq!(
+            evaluator.evaluate(&format!(
+                "$([System.Convert]::ToString($([System.Environment]::GetEnvironmentVariable('{missing}'))))"
+            ))?,
+            ""
+        );
+        assert_eq!(
+            evaluator.evaluate(&format!(
+                "$([System.String]::IsNullOrEmpty($([System.Environment]::GetEnvironmentVariable('{missing}'))))"
+            ))?,
+            "True"
+        );
+        assert!(
+            evaluator
+                .evaluate("$([System.Convert]::ToString(null))")
+                .is_err(),
+            "a literal null must remain untyped and ambiguous"
+        );
+        Ok(())
     }
 
     #[test]

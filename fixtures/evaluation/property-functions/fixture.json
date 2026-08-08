@@ -28,6 +28,7 @@
     "PathTrailingFile",
     "PathDriveRooted",
     "PathRelative",
+    "PathRelativeUnicode",
     "PathFull",
     "ExpandedEnvironment",
     "MalformedEnvironment",
@@ -68,6 +69,8 @@
     "SeparatorChar",
     "UpperSharpS",
     "LowerSigma",
+    "UpperDotlessI",
+    "LowerDottedI",
     "OrdinalCompare",
     "IsoDate",
     "GuidX",
@@ -78,7 +81,13 @@
     "NestedEscapedString",
     "RelativeFileAbove",
     "RegistryPrefixMissing",
-    "RegistryViewMissingDefault"
+    "RegistryViewMissingDefault",
+    "TypedNullConvert",
+    "TypedNullPredicate",
+    "IntegralDecimalAdd",
+    "TargetFrameworkIdentifier",
+    "TargetFrameworkVersion",
+    "TargetPlatformVersion"
   ],
   "items": [
     { "type": "SplitItem", "metadata": [] },

@@ -1666,7 +1666,7 @@ impl EvaluationState {
             for project in tokenize_list(&evaluated_project_escaped)? {
                 match ItemSpec::parse(&root, project)? {
                     ItemSpec::Literal { value } => {
-                        let import_path = lexical_absolute(&root.join(value))?;
+                        let import_path = lexical_absolute(&root.join(native_import_path(&value)))?;
                         paths.extend(resolve_import_path(&import_path, importing_path)?);
                     }
                     ItemSpec::Glob(pattern) => {
@@ -2130,6 +2130,14 @@ fn resolve_import_path(import_path: &Path, importing_path: &Path) -> Result<Vec<
     Ok(vec![lexical_absolute(import_path)?])
 }
 
+fn native_import_path(value: &str) -> PathBuf {
+    if std::path::MAIN_SEPARATOR == '\\' {
+        PathBuf::from(value.replace('/', "\\"))
+    } else {
+        PathBuf::from(value.replace('\\', "/"))
+    }
+}
+
 fn normalized_lexical_file_identity(path: &Path) -> Result<PathBuf> {
     let path = lexical_absolute(path)
         .with_context(|| format!("Failed to resolve project {}", path.display()))?;
@@ -2468,4 +2476,18 @@ fn normalize_source(source: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_import_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn literal_import_paths_accept_both_directory_separators() {
+        assert_eq!(
+            native_import_path(r"one\two/file.props"),
+            PathBuf::from("one").join("two").join("file.props")
+        );
+    }
 }

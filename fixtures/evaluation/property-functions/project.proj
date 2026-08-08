@@ -20,12 +20,21 @@
     <StringCopied>$([System.String]::Copy('copy'))</StringCopied>
     <TypedNumericChain>$([MSBuild]::Add(1, 2).CompareTo(3))</TypedNumericChain>
     <FunctionCondition Condition="$(Source.Contains('STUff'))">passed</FunctionCondition>
-    <FrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</FrameworkIdentifier>
-    <FrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 2))</FrameworkVersion>
-    <PlatformIdentifier>$([MSBuild]::GetTargetPlatformIdentifier('net10.0-windows10.0.19041.0'))</PlatformIdentifier>
-    <PlatformVersion>$([MSBuild]::GetTargetPlatformVersion('net10.0-windows10.0.19041.0', 4))</PlatformVersion>
     <StableHash>$([MSBuild]::StableStringHash('abc'))</StableHash>
     <StableSha256>$([MSBuild]::StableStringHash('abc', 'Sha256'))</StableSha256>
+    <StableFnv>$([MSBuild]::StableStringHash('abc', 'Fnv1a32bit'))</StableFnv>
+    <StableFnvFast>$([MSBuild]::StableStringHash('abc', 'Fnv1a32bitFast'))</StableFnvFast>
+    <PathDotExtension>$([System.IO.Path]::GetExtension('.gitignore'))</PathDotExtension>
+    <PathTrailingFile>$([System.IO.Path]::GetFileName('dir/'))</PathTrailingFile>
+    <PathDriveRooted>$([System.IO.Path]::IsPathRooted('C:relative'))</PathDriveRooted>
+    <PathRelative>$([MSBuild]::MakeRelative('C:\a\b', 'C:\a\c'))</PathRelative>
+    <PathFull>$([System.IO.Path]::GetFullPath('child/../file.txt', '$(MSBuildProjectDirectory)'))</PathFull>
+    <ExpandedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('%msbuild_rs_expand_case%-%MISSING%'))</ExpandedEnvironment>
+    <MalformedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('prefix%MISSING'))</MalformedEnvironment>
+    <FeatureBeforeBoundary>$([MSBuild]::AreFeaturesEnabled('18.5'))</FeatureBeforeBoundary>
+    <FeatureAtBoundary>$([MSBuild]::AreFeaturesEnabled('18.6'))</FeatureAtBoundary>
+    <TaskHostCurrent>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'CurrentArchitecture'))</TaskHostCurrent>
+    <AsciiSubstring>$([MSBuild]::SubstringByAsciiChars('ab/éZ', 1, 20))</AsciiSubstring>
     <EscapedFunction>$([MSBuild]::Escape(';'))</EscapedFunction>
     <UnescapedFunction>$([MSBuild]::Unescape('%3b'))</UnescapedFunction>
     <EscapedPathResult>$([System.IO.Path]::GetFileName('dir/a%3Bb'))</EscapedPathResult>

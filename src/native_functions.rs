@@ -9,9 +9,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::escaping::unescape_once;
-use crate::properties::{display_path, lexical_absolute};
+use crate::properties::display_path;
 #[cfg(windows)]
 use crate::registry::{RegistryView, read_registry_value};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum InvocationKind {
@@ -134,8 +136,10 @@ impl std::fmt::Debug for IntrinsicDescriptor {
 
 #[derive(Debug)]
 pub(crate) struct IntrinsicContext<'a> {
-    pub base_directory: &'a Path,
     pub tools_directory: Option<&'a str>,
+    pub environment: Option<&'a [(String, String)]>,
+    pub disable_features_from_version: Option<&'a str>,
+    pub runtime_type: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +205,7 @@ impl IntrinsicValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NativeVersion {
     parts: [i32; 4],
     count: usize,
@@ -270,6 +274,80 @@ impl std::fmt::Display for NativeVersion {
                 .collect::<Vec<_>>()
                 .join("."),
         )
+    }
+}
+
+const ENABLE_ALL_FEATURES: [i32; 4] = [999, 999, -1, -1];
+// This repository pins .NET SDK 10.0.302 / MSBuild 18.6. Keep this list in
+// lockstep with that toolset's ChangeWaves.AllWaves.
+const FEATURE_WAVES: &[[i32; 4]] = &[
+    [17, 10, -1, -1],
+    [17, 12, -1, -1],
+    [17, 14, -1, -1],
+    [18, 3, -1, -1],
+    [18, 4, -1, -1],
+    [18, 5, -1, -1],
+    [18, 6, -1, -1],
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeatureWaveResolutionKind {
+    Valid,
+    InvalidFormat,
+    OutOfRotation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FeatureWaveResolution {
+    pub version: String,
+    pub kind: FeatureWaveResolutionKind,
+}
+
+pub(crate) fn resolve_feature_wave(value: Option<&str>) -> FeatureWaveResolution {
+    let enable_all = || FeatureWaveResolution {
+        version: "999.999".to_string(),
+        kind: FeatureWaveResolutionKind::Valid,
+    };
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return enable_all();
+    };
+    let Ok(version) = NativeVersion::parse(value) else {
+        return FeatureWaveResolution {
+            kind: FeatureWaveResolutionKind::InvalidFormat,
+            ..enable_all()
+        };
+    };
+    if version.parts == ENABLE_ALL_FEATURES && version.count == 2 {
+        return enable_all();
+    }
+
+    let format_wave = |parts: &[i32; 4]| format!("{}.{}", parts[0], parts[1]);
+    if FEATURE_WAVES.contains(&version.parts) && version.count == 2 {
+        return FeatureWaveResolution {
+            version: version.to_string(),
+            kind: FeatureWaveResolutionKind::Valid,
+        };
+    }
+    if version.parts < FEATURE_WAVES[0] {
+        return FeatureWaveResolution {
+            version: format_wave(&FEATURE_WAVES[0]),
+            kind: FeatureWaveResolutionKind::OutOfRotation,
+        };
+    }
+    if version.parts > *FEATURE_WAVES.last().expect("feature waves are nonempty") {
+        return FeatureWaveResolution {
+            version: format_wave(FEATURE_WAVES.last().expect("feature waves are nonempty")),
+            kind: FeatureWaveResolutionKind::OutOfRotation,
+        };
+    }
+
+    let next = FEATURE_WAVES
+        .iter()
+        .find(|wave| **wave > version.parts)
+        .expect("an in-rotation version has a following wave");
+    FeatureWaveResolution {
+        version: format_wave(next),
+        kind: FeatureWaveResolutionKind::Valid,
     }
 }
 
@@ -424,6 +502,7 @@ const O1_STRING_EMPTY_NULL: &[OverloadDescriptor] = &[overload!(
     [Coercion::String],
     [NullPolicy::EmptyString]
 )];
+const O1_VERSION: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Version])];
 const O1_INT32: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int32])];
 const O1_INT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::Int64])];
 const O1_UINT64: &[OverloadDescriptor] = &[overload!(Arity::Exact(1), [Coercion::UInt64])];
@@ -438,6 +517,11 @@ const O2_STRING: &[OverloadDescriptor] = &[overload!(
     [Coercion::String, Coercion::String]
 )];
 const O2_STRING_NULL: &[OverloadDescriptor] = &[overload!(
+    Arity::Exact(2),
+    [Coercion::String, Coercion::String],
+    [NullPolicy::Preserve, NullPolicy::Preserve]
+)];
+const O_CHANGE_EXTENSION: &[OverloadDescriptor] = &[overload!(
     Arity::Exact(2),
     [Coercion::String, Coercion::String],
     [NullPolicy::Preserve, NullPolicy::Preserve]
@@ -470,10 +554,6 @@ const O3_STRING_INT32: &[OverloadDescriptor] = &[overload!(
 const O_STRING_1_2: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::String]),
     overload!(Arity::Exact(2), [Coercion::String, Coercion::String]),
-];
-const O_STRING_OR_STRING_INT32: &[OverloadDescriptor] = &[
-    overload!(Arity::Exact(1), [Coercion::String]),
-    overload!(Arity::Exact(2), [Coercion::String, Coercion::Int32]),
 ];
 const O_INT32_1_2: &[OverloadDescriptor] = &[
     overload!(Arity::Exact(1), [Coercion::Int32]),
@@ -602,7 +682,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_VERSION,
         "System.Boolean",
         handle_msbuild
     ),
@@ -888,61 +968,11 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
     ),
     intrinsic!(
         "MSBuild",
-        "GetTargetFrameworkIdentifier",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_STRING,
-        "System.String",
-        handle_msbuild
-    ),
-    intrinsic!(
-        "MSBuild",
-        "GetTargetFrameworkVersion",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O_STRING_OR_STRING_INT32,
-        "System.String",
-        handle_msbuild
-    ),
-    intrinsic!(
-        "MSBuild",
-        "GetTargetPlatformIdentifier",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O1_STRING,
-        "System.String",
-        handle_msbuild
-    ),
-    intrinsic!(
-        "MSBuild",
-        "GetTargetPlatformVersion",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O_STRING_OR_STRING_INT32,
-        "System.String",
-        handle_msbuild
-    ),
-    intrinsic!(
-        "MSBuild",
-        "IsTargetFrameworkCompatible",
-        StaticMethod,
-        Decoded,
-        Escape,
-        O2_STRING,
-        "System.Boolean",
-        handle_msbuild
-    ),
-    intrinsic!(
-        "MSBuild",
         "DoesTaskHostExist",
         StaticMethod,
         Decoded,
         Escape,
-        O2_STRING,
+        O2_STRING_NULL,
         "System.Boolean",
         handle_msbuild
     ),
@@ -1242,7 +1272,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.Boolean",
         handle_path
     ),
@@ -1252,7 +1282,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.String",
         handle_path
     ),
@@ -1262,7 +1292,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.String",
         handle_path
     ),
@@ -1272,7 +1302,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.String",
         handle_path
     ),
@@ -1282,7 +1312,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.String",
         handle_path
     ),
@@ -1302,7 +1332,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.String",
         handle_path
     ),
@@ -1312,7 +1342,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O1_STRING,
+        O1_STRING_NULL,
         "System.Boolean",
         handle_path
     ),
@@ -1322,7 +1352,7 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         StaticMethod,
         Decoded,
         Escape,
-        O2_STRING,
+        O_CHANGE_EXTENSION,
         "System.String",
         handle_path
     ),
@@ -1394,16 +1424,6 @@ static INTRINSICS: &[IntrinsicDescriptor] = &[
         Escape,
         O0,
         "System.String",
-        handle_environment
-    ),
-    intrinsic!(
-        "System.Environment",
-        "Is64BitOperatingSystem",
-        StaticProperty,
-        Decoded,
-        Escape,
-        O0,
-        "System.Boolean",
         handle_environment
     ),
     intrinsic!(
@@ -2468,88 +2488,89 @@ fn handle_char_instance(
 
 fn handle_path(
     descriptor: &IntrinsicDescriptor,
-    context: &IntrinsicContext<'_>,
+    _: &IntrinsicContext<'_>,
     _: Option<&IntrinsicValue>,
     arguments: &[IntrinsicArgument],
 ) -> Result<IntrinsicValue> {
     let operation = descriptor.dispatch_code;
     if operation == member_code("Combine") {
-        let Some(first) = arguments.first() else {
-            return Ok(IntrinsicValue::String(String::new()));
-        };
-        let mut path = PathBuf::from(argument_string(first, descriptor.member)?);
-        for argument in arguments.iter().skip(1) {
-            path.push(argument_string(argument, descriptor.member)?);
-        }
-        Ok(IntrinsicValue::String(display_path(&path)))
+        let paths = arguments
+            .iter()
+            .map(|argument| argument_string(argument, descriptor.member))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(IntrinsicValue::String(host_combine(&paths)))
     } else if operation == member_code("IsPathRooted") {
         Ok(IntrinsicValue::Boolean(
-            Path::new(argument_string(&arguments[0], descriptor.member)?).has_root(),
+            argument_optional_string(&arguments[0], descriptor.member)?
+                .is_some_and(|path| path_is_rooted(host_path_style(), path)),
         ))
     } else if operation == member_code("GetDirectoryName") {
-        Ok(IntrinsicValue::String(
-            Path::new(argument_string(&arguments[0], descriptor.member)?)
-                .parent()
-                .map(display_path)
-                .unwrap_or_default(),
-        ))
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
+        Ok(path_get_directory_name(host_path_style(), path)
+            .map(IntrinsicValue::String)
+            .unwrap_or(IntrinsicValue::Null))
     } else if operation == member_code("GetFileName") {
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
         Ok(IntrinsicValue::String(
-            Path::new(argument_string(&arguments[0], descriptor.member)?)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
+            path_get_file_name(host_path_style(), path).to_string(),
         ))
     } else if operation == member_code("GetFileNameWithoutExtension") {
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
+        let file_name = path_get_file_name(host_path_style(), path);
         Ok(IntrinsicValue::String(
-            Path::new(argument_string(&arguments[0], descriptor.member)?)
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
+            file_name
+                .rfind('.')
+                .map_or(file_name, |index| &file_name[..index])
+                .to_string(),
         ))
     } else if operation == member_code("GetExtension") {
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
         Ok(IntrinsicValue::String(
-            Path::new(argument_string(&arguments[0], descriptor.member)?)
-                .extension()
-                .map(|extension| format!(".{}", extension.to_string_lossy()))
-                .unwrap_or_default(),
+            path_get_extension(host_path_style(), path).to_string(),
         ))
     } else if operation == member_code("GetFullPath") {
-        let path = if arguments.len() == 2 {
-            Path::new(argument_string(&arguments[1], descriptor.member)?)
-                .join(argument_string(&arguments[0], descriptor.member)?)
-        } else {
-            PathBuf::from(argument_string(&arguments[0], descriptor.member)?)
-        };
-        Ok(IntrinsicValue::String(display_path(
-            &lexical_absolute(&path).unwrap_or_else(|_| context.base_directory.join(path)),
-        )))
+        let path = argument_string(&arguments[0], descriptor.member)?;
+        let base = arguments
+            .get(1)
+            .map(|argument| argument_string(argument, descriptor.member))
+            .transpose()?;
+        Ok(IntrinsicValue::String(host_get_full_path(path, base)?))
     } else if operation == member_code("GetPathRoot") {
-        let root = Path::new(argument_string(&arguments[0], descriptor.member)?)
-            .components()
-            .take_while(|component| {
-                matches!(
-                    component,
-                    std::path::Component::Prefix(_) | std::path::Component::RootDir
-                )
-            })
-            .collect::<PathBuf>();
-        Ok(IntrinsicValue::String(display_path(&root)))
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
+        if path_is_effectively_empty(host_path_style(), path) {
+            return Ok(IntrinsicValue::Null);
+        }
+        let root_length = path_root_length(host_path_style(), path);
+        Ok(IntrinsicValue::String(normalize_path_separators(
+            host_path_style(),
+            &path[..root_length],
+        )))
     } else if operation == member_code("HasExtension") {
         Ok(IntrinsicValue::Boolean(
-            Path::new(argument_string(&arguments[0], descriptor.member)?)
-                .extension()
-                .is_some(),
+            argument_optional_string(&arguments[0], descriptor.member)?
+                .is_some_and(|path| !path_get_extension(host_path_style(), path).is_empty()),
         ))
     } else if operation == member_code("ChangeExtension") {
-        let mut path = PathBuf::from(argument_string(&arguments[0], descriptor.member)?);
-        let extension = argument_string(&arguments[1], descriptor.member)?.trim_start_matches('.');
-        path.set_extension(extension);
-        Ok(IntrinsicValue::String(display_path(&path)))
+        let Some(path) = argument_optional_string(&arguments[0], descriptor.member)? else {
+            return Ok(IntrinsicValue::Null);
+        };
+        Ok(IntrinsicValue::String(path_change_extension(
+            host_path_style(),
+            path,
+            argument_optional_string(&arguments[1], descriptor.member)?,
+        )))
     } else if operation == member_code("GetTempPath") {
-        Ok(IntrinsicValue::String(with_trailing_separator(
+        Ok(IntrinsicValue::String(ensure_trailing_separator(
             display_path(&std::env::temp_dir()),
         )))
     } else if operation == member_code("DirectorySeparatorChar") {
@@ -2563,6 +2584,526 @@ fn handle_path(
     } else {
         unreachable!("all registered path members are handled")
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathStyle {
+    Windows,
+    Unix,
+}
+
+const fn host_path_style() -> PathStyle {
+    if cfg!(windows) {
+        PathStyle::Windows
+    } else {
+        PathStyle::Unix
+    }
+}
+
+const fn path_directory_separator(style: PathStyle) -> char {
+    match style {
+        PathStyle::Windows => '\\',
+        PathStyle::Unix => '/',
+    }
+}
+
+fn path_is_separator(style: PathStyle, byte: u8) -> bool {
+    match style {
+        PathStyle::Windows => matches!(byte, b'\\' | b'/'),
+        PathStyle::Unix => byte == b'/',
+    }
+}
+
+fn windows_is_device(path: &[u8]) -> bool {
+    (path.len() >= 4
+        && path[0] == b'\\'
+        && matches!(path[1], b'\\' | b'?')
+        && path[2] == b'?'
+        && path[3] == b'\\')
+        || (path.len() >= 4
+            && path_is_separator(PathStyle::Windows, path[0])
+            && path_is_separator(PathStyle::Windows, path[1])
+            && matches!(path[2], b'.' | b'?')
+            && path_is_separator(PathStyle::Windows, path[3]))
+}
+
+fn windows_is_device_unc(path: &[u8]) -> bool {
+    path.len() >= 8
+        && windows_is_device(path)
+        && path_is_separator(PathStyle::Windows, path[7])
+        && path[4..7].eq_ignore_ascii_case(b"UNC")
+}
+
+fn path_root_length(style: PathStyle, path: &str) -> usize {
+    let bytes = path.as_bytes();
+    if style == PathStyle::Unix {
+        return usize::from(bytes.first() == Some(&b'/'));
+    }
+
+    let mut index = 0;
+    let device = windows_is_device(bytes);
+    let device_unc = device && windows_is_device_unc(bytes);
+    if (!device || device_unc)
+        && bytes
+            .first()
+            .is_some_and(|byte| path_is_separator(style, *byte))
+    {
+        if device_unc || (bytes.len() > 1 && path_is_separator(style, bytes[1])) {
+            index = if device_unc { 8 } else { 2 };
+            let mut separators = 2;
+            while index < bytes.len() {
+                if path_is_separator(style, bytes[index]) {
+                    separators -= 1;
+                    if separators == 0 {
+                        break;
+                    }
+                }
+                index += 1;
+            }
+        } else {
+            index = 1;
+        }
+    } else if device {
+        index = 4;
+        while index < bytes.len() && !path_is_separator(style, bytes[index]) {
+            index += 1;
+        }
+        if index < bytes.len() && index > 4 {
+            index += 1;
+        }
+    } else if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        index = 2;
+        if bytes
+            .get(2)
+            .is_some_and(|byte| path_is_separator(style, *byte))
+        {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn path_is_rooted(style: PathStyle, path: &str) -> bool {
+    let bytes = path.as_bytes();
+    match style {
+        PathStyle::Unix => bytes.first() == Some(&b'/'),
+        PathStyle::Windows => {
+            bytes
+                .first()
+                .is_some_and(|byte| path_is_separator(style, *byte))
+                || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        }
+    }
+}
+
+fn path_is_fully_qualified(style: PathStyle, path: &str) -> bool {
+    if style == PathStyle::Unix {
+        return path_is_rooted(style, path);
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    if path_is_separator(style, bytes[0]) {
+        return bytes[1] == b'?' || path_is_separator(style, bytes[1]);
+    }
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && path_is_separator(style, bytes[2])
+}
+
+fn path_is_effectively_empty(style: PathStyle, path: &str) -> bool {
+    path.is_empty() || (style == PathStyle::Windows && path.bytes().all(|byte| byte == b' '))
+}
+
+fn normalize_path_separators(style: PathStyle, path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let separator = path_directory_separator(style);
+    let preserve_two_leading = style == PathStyle::Windows
+        && path
+            .as_bytes()
+            .get(0..2)
+            .is_some_and(|prefix| prefix.iter().all(|byte| path_is_separator(style, *byte)));
+    let mut output = String::with_capacity(path.len());
+    for character in path.chars() {
+        let is_separator = character.is_ascii() && path_is_separator(style, character as u8);
+        if !is_separator {
+            output.push(character);
+            continue;
+        }
+        if output.ends_with(separator) {
+            if preserve_two_leading && output.len() == 1 {
+                output.push(separator);
+            }
+            continue;
+        }
+        output.push(separator);
+    }
+    output
+}
+
+fn path_get_directory_name(style: PathStyle, path: &str) -> Option<String> {
+    if path_is_effectively_empty(style, path) {
+        return None;
+    }
+    let root_length = path_root_length(style, path);
+    let mut end = path.len();
+    if end <= root_length {
+        return None;
+    }
+    while end > root_length {
+        let (position, character) = path[..end]
+            .char_indices()
+            .next_back()
+            .expect("end is nonzero");
+        end = position;
+        if character.is_ascii() && path_is_separator(style, character as u8) {
+            break;
+        }
+    }
+    while end > root_length {
+        let (position, character) = path[..end]
+            .char_indices()
+            .next_back()
+            .expect("end is nonzero");
+        if !character.is_ascii() || !path_is_separator(style, character as u8) {
+            break;
+        }
+        end = position;
+    }
+    Some(normalize_path_separators(style, &path[..end]))
+}
+
+fn path_get_file_name(style: PathStyle, path: &str) -> &str {
+    let root_length = path_root_length(style, path);
+    let separator = path
+        .bytes()
+        .enumerate()
+        .rev()
+        .find(|(_, byte)| path_is_separator(style, *byte))
+        .map(|(index, _)| index);
+    let start = separator.map_or(root_length, |index| {
+        if index < root_length {
+            root_length
+        } else {
+            index + 1
+        }
+    });
+    &path[start..]
+}
+
+fn path_get_extension(style: PathStyle, path: &str) -> &str {
+    for (index, byte) in path.bytes().enumerate().rev() {
+        if byte == b'.' {
+            return if index == path.len() - 1 {
+                ""
+            } else {
+                &path[index..]
+            };
+        }
+        if path_is_separator(style, byte) {
+            break;
+        }
+    }
+    ""
+}
+
+fn path_change_extension(style: PathStyle, path: &str, extension: Option<&str>) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let mut sub_length = path.len();
+    for (index, byte) in path.bytes().enumerate().rev() {
+        if byte == b'.' {
+            sub_length = index;
+            break;
+        }
+        if path_is_separator(style, byte) {
+            break;
+        }
+    }
+    let Some(extension) = extension else {
+        return path[..sub_length].to_string();
+    };
+    if extension.starts_with('.') {
+        format!("{}{extension}", &path[..sub_length])
+    } else {
+        format!("{}.{extension}", &path[..sub_length])
+    }
+}
+
+fn path_combine(style: PathStyle, paths: &[&str]) -> String {
+    let first_component = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, path)| !path.is_empty() && path_is_rooted(style, path))
+        .map(|(index, _)| index)
+        .next_back()
+        .unwrap_or(0);
+    let mut output = String::new();
+    for path in &paths[first_component..] {
+        if path.is_empty() {
+            continue;
+        }
+        if !output.is_empty()
+            && !output
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| path_is_separator(style, *byte))
+        {
+            output.push(path_directory_separator(style));
+        }
+        output.push_str(path);
+    }
+    output
+}
+
+fn host_combine(paths: &[&str]) -> String {
+    path_combine(host_path_style(), paths)
+}
+
+fn path_volume_name(style: PathStyle, path: &str) -> &str {
+    let root_length = path_root_length(style, path);
+    let root = &path[..root_length];
+    root.strip_suffix(['/', '\\']).unwrap_or(root)
+}
+
+fn path_roots_equal(style: PathStyle, left: &str, right: &str) -> bool {
+    let left = path_volume_name(style, left);
+    let right = path_volume_name(style, right);
+    if style == PathStyle::Windows {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn path_join(style: PathStyle, left: &str, right: &str) -> String {
+    if left.is_empty() {
+        return right.to_string();
+    }
+    if right.is_empty() {
+        return left.to_string();
+    }
+    let mut output = left.to_string();
+    if !left
+        .as_bytes()
+        .last()
+        .is_some_and(|byte| path_is_separator(style, *byte))
+        && !right
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| path_is_separator(style, *byte))
+    {
+        output.push(path_directory_separator(style));
+    }
+    output.push_str(right);
+    output
+}
+
+fn resolve_path_against_base(
+    style: PathStyle,
+    path: &str,
+    base: &str,
+    use_drive_environment: bool,
+) -> Result<String> {
+    if style == PathStyle::Unix {
+        return Ok(path_join(style, base, path));
+    }
+    let bytes = path.as_bytes();
+    if bytes
+        .first()
+        .is_some_and(|byte| path_is_separator(style, *byte))
+    {
+        let root = &base[..path_root_length(style, base)];
+        return Ok(path_join(style, root, &path[1..]));
+    }
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if path_roots_equal(style, path, base) {
+            return Ok(path_join(style, base, &path[2..]));
+        }
+        if use_drive_environment {
+            let variable = format!("={}:", bytes[0] as char);
+            if let Some(directory) = std::env::var_os(variable) {
+                let directory = directory.to_string_lossy();
+                if path_is_fully_qualified(style, &directory)
+                    && path_roots_equal(style, path, &directory)
+                {
+                    return Ok(path_join(style, &directory, &path[2..]));
+                }
+            }
+        }
+        return Ok(format!(
+            "{}\\{}",
+            &path[..2],
+            path[2..].trim_start_matches(['/', '\\'])
+        ));
+    }
+    Ok(path_join(style, base, path))
+}
+
+fn normalize_full_path(style: PathStyle, path: &str) -> Result<String> {
+    if style == PathStyle::Windows
+        && path
+            .as_bytes()
+            .get(0..4)
+            .is_some_and(|prefix| prefix == br"\\?\")
+    {
+        return Ok(path.to_string());
+    }
+    if style == PathStyle::Windows && windows_is_device(path.as_bytes()) {
+        bail!(
+            "Device paths outside the canonical \\\\?\\ form are not supported by the native tier"
+        );
+    }
+    #[cfg(windows)]
+    if style == PathStyle::Windows {
+        return windows_normalize_full_path(path);
+    }
+    let normalized = normalize_path_separators(style, path);
+    let root_length = path_root_length(style, &normalized);
+    if root_length == 0 {
+        bail!("Path '{path}' is not fully qualified");
+    }
+    let separator = path_directory_separator(style);
+    let trailing_separator = normalized.ends_with(separator);
+    let mut components = Vec::new();
+    for component in normalized[root_length..].split(separator) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            _ => components.push(component),
+        }
+    }
+    let mut output = normalized[..root_length].to_string();
+    for component in components {
+        if !output.ends_with(separator) {
+            output.push(separator);
+        }
+        output.push_str(component);
+    }
+    if trailing_separator && !output.ends_with(separator) {
+        output.push(separator);
+    }
+    if output.is_empty() {
+        output.push(separator);
+    }
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn windows_normalize_full_path(path: &str) -> Result<String> {
+    let input = path.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut output = vec![0u16; 260];
+    loop {
+        // GetFullPathNameW only performs lexical Win32 normalization; it does
+        // not resolve links or require the path to exist.
+        let length = unsafe {
+            GetFullPathNameW(
+                input.as_ptr(),
+                output
+                    .len()
+                    .try_into()
+                    .context("Path buffer is too large")?,
+                output.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        if length == 0 {
+            return Err(std::io::Error::last_os_error()).context("Path.GetFullPath failed");
+        }
+        let length = usize::try_from(length).context("Path length does not fit usize")?;
+        if length < output.len() {
+            return String::from_utf16(&output[..length])
+                .context("Path.GetFullPath returned invalid UTF-16");
+        }
+        output.resize(length.saturating_add(1), 0);
+    }
+}
+
+fn get_full_path(
+    style: PathStyle,
+    path: &str,
+    base: Option<&str>,
+    current_directory: &str,
+) -> Result<String> {
+    if path.contains('\0') || base.is_some_and(|base| base.contains('\0')) {
+        bail!("Path contains a null character");
+    }
+    let combined = if let Some(base) = base {
+        if !path_is_fully_qualified(style, base) {
+            bail!("Base path '{base}' is not fully qualified");
+        }
+        if style == PathStyle::Windows
+            && base
+                .as_bytes()
+                .get(0..4)
+                .is_some_and(|prefix| prefix == br"\\?\")
+            && !path_is_fully_qualified(style, path)
+            && !path_is_effectively_empty(style, path)
+        {
+            bail!("Relative resolution against a Windows device base is outside the native tier");
+        }
+        if path_is_fully_qualified(style, path) {
+            path.to_string()
+        } else if path_is_effectively_empty(style, path) {
+            return Ok(base.to_string());
+        } else {
+            resolve_path_against_base(style, path, base, false)?
+        }
+    } else {
+        if path_is_effectively_empty(style, path) {
+            bail!("Path cannot be empty");
+        }
+        if path_is_fully_qualified(style, path) {
+            path.to_string()
+        } else {
+            if !path_is_fully_qualified(style, current_directory) {
+                bail!("Current directory '{current_directory}' is not fully qualified");
+            }
+            resolve_path_against_base(style, path, current_directory, true)?
+        }
+    };
+    normalize_full_path(style, &combined)
+}
+
+fn host_get_full_path(path: &str, base: Option<&str>) -> Result<String> {
+    let current_directory = std::env::current_dir()
+        .context("Could not read the current directory for Path.GetFullPath")?;
+    get_full_path(
+        host_path_style(),
+        path,
+        base,
+        &display_path(&current_directory),
+    )
+}
+
+fn fix_file_path(value: &str) -> String {
+    if host_path_style() == PathStyle::Unix {
+        value.replace('\\', "/")
+    } else {
+        value.to_string()
+    }
+}
+
+fn ensure_trailing_separator(mut value: String) -> String {
+    if host_path_style() == PathStyle::Unix {
+        value = value.replace('\\', "/");
+    }
+    if !value.is_empty()
+        && !value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| path_is_separator(host_path_style(), *byte))
+    {
+        value.push(path_directory_separator(host_path_style()));
+    }
+    value
 }
 
 fn handle_math(
@@ -2639,28 +3180,32 @@ fn handle_math(
 
 fn handle_environment(
     descriptor: &IntrinsicDescriptor,
-    _: &IntrinsicContext<'_>,
+    context: &IntrinsicContext<'_>,
     _: Option<&IntrinsicValue>,
     arguments: &[IntrinsicArgument],
 ) -> Result<IntrinsicValue> {
     let operation = descriptor.dispatch_code;
     if operation == member_code("ExpandEnvironmentVariables") {
-        let mut output = argument_string(&arguments[0], descriptor.member)?.to_string();
-        for (name, value) in std::env::vars() {
-            output = output.replace(&format!("%{name}%"), &value);
-        }
-        Ok(IntrinsicValue::String(output))
+        let environment = environment_snapshot(context);
+        Ok(IntrinsicValue::String(expand_environment_variables(
+            argument_string(&arguments[0], descriptor.member)?,
+            &environment,
+        )))
     } else if operation == member_code("GetEnvironmentVariable") {
-        Ok(IntrinsicValue::String(
-            std::env::var(argument_string(&arguments[0], descriptor.member)?).unwrap_or_default(),
-        ))
+        let environment = environment_snapshot(context);
+        Ok(environment
+            .get(&environment_key(argument_string(
+                &arguments[0],
+                descriptor.member,
+            )?))
+            .cloned()
+            .map(IntrinsicValue::String)
+            .unwrap_or(IntrinsicValue::Null))
     } else if operation == member_code("NewLine") {
         Ok(IntrinsicValue::String(
             if cfg!(windows) { "\r\n" } else { "\n" }.to_string(),
         ))
-    } else if operation == member_code("Is64BitOperatingSystem")
-        || operation == member_code("Is64BitProcess")
-    {
+    } else if operation == member_code("Is64BitProcess") {
         Ok(IntrinsicValue::Boolean(usize::BITS == 64))
     } else {
         Ok(IntrinsicValue::Int32(
@@ -2669,6 +3214,59 @@ fn handle_environment(
                 .unwrap_or(1),
         ))
     }
+}
+
+fn environment_key(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_string()
+    }
+}
+
+fn environment_snapshot(context: &IntrinsicContext<'_>) -> HashMap<String, String> {
+    if let Some(environment) = context.environment {
+        return environment
+            .iter()
+            .map(|(name, value)| (environment_key(name), value.to_string()))
+            .collect();
+    }
+    std::env::vars_os()
+        .map(|(name, value)| {
+            (
+                environment_key(&name.to_string_lossy()),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn expand_environment_variables(input: &str, environment: &HashMap<String, String>) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut last_position = 0;
+    while last_position < input.len() {
+        let next_character = input[last_position..]
+            .chars()
+            .next()
+            .expect("last_position is in bounds");
+        let search_start = last_position + next_character.len_utf8();
+        let Some(relative_position) = input[search_start..].find('%') else {
+            break;
+        };
+        let position = search_start + relative_position;
+        if next_character == '%' {
+            let name = &input[search_start..position];
+            if let Some(value) = environment.get(&environment_key(name)) {
+                output.push_str(value);
+                last_position = position + 1;
+                continue;
+            }
+        }
+        output.push_str(&input[last_position..position]);
+        last_position = position;
+    }
+    output.push_str(&input[last_position..]);
+    output
 }
 
 fn handle_convert(
@@ -2934,7 +3532,19 @@ fn handle_msbuild(
     let member = descriptor.member;
     let operation = descriptor.dispatch_code;
     if operation == member_code("AreFeaturesEnabled") {
-        Ok(IntrinsicValue::Boolean(true))
+        let IntrinsicValue::Version(wave) = &arguments[0].value else {
+            unreachable!("AreFeaturesEnabled is coerced to System.Version");
+        };
+        let configured = context
+            .disable_features_from_version
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                environment_snapshot(context)
+                    .get(&environment_key("MSBuildDisableFeaturesFromVersion"))
+                    .cloned()
+            });
+        let disabled = NativeVersion::parse(&resolve_feature_wave(configured.as_deref()).version)?;
+        Ok(IntrinsicValue::Boolean(wave < &disabled))
     } else if operation == member_code("IsRunningFromVisualStudio") {
         Ok(IntrinsicValue::Boolean(false))
     } else if operation == member_code("IsOSPlatform") {
@@ -2965,7 +3575,7 @@ fn handle_msbuild(
         let ordering = compare_sdk_versions(
             argument_string(&arguments[0], member)?,
             argument_string(&arguments[1], member)?,
-        );
+        )?;
         let result = if operation == member_code("VersionGreaterThan") {
             ordering.is_gt()
         } else if operation == member_code("VersionGreaterThanOrEquals") {
@@ -2988,12 +3598,10 @@ fn handle_msbuild(
             .unwrap_or_default(),
         ))
     } else if operation == member_code("GetPathOfFileAbove") {
-        let file_name = Path::new(argument_string(&arguments[0], member)?)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let file_name =
+            path_get_file_name(host_path_style(), argument_string(&arguments[0], member)?);
         Ok(IntrinsicValue::String(
-            find_file_above(argument_string(&arguments[1], member)?, &file_name)
+            find_file_above(argument_string(&arguments[1], member)?, file_name)
                 .map(|path| display_path(&path))
                 .unwrap_or_default(),
         ))
@@ -3001,19 +3609,18 @@ fn handle_msbuild(
         Ok(IntrinsicValue::String(make_relative(
             argument_string(&arguments[0], member)?,
             argument_string(&arguments[1], member)?,
-        )))
+        )?))
     } else if operation == member_code("NormalizePath")
         || operation == member_code("NormalizeDirectory")
     {
-        let mut path = PathBuf::from(argument_string(&arguments[0], member)?);
-        for argument in arguments.iter().skip(1) {
-            path.push(argument_string(argument, member)?);
-        }
-        let path = lexical_absolute(&path).unwrap_or_else(|_| context.base_directory.join(path));
-        let value = display_path(&path);
+        let paths = arguments
+            .iter()
+            .map(|argument| argument_string(argument, member))
+            .collect::<Result<Vec<_>>>()?;
+        let value = fix_file_path(&host_get_full_path(&host_combine(&paths), None)?);
         Ok(IntrinsicValue::String(
             if operation == member_code("NormalizeDirectory") {
-                with_trailing_separator(value)
+                ensure_trailing_separator(value)
             } else {
                 value
             },
@@ -3023,7 +3630,7 @@ fn handle_msbuild(
         Ok(IntrinsicValue::String(if value.is_empty() {
             String::new()
         } else {
-            with_trailing_separator(value.to_string())
+            ensure_trailing_separator(fix_file_path(value))
         }))
     } else if matches!(
         operation,
@@ -3079,46 +3686,14 @@ fn handle_msbuild(
             &arguments[0],
             member,
         )?)))
-    } else if operation == member_code("GetTargetFrameworkIdentifier") {
-        Ok(IntrinsicValue::String(
-            target_framework(argument_string(&arguments[0], member)?).0,
-        ))
-    } else if operation == member_code("GetTargetFrameworkVersion") {
-        let (_, version) = target_framework(argument_string(&arguments[0], member)?);
-        Ok(IntrinsicValue::String(format_version_parts(
-            &version,
-            optional_part_count(arguments)?,
-        )))
-    } else if operation == member_code("GetTargetPlatformIdentifier") {
-        Ok(IntrinsicValue::String(
-            target_platform(argument_string(&arguments[0], member)?).0,
-        ))
-    } else if operation == member_code("GetTargetPlatformVersion") {
-        let (_, version) = target_platform(argument_string(&arguments[0], member)?);
-        Ok(IntrinsicValue::String(format_version_parts(
-            &version,
-            optional_part_count(arguments)?,
-        )))
-    } else if operation == member_code("IsTargetFrameworkCompatible") {
-        Ok(IntrinsicValue::Boolean(target_framework_compatible(
-            argument_string(&arguments[0], member)?,
-            argument_string(&arguments[1], member)?,
-        )))
     } else if operation == member_code("DoesTaskHostExist") {
-        Ok(IntrinsicValue::Boolean(false))
+        does_task_host_exist(context, arguments)
     } else if operation == member_code("GetToolsDirectory32") {
         Ok(IntrinsicValue::String(
             context.tools_directory.unwrap_or_default().to_string(),
         ))
     } else if operation == member_code("SubstringByAsciiChars") {
-        let start = argument_usize(&arguments[1], member)?;
-        let length = argument_usize(&arguments[2], member)?;
-        Ok(IntrinsicValue::String(
-            argument_string(&arguments[0], member)?
-                .get(start..start.saturating_add(length))
-                .ok_or_else(|| anyhow!("ASCII substring range is out of bounds"))?
-                .to_string(),
-        ))
+        substring_by_ascii_chars(arguments)
     } else if operation == member_code("StableStringHash") {
         stable_string_hash(arguments)
     } else if operation == member_code("GetRegistryValue") {
@@ -3244,63 +3819,24 @@ fn stable_string_hash(arguments: &[IntrinsicArgument]) -> Result<IntrinsicValue>
         Ok(IntrinsicValue::Int32(
             hash1.wrapping_add(hash2.wrapping_mul(1_566_083_941)),
         ))
-    } else if algorithm.eq_ignore_ascii_case("Fnv1a32bit")
-        || algorithm.eq_ignore_ascii_case("Fnv1a32bitFast")
-    {
+    } else if algorithm.eq_ignore_ascii_case("Fnv1a32bit") {
         let mut hash = 2_166_136_261u32;
-        for byte in value.as_bytes() {
-            hash ^= u32::from(*byte);
+        for unit in value.encode_utf16() {
+            hash ^= u32::from(unit & 0xff);
+            hash = hash.wrapping_mul(16_777_619);
+            hash ^= u32::from(unit >> 8);
             hash = hash.wrapping_mul(16_777_619);
         }
-        Ok(IntrinsicValue::UInt64(u64::from(hash)))
+        Ok(IntrinsicValue::Int32(hash as i32))
+    } else if algorithm.eq_ignore_ascii_case("Fnv1a32bitFast") {
+        let mut hash = 2_166_136_261u32;
+        for unit in value.encode_utf16() {
+            hash = (hash ^ u32::from(unit)).wrapping_mul(16_777_619);
+        }
+        Ok(IntrinsicValue::Int32(hash as i32))
     } else {
         bail!("MSB4184: Unsupported StableStringHash algorithm '{algorithm}'")
     }
-}
-
-fn target_framework(value: &str) -> (String, String) {
-    let framework = value
-        .split('-')
-        .next()
-        .unwrap_or(value)
-        .to_ascii_lowercase();
-    if let Some(version) = framework.strip_prefix("netstandard") {
-        (".NETStandard".to_string(), normalize_short_version(version))
-    } else if let Some(version) = framework.strip_prefix("netcoreapp") {
-        (".NETCoreApp".to_string(), normalize_short_version(version))
-    } else if let Some(version) = framework.strip_prefix("net") {
-        let normalized = normalize_short_version(version);
-        let major = normalized
-            .split('.')
-            .next()
-            .and_then(|major| major.parse::<u32>().ok())
-            .unwrap_or_default();
-        (
-            if major >= 5 {
-                ".NETCoreApp"
-            } else {
-                ".NETFramework"
-            }
-            .to_string(),
-            normalized,
-        )
-    } else {
-        ("Unsupported".to_string(), String::new())
-    }
-}
-
-fn target_platform(value: &str) -> (String, String) {
-    let Some(platform) = value.split_once('-').map(|(_, platform)| platform) else {
-        return (String::new(), String::new());
-    };
-    let name_end = platform
-        .find(|character: char| character.is_ascii_digit())
-        .unwrap_or(platform.len());
-    let name = &platform[..name_end];
-    (
-        name.to_ascii_lowercase(),
-        normalize_short_version(&platform[name_end..]),
-    )
 }
 
 fn packed_utf16(units: &[u16], index: usize) -> i32 {
@@ -3315,58 +3851,115 @@ fn legacy_hash_mix(hash: i32, value: i32) -> i32 {
         ^ value
 }
 
-fn target_framework_compatible(target: &str, candidate: &str) -> bool {
-    let (target_id, target_version) = target_framework(target);
-    let (candidate_id, candidate_version) = target_framework(candidate);
-    if target_id == "Unsupported" || candidate_id == "Unsupported" {
-        return false;
+fn does_task_host_exist(
+    context: &IntrinsicContext<'_>,
+    arguments: &[IntrinsicArgument],
+) -> Result<IntrinsicValue> {
+    let runtime = argument_optional_string(&arguments[0], "DoesTaskHostExist")?
+        .map(str::trim)
+        .unwrap_or("*");
+    let architecture = argument_optional_string(&arguments[1], "DoesTaskHostExist")?
+        .map(str::trim)
+        .unwrap_or("*");
+    if !["CLR2", "CLR4", "CurrentRuntime", "NET", "*"]
+        .iter()
+        .any(|value| runtime.eq_ignore_ascii_case(value))
+    {
+        bail!("DoesTaskHostExist received invalid runtime '{runtime}'");
     }
-    if target_id == candidate_id {
-        return compare_sdk_versions(&target_version, &candidate_version).is_ge();
+    if !["x86", "x64", "arm64", "CurrentArchitecture", "*"]
+        .iter()
+        .any(|value| architecture.eq_ignore_ascii_case(value))
+    {
+        bail!("DoesTaskHostExist received invalid architecture '{architecture}'");
     }
-    target_id == ".NETCoreApp" && candidate_id == ".NETStandard"
-}
 
-fn normalize_short_version(value: &str) -> String {
-    if value.contains('.') || !value.is_ascii() {
-        return value.to_string();
-    }
-    match value.len() {
-        2 => format!("{}.{}", &value[..1], &value[1..]),
-        3 => format!("{}.{}.{}", &value[..1], &value[1..2], &value[2..]),
-        4 => format!(
-            "{}.{}.{}.{}",
-            &value[..1],
-            &value[1..2],
-            &value[2..3],
-            &value[3..]
-        ),
-        _ => value.to_string(),
-    }
-}
-
-fn optional_part_count(arguments: &[IntrinsicArgument]) -> Result<Option<usize>> {
-    let count = arguments
-        .get(1)
-        .map(|argument| argument_usize(argument, "version part count"))
-        .transpose()?;
-    if count.is_some_and(|count| count > 4) {
-        bail!("version part count cannot exceed 4");
-    }
-    Ok(count)
-}
-
-fn format_version_parts(version: &str, count: Option<usize>) -> String {
-    let Some(count) = count else {
-        return version.to_string();
+    let current_runtime = match context.runtime_type {
+        Some(value) if value.eq_ignore_ascii_case("Core") => "NET",
+        Some(value) if value.eq_ignore_ascii_case("Full") => "CLR4",
+        _ => {
+            if runtime.eq_ignore_ascii_case("*") || runtime.eq_ignore_ascii_case("CurrentRuntime") {
+                bail!("DoesTaskHostExist requires an active MSBuild runtime");
+            }
+            runtime
+        }
     };
-    let mut parts = version
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    parts.resize(count, "0".to_string());
-    parts.truncate(count);
-    parts.join(".")
+    let runtime =
+        if runtime.eq_ignore_ascii_case("*") || runtime.eq_ignore_ascii_case("CurrentRuntime") {
+            current_runtime
+        } else {
+            runtime
+        };
+    let current_architecture = match std::env::consts::ARCH {
+        "x86" => "x86",
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ if usize::BITS == 64 => "x64",
+        _ => "x86",
+    };
+    let architecture = if architecture.eq_ignore_ascii_case("*")
+        || architecture.eq_ignore_ascii_case("CurrentArchitecture")
+    {
+        current_architecture
+    } else {
+        architecture
+    };
+    if !architecture.eq_ignore_ascii_case(current_architecture) {
+        bail!(
+            "DoesTaskHostExist cannot inspect the '{architecture}' toolset from the current '{current_architecture}' process"
+        );
+    }
+
+    let tools_directory = context
+        .tools_directory
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("DoesTaskHostExist requires an active MSBuild toolset"))?;
+    let environment = environment_snapshot(context);
+    let executable = if runtime.eq_ignore_ascii_case("CLR2") {
+        environment
+            .get(&environment_key("MSBUILDTASKHOST_EXE_NAME"))
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("MSBuildTaskHost.exe")
+    } else {
+        environment
+            .get(&environment_key("MSBUILD_EXE_NAME"))
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(if cfg!(windows) {
+                "MSBuild.exe"
+            } else {
+                "MSBuild"
+            })
+    };
+    Ok(IntrinsicValue::Boolean(
+        Path::new(tools_directory).join(executable).is_file(),
+    ))
+}
+
+fn substring_by_ascii_chars(arguments: &[IntrinsicArgument]) -> Result<IntrinsicValue> {
+    let input = argument_string(&arguments[0], "SubstringByAsciiChars")?;
+    let start = argument_usize(&arguments[1], "SubstringByAsciiChars")?;
+    let requested_length = argument_usize(&arguments[2], "SubstringByAsciiChars")?;
+    let units = input.encode_utf16().collect::<Vec<_>>();
+    if start > units.len() {
+        return Ok(IntrinsicValue::String(String::new()));
+    }
+    let end = start.saturating_add(requested_length).min(units.len());
+    let mut output = String::with_capacity(end - start);
+    for unit in &units[start..end] {
+        let is_valid = (32..=126).contains(unit)
+            && !matches!(
+                *unit as u8 as char,
+                '"' | '<' | '>' | '|' | ':' | '*' | '?' | '\\' | '/'
+            );
+        output.push(if is_valid {
+            char::from_u32(u32::from(*unit)).expect("ASCII is valid Unicode")
+        } else {
+            '_'
+        });
+    }
+    Ok(IntrinsicValue::String(output))
 }
 
 fn require_string<'a>(
@@ -3967,58 +4560,124 @@ fn utf16_byte_index(value: &str, target: usize) -> Result<usize> {
     bail!("Index {target} is out of bounds")
 }
 
-fn compare_sdk_versions(left: &str, right: &str) -> Ordering {
-    let parse = |value: &str| {
-        value
-            .trim_start_matches(['v', 'V'])
-            .split(['.', '-'])
-            .take_while(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
-            .map(|part| part.parse::<u32>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    };
-    let mut left = parse(left);
-    let mut right = parse(right);
-    let length = left.len().max(right.len());
-    left.resize(length, 0);
-    right.resize(length, 0);
-    left.cmp(&right)
+fn parse_simple_version(value: &str) -> Result<[u32; 4]> {
+    let mut value = value.trim();
+    if value.starts_with(['v', 'V']) {
+        value = &value[1..];
+    }
+    if let Some(index) = value.find(['-', '+']) {
+        value = &value[..index];
+    }
+    let components = value.split('.').collect::<Vec<_>>();
+    if components.is_empty() || components.len() > 4 {
+        bail!("MSB4184: '{value}' is not a valid MSBuild version");
+    }
+    let mut version = [0; 4];
+    for (index, component) in components.iter().enumerate() {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            bail!("MSB4184: '{value}' is not a valid MSBuild version");
+        }
+        version[index] = component
+            .parse::<u32>()
+            .ok()
+            .filter(|component| *component <= i32::MAX as u32)
+            .ok_or_else(|| anyhow!("MSB4184: '{value}' is not a valid MSBuild version"))?;
+    }
+    Ok(version)
 }
 
-fn make_relative(base: &str, path: &str) -> String {
-    if let Ok(relative) = Path::new(path).strip_prefix(base) {
-        return display_path(relative);
+fn compare_sdk_versions(left: &str, right: &str) -> Result<Ordering> {
+    Ok(parse_simple_version(left)?.cmp(&parse_simple_version(right)?))
+}
+
+fn fix_file_path_for_style(style: PathStyle, value: &str) -> String {
+    if style == PathStyle::Unix {
+        value.replace('\\', "/")
+    } else {
+        value.to_string()
     }
-    let is_windows_path = |value: &str| {
-        value.contains('\\')
-            || value
-                .as_bytes()
-                .get(1)
-                .is_some_and(|character| *character == b':')
+}
+
+fn path_component_equals(style: PathStyle, left: &str, right: &str) -> bool {
+    if style == PathStyle::Windows {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn make_relative_with_current(
+    style: PathStyle,
+    base: &str,
+    path: &str,
+    current_directory: &str,
+) -> Result<String> {
+    let full_base = get_full_path(style, base, None, current_directory)?;
+    let full_path = get_full_path(style, path, None, current_directory)?;
+    let separator = path_directory_separator(style);
+    let base_components = full_base
+        .split(separator)
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let path_components = full_path
+        .split(separator)
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let Some(first_component) = path_components.first() else {
+        return Ok(full_path);
     };
-    if is_windows_path(base) || is_windows_path(path) {
-        let base_components = base
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        let path_components = path
-            .split(['/', '\\'])
-            .filter(|component| !component.is_empty())
-            .collect::<Vec<_>>();
-        if path_components.len() >= base_components.len()
-            && path_components
-                .iter()
-                .zip(&base_components)
-                .all(|(path, base)| path.eq_ignore_ascii_case(base))
-        {
-            let separator = if path.contains('\\') { "\\" } else { "/" };
-            return path_components[base_components.len()..].join(separator);
-        }
+    let first_non_separator = path
+        .bytes()
+        .position(|byte| !path_is_separator(style, byte))
+        .unwrap_or(path.len());
+    let authored_prefix = &path[first_non_separator..];
+    if !authored_prefix
+        .get(..first_component.len())
+        .is_some_and(|prefix| path_component_equals(style, prefix, first_component))
+    {
+        return Ok(fix_file_path_for_style(style, path));
     }
-    path.to_string()
+
+    let mut common = 0;
+    while common < base_components.len()
+        && common < path_components.len()
+        && path_component_equals(style, base_components[common], path_components[common])
+    {
+        common += 1;
+    }
+    if common == base_components.len() && common == path_components.len() {
+        return Ok(".".to_string());
+    }
+    if common == 0 {
+        return Ok(full_path);
+    }
+
+    let mut relative = Vec::new();
+    relative.extend(std::iter::repeat_n(
+        "..",
+        base_components.len().saturating_sub(common),
+    ));
+    relative.extend(path_components[common..].iter().copied());
+    let mut result = relative.join(&separator.to_string());
+    if full_path.ends_with(separator) && !result.ends_with(separator) {
+        result.push(separator);
+    }
+    Ok(result)
+}
+
+fn make_relative(base: &str, path: &str) -> Result<String> {
+    let current_directory = std::env::current_dir()
+        .context("Could not read the current directory for MSBuild.MakeRelative")?;
+    make_relative_with_current(
+        host_path_style(),
+        base,
+        path,
+        &display_path(&current_directory),
+    )
 }
 
 fn find_file_above(start: &str, file_name: &str) -> Option<PathBuf> {
-    let mut directory = PathBuf::from(start.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let mut directory = PathBuf::from(fix_file_path(start));
     if directory.is_file() {
         directory.pop();
     }
@@ -4056,13 +4715,6 @@ fn escape_lower(value: &str) -> String {
         }
     }
     output
-}
-
-fn with_trailing_separator(mut value: String) -> String {
-    if !value.ends_with(['/', '\\']) {
-        value.push(std::path::MAIN_SEPARATOR);
-    }
-    value
 }
 
 fn dotnet_bool(value: bool) -> &'static str {
@@ -4132,6 +4784,20 @@ mod tests {
             "ToString",
             InvocationKind::InstanceMethod
         ));
+        for member in [
+            "GetTargetFrameworkIdentifier",
+            "GetTargetFrameworkVersion",
+            "GetTargetPlatformIdentifier",
+            "GetTargetPlatformVersion",
+            "IsTargetFrameworkCompatible",
+        ] {
+            assert!(!is_allowed("MSBuild", member, InvocationKind::StaticMethod));
+        }
+        assert!(!is_allowed(
+            "System.Environment",
+            "Is64BitOperatingSystem",
+            InvocationKind::StaticProperty
+        ));
     }
 
     #[test]
@@ -4159,6 +4825,42 @@ mod tests {
     }
 
     #[test]
+    fn nuget_tfm_reviewer_cases_are_pruned_instead_of_approximated() {
+        for (member, inputs, direct_result) in [
+            (
+                "GetTargetPlatformVersion",
+                &["net8.0-windows10"][..],
+                "10.0",
+            ),
+            ("GetTargetPlatformVersion", &["net48"][..], "0.0"),
+            (
+                "IsTargetFrameworkCompatible",
+                &["net48", "netstandard2.0"][..],
+                "True",
+            ),
+            (
+                "IsTargetFrameworkCompatible",
+                &["netcoreapp1.0", "netstandard2.1"][..],
+                "False",
+            ),
+        ] {
+            let error = resolve(
+                "MSBuild",
+                member,
+                InvocationKind::StaticMethod,
+                inputs.len(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("MSB4185"),
+                "{member}({}) must remain pruned rather than approximate direct MSBuild result {direct_result}: {error}",
+                inputs.join(", ")
+            );
+        }
+    }
+
+    #[test]
     fn overload_arity_is_deterministic() {
         let error = resolve("System.Math", "Max", InvocationKind::StaticMethod, 1)
             .unwrap_err()
@@ -4171,6 +4873,25 @@ mod tests {
         member: &str,
         arguments: Vec<IntrinsicValue>,
     ) -> Result<IntrinsicValue> {
+        call_with_context(
+            type_name,
+            member,
+            arguments,
+            &IntrinsicContext {
+                tools_directory: None,
+                environment: None,
+                disable_features_from_version: None,
+                runtime_type: None,
+            },
+        )
+    }
+
+    fn call_with_context(
+        type_name: &str,
+        member: &str,
+        arguments: Vec<IntrinsicValue>,
+        context: &IntrinsicContext<'_>,
+    ) -> Result<IntrinsicValue> {
         let descriptor = resolve(
             type_name,
             member,
@@ -4179,10 +4900,7 @@ mod tests {
         )?;
         invoke(
             descriptor,
-            &IntrinsicContext {
-                base_directory: Path::new("."),
-                tools_directory: None,
-            },
+            context,
             None,
             &arguments
                 .into_iter()
@@ -4274,5 +4992,240 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(copy.contains("does not accept null"));
+    }
+
+    #[test]
+    fn path_lexical_semantics_match_windows_and_unix_corelib() -> Result<()> {
+        assert!(path_is_rooted(PathStyle::Windows, r"C:relative"));
+        assert!(!path_is_fully_qualified(PathStyle::Windows, r"C:relative"));
+        assert!(!path_is_rooted(PathStyle::Unix, r"C:relative"));
+        assert_eq!(
+            path_get_extension(PathStyle::Windows, ".gitignore"),
+            ".gitignore"
+        );
+        assert_eq!(
+            path_get_extension(PathStyle::Unix, ".gitignore"),
+            ".gitignore"
+        );
+        assert_eq!(path_get_file_name(PathStyle::Windows, "dir\\"), "");
+        assert_eq!(path_get_file_name(PathStyle::Unix, "dir/"), "");
+        assert_eq!(
+            path_get_directory_name(PathStyle::Windows, r"C:\a\b").as_deref(),
+            Some(r"C:\a")
+        );
+        assert_eq!(
+            path_get_directory_name(PathStyle::Unix, "/a/b").as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            path_change_extension(PathStyle::Windows, "file.txt", None),
+            "file"
+        );
+        assert_eq!(
+            path_change_extension(PathStyle::Unix, ".gitignore", Some("txt")),
+            ".txt"
+        );
+        assert_eq!(
+            path_combine(PathStyle::Windows, &["a", "C:relative"]),
+            "C:relative"
+        );
+        assert_eq!(
+            path_combine(PathStyle::Unix, &["a", r"C:relative"]),
+            "a/C:relative"
+        );
+
+        assert!(get_full_path(PathStyle::Windows, "x", Some("relative"), r"C:\cwd").is_err());
+        assert!(get_full_path(PathStyle::Unix, "x", Some("relative"), "/cwd").is_err());
+        assert_eq!(
+            get_full_path(
+                PathStyle::Windows,
+                r"C:relative",
+                Some(r"C:\base"),
+                r"C:\cwd",
+            )?,
+            r"C:\base\relative"
+        );
+        assert_eq!(
+            get_full_path(PathStyle::Windows, r"C:relative", None, r"D:\cwd")?,
+            r"C:\relative"
+        );
+        assert_eq!(
+            get_full_path(
+                PathStyle::Windows,
+                r"C:\x\..\y",
+                Some(r"C:\base"),
+                r"C:\cwd",
+            )?,
+            r"C:\y"
+        );
+        assert_eq!(
+            get_full_path(PathStyle::Unix, "../c", Some("/a/b"), "/cwd")?,
+            "/a/c"
+        );
+        assert_eq!(
+            make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:\a\c", r"C:\cwd",)?,
+            r"..\c"
+        );
+        assert_eq!(
+            make_relative_with_current(PathStyle::Windows, r"C:\a\b", r"C:relative", r"D:\cwd",)?,
+            r"..\..\relative"
+        );
+        assert_eq!(
+            make_relative_with_current(PathStyle::Unix, "/a/b", "/a/c", "/cwd")?,
+            "../c"
+        );
+        assert_eq!(
+            make_relative_with_current(PathStyle::Unix, r"C:\a\b", r"C:\a\c", "/cwd",)?,
+            "C:/a/c"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stable_hash_versions_and_feature_boundaries_match_msbuild() -> Result<()> {
+        assert_eq!(
+            call(
+                "MSBuild",
+                "StableStringHash",
+                vec![
+                    IntrinsicValue::String("abc".to_string()),
+                    IntrinsicValue::String("Fnv1a32bit".to_string()),
+                ],
+            )?,
+            IntrinsicValue::Int32(-1_373_726_339)
+        );
+        assert_eq!(
+            call(
+                "MSBuild",
+                "StableStringHash",
+                vec![
+                    IntrinsicValue::String("abc".to_string()),
+                    IntrinsicValue::String("Fnv1a32bitFast".to_string()),
+                ],
+            )?,
+            IntrinsicValue::Int32(440_920_331)
+        );
+        assert!(
+            call(
+                "MSBuild",
+                "StableStringHash",
+                vec![
+                    IntrinsicValue::String("abc".to_string()),
+                    IntrinsicValue::String("Fnv1a64bit".to_string()),
+                ],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            compare_sdk_versions("v1.2.3-preview+data", "1.2.3")?,
+            Ordering::Equal
+        );
+        assert!(compare_sdk_versions("garbage", "garbage").is_err());
+
+        assert_eq!(resolve_feature_wave(Some("18.5.1")).version, "18.6");
+        assert_eq!(resolve_feature_wave(Some("garbage")).version, "999.999");
+        assert_eq!(resolve_feature_wave(Some("1.0")).version, "17.10");
+        let disabled = "18.6";
+        let context = IntrinsicContext {
+            tools_directory: None,
+            environment: None,
+            disable_features_from_version: Some(disabled),
+            runtime_type: None,
+        };
+        for (wave, expected) in [("18.5", true), ("18.6", false), ("18.7", false)] {
+            assert_eq!(
+                call_with_context(
+                    "MSBuild",
+                    "AreFeaturesEnabled",
+                    vec![IntrinsicValue::String(wave.to_string())],
+                    &context,
+                )?,
+                IntrinsicValue::Boolean(expected)
+            );
+        }
+        assert!(
+            call(
+                "MSBuild",
+                "VersionEquals",
+                vec![
+                    IntrinsicValue::String("garbage".to_string()),
+                    IntrinsicValue::String("garbage".to_string()),
+                ],
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn environment_expansion_is_single_pass_and_host_case_aware() {
+        let environment = HashMap::from([
+            (environment_key("MixedCase"), "VALUE".to_string()),
+            (environment_key("Nested"), "%MixedCase%".to_string()),
+        ]);
+        assert_eq!(
+            expand_environment_variables("%MixedCase%-%Missing%", &environment),
+            "VALUE-%Missing%"
+        );
+        assert_eq!(
+            expand_environment_variables("%Nested%", &environment),
+            "%MixedCase%"
+        );
+        assert_eq!(
+            expand_environment_variables("prefix%Missing", &environment),
+            "prefix%Missing"
+        );
+        assert_eq!(expand_environment_variables("%%", &environment), "%%");
+        assert_eq!(
+            expand_environment_variables("%mixedcase%", &environment),
+            if cfg!(windows) {
+                "VALUE"
+            } else {
+                "%mixedcase%"
+            }
+        );
+    }
+
+    #[test]
+    fn task_host_detection_inspects_the_active_toolset() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let executable = if cfg!(windows) {
+            "MSBuild.exe"
+        } else {
+            "MSBuild"
+        };
+        std::fs::write(directory.path().join(executable), "")?;
+        let tools = display_path(directory.path());
+        let context = IntrinsicContext {
+            tools_directory: Some(&tools),
+            environment: None,
+            disable_features_from_version: None,
+            runtime_type: Some("Core"),
+        };
+        assert_eq!(
+            call_with_context(
+                "MSBuild",
+                "DoesTaskHostExist",
+                vec![
+                    IntrinsicValue::String("CurrentRuntime".to_string()),
+                    IntrinsicValue::String("CurrentArchitecture".to_string()),
+                ],
+                &context,
+            )?,
+            IntrinsicValue::Boolean(true)
+        );
+        assert!(
+            call_with_context(
+                "MSBuild",
+                "DoesTaskHostExist",
+                vec![
+                    IntrinsicValue::String("invalid".to_string()),
+                    IntrinsicValue::String("CurrentArchitecture".to_string()),
+                ],
+                &context,
+            )
+            .is_err()
+        );
+        Ok(())
     }
 }

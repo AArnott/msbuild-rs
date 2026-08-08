@@ -11,6 +11,7 @@ use crate::escaping::{escape, tokenize_list, unescape_once};
 use crate::evaluation::{ActiveToolset, EvaluationContext};
 use crate::expression::{ExpressionEvaluator, ItemProvenance};
 use crate::item_glob::{ItemSpec, MsBuildGlob, exclude_literal_matches, normalized_identity_key};
+use crate::native_functions::{FeatureWaveResolutionKind, resolve_feature_wave};
 use crate::object_model::{
     Import, Item, ProjectModel, PropertyMap, Target, Task, is_well_known_metadata,
 };
@@ -319,6 +320,7 @@ impl EvaluationState {
     ) -> Result<Self> {
         let mut model = ProjectModel::new();
         model.set_project_file_path(project_path.to_path_buf());
+        model.set_environment(context.environment_entries().to_vec());
 
         for (name, value) in context.environment().iter_escaped() {
             if !is_reserved_property(name) {
@@ -1657,6 +1659,28 @@ fn initialize_reserved_toolset_properties(
     context: &EvaluationContext,
     toolset: Option<&ActiveToolset>,
 ) {
+    let configured_feature_wave = context
+        .environment_entries()
+        .iter()
+        .find(|(name, _)| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case("MSBuildDisableFeaturesFromVersion")
+            } else {
+                name.as_str() == "MSBUILDDISABLEFEATURESFROMVERSION"
+            }
+        })
+        .map(|(_, value)| value.as_str());
+    let feature_wave = resolve_feature_wave(configured_feature_wave);
+    match feature_wave.kind {
+        FeatureWaveResolutionKind::InvalidFormat => warn!(
+            "MSBuildDisableFeaturesFromVersion has an invalid format; enabling all feature waves"
+        ),
+        FeatureWaveResolutionKind::OutOfRotation => warn!(
+            "MSBuildDisableFeaturesFromVersion is outside the current rotation; using {}",
+            feature_wave.version
+        ),
+        FeatureWaveResolutionKind::Valid => {}
+    }
     let tools_path = toolset
         .map(|toolset| display_path(&toolset.tools_path))
         .unwrap_or_default();
@@ -1696,7 +1720,7 @@ fn initialize_reserved_toolset_properties(
         ("MSBuildAssemblyVersion", assembly_version),
         ("MSBuildVersion", msbuild_version),
         ("MSBuildInteractive", String::new()),
-        ("MSBuildDisableFeaturesFromVersion", "999.999".to_string()),
+        ("MSBuildDisableFeaturesFromVersion", feature_wave.version),
     ] {
         model.set_property(name.to_string(), value);
     }

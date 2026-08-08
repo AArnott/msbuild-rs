@@ -965,10 +965,18 @@ impl<'a> ExpressionEvaluator<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
         let context = IntrinsicContext {
-            base_directory: &self.base_directory,
             tools_directory: self
                 .model
                 .get_property("MSBuildToolsPath")
+                .map(String::as_str),
+            environment: self.model.environment(),
+            disable_features_from_version: self
+                .model
+                .get_property("MSBuildDisableFeaturesFromVersion")
+                .map(String::as_str),
+            runtime_type: self
+                .model
+                .get_property("MSBuildRuntimeType")
                 .map(String::as_str),
         };
         Ok(IntrinsicOutcome {
@@ -2145,7 +2153,7 @@ mod tests {
             evaluator
                 .evaluate("$([System.IO.Path]::Combine('root', '$([MSBuild]::MakeRelative(root, root/sub))'))")
                 .unwrap(),
-            format!("root{}sub", std::path::MAIN_SEPARATOR)
+            format!("root{}root/sub", std::path::MAIN_SEPARATOR)
         );
         assert!(
             evaluator
@@ -2298,10 +2306,12 @@ mod tests {
             "536991770"
         );
         assert_eq!(
-            evaluator.evaluate(
-                "$([MSBuild]::GetTargetPlatformIdentifier('net10.0-windows10.0.19041.0'))"
-            )?,
-            "windows"
+            evaluator.evaluate("$([MSBuild]::StableStringHash('abc', 'Fnv1a32bit'))")?,
+            "-1373726339"
+        );
+        assert_eq!(
+            evaluator.evaluate("$([MSBuild]::StableStringHash('abc', 'Fnv1a32bitFast'))")?,
+            "440920331"
         );
         Ok(())
     }
@@ -2370,6 +2380,9 @@ mod tests {
             ("$([MSBuild]::Escape(null))", ""),
             ("$([MSBuild]::ValueOrDefault(null,'fallback'))", "fallback"),
             ("$([System.String]::IsNullOrEmpty(null))", "True"),
+            ("$([System.IO.Path]::GetFileName(null))", ""),
+            ("$([System.IO.Path]::IsPathRooted(null))", "False"),
+            ("$([System.IO.Path]::ChangeExtension(null,'.txt'))", ""),
         ];
         for (expression, expected) in cases {
             assert_eq!(
@@ -2438,6 +2451,11 @@ mod tests {
             "$([MSBuild]::Modulo(-9223372036854775808,-1))",
             "$([System.Convert]::ToInt32(null))",
             "$([System.Convert]::ToString(null))",
+            "$([MSBuild]::VersionEquals('garbage','garbage'))",
+            "$([MSBuild]::AreFeaturesEnabled('garbage'))",
+            "$([MSBuild]::StableStringHash('abc','Fnv1a64bit'))",
+            "$([System.IO.Path]::GetFullPath('child','relative-base'))",
+            "$([MSBuild]::GetTargetFrameworkIdentifier('net8.0'))",
         ] {
             assert!(
                 evaluator.evaluate(expression).is_err(),
@@ -2571,12 +2589,20 @@ mod tests {
         assert_eq!(
             ExpressionEvaluator::new(&model)
                 .evaluate("$([MSBuild]::MakeRelative('C:\\repo\\', 'C:\\repo\\src\\project'))")?,
-            r"src\project"
+            if cfg!(windows) {
+                r"src\project"
+            } else {
+                "C:/repo/src/project"
+            }
         );
         assert_eq!(
             ExpressionEvaluator::new(&model)
                 .evaluate("$([MSBuild]::MakeRelative('C:\\REPO\\', 'c:\\repo\\src\\project'))")?,
-            r"src\project"
+            if cfg!(windows) {
+                r"src\project"
+            } else {
+                "c:/repo/src/project"
+            }
         );
         Ok(())
     }

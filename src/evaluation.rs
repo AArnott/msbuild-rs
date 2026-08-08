@@ -17,6 +17,7 @@ use crate::tasks::TaskRegistry;
 #[derive(Debug, Clone)]
 pub struct EvaluationContext {
     environment: PropertyMap,
+    environment_entries: Vec<(String, String)>,
     global_properties: PropertyMap,
     sdk_root_override: Option<PathBuf>,
 }
@@ -82,8 +83,12 @@ impl EvaluationContext {
         GV: Into<String>,
     {
         let mut environment_map = PropertyMap::new();
+        let mut environment_entries = Vec::new();
         for (name, value) in environment {
-            environment_map.insert(name.into(), value.into());
+            let name = name.into();
+            let value = value.into();
+            environment_map.insert(name.clone(), value.clone());
+            environment_entries.push((name, value));
         }
         let mut global_map = PropertyMap::new();
         for (name, value) in global_properties {
@@ -92,6 +97,7 @@ impl EvaluationContext {
         let sdk_root_override = explicit_sdk_root(&environment_map, &global_map);
         Self {
             environment: environment_map,
+            environment_entries,
             global_properties: global_map,
             sdk_root_override,
         }
@@ -99,6 +105,10 @@ impl EvaluationContext {
 
     pub(crate) fn environment(&self) -> &PropertyMap {
         &self.environment
+    }
+
+    pub(crate) fn environment_entries(&self) -> &[(String, String)] {
+        &self.environment_entries
     }
 
     pub(crate) fn global_properties(&self) -> &PropertyMap {
@@ -721,20 +731,81 @@ mod tests {
     }
 
     #[test]
+    fn feature_wave_and_environment_intrinsics_use_the_evaluation_snapshot() -> Result<()> {
+        let directory = TempDir::new()?;
+        let project = write_project(
+            &directory,
+            "features.proj",
+            r#"<Project><PropertyGroup>
+  <Before>$([MSBuild]::AreFeaturesEnabled('18.5'))</Before>
+  <At>$([MSBuild]::AreFeaturesEnabled('18.6'))</At>
+  <Expanded>$([System.Environment]::ExpandEnvironmentVariables('%MSBUILD_RS_SNAPSHOT%'))</Expanded>
+  <CaseProbe>$([System.Environment]::ExpandEnvironmentVariables('%msbuild_rs_snapshot%'))</CaseProbe>
+</PropertyGroup></Project>"#,
+        );
+        let context = EvaluationContext::with_environment_and_global_properties(
+            [
+                ("MSBUILDDISABLEFEATURESFROMVERSION", "18.6"),
+                ("MSBUILD_RS_SNAPSHOT", "snapshot-value"),
+            ],
+            Vec::<(String, String)>::new(),
+        );
+        let mut evaluator = ProjectEvaluator::with_context(context);
+        evaluator.load_project(&project)?;
+        let model = evaluator.get_model();
+        assert_eq!(
+            model
+                .get_property("MSBuildDisableFeaturesFromVersion")
+                .map(String::as_str),
+            Some("18.6")
+        );
+        assert_eq!(
+            model.get_property("Before").map(String::as_str),
+            Some("True")
+        );
+        assert_eq!(model.get_property("At").map(String::as_str), Some("False"));
+        assert_eq!(
+            model.get_property("Expanded").map(String::as_str),
+            Some("snapshot-value")
+        );
+        assert_eq!(
+            model.get_property("CaseProbe").map(String::as_str),
+            Some(if cfg!(windows) {
+                "snapshot-value"
+            } else {
+                "%msbuild_rs_snapshot%"
+            })
+        );
+
+        let context = EvaluationContext::with_environment_and_global_properties(
+            [("MSBUILDDISABLEFEATURESFROMVERSION", "garbage")],
+            Vec::<(String, String)>::new(),
+        );
+        let mut evaluator = ProjectEvaluator::with_context(context);
+        evaluator.load_project(project)?;
+        assert_eq!(
+            evaluator
+                .get_model()
+                .get_property("MSBuildDisableFeaturesFromVersion")
+                .map(String::as_str),
+            Some("999.999")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sdk_style_fixture_reaches_the_known_virtual_workload_sdk_boundary() -> Result<()> {
         let project = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/evaluation/sdk-style-progress/project.proj");
         let mut evaluator = ProjectEvaluator::new();
         match evaluator.load_project(project) {
             Ok(()) => {
-                // Accept a future resolver implementation, but require the
-                // native target-framework functions to have produced SDK state.
                 assert_eq!(
                     evaluator
                         .get_model()
-                        .get_property("TargetFrameworkIdentifier")
+                        .get_property("TargetFramework")
                         .map(String::as_str),
-                    Some(".NETCoreApp")
+                    Some("net10.0")
                 );
             }
             Err(error) => {

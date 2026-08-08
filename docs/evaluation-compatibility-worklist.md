@@ -40,7 +40,9 @@ Both implementations now preserve aggregated project source, including unevaluat
   preserving MSBuild's receiver restrictions. The correctness-first core below
   is implemented, but culture-sensitive members removed from the native tier
   leave the original representative `EndsWith`/`CompareTo` surface incomplete.
-- [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`, `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`.
+- [x] Implement preprocessing path functions: `GetDirectoryNameOfFileAbove`,
+  `GetPathOfFileAbove`, `MakeRelative`, and `Path.Combine`, using host-specific
+  lexical .NET path rules rather than filesystem canonicalization.
 - [x] Implement read-only registry properties where supported.
 
 The native registry is initialized once and indexed by normalized type, member,
@@ -54,11 +56,27 @@ semicolon.
 The retained correctness-tested core includes ordinal `System.String`
 operations (`Copy`, null predicates, `Join`, `CompareOrdinal`, `Contains`,
 `Substring`, invariant casing, parameterless trim, replace/split/equality,
-insertion/removal, length/indexer); params `Path.Combine`; selected `System.Math` and
-`System.Convert` overloads; all supported `Version` constructor shapes;
-Guid N/D/B/P/X formatting; invariant Int32/Int64/UInt64 D/X formatting; and a
-deliberately narrow ISO DateTime parse plus numeric custom-format subset. Safe
-`System.Environment` reads and the existing MSBuild intrinsics remain.
+insertion/removal, length/indexer); host-lexical `System.IO.Path` filename,
+extension, root, combine, change-extension, and full-path members; selected
+`System.Math` and `System.Convert` overloads; all supported `Version`
+constructor shapes; Guid N/D/B/P/X formatting; invariant Int32/Int64/UInt64
+D/X formatting; and a deliberately narrow ISO DateTime parse plus numeric
+custom-format subset. `Environment.ExpandEnvironmentVariables` scans `%name%`
+tokens once, preserves missing/malformed tokens, and uses Windows-insensitive
+or Unix-sensitive lookup against the evaluation environment snapshot.
+`StableStringHash` retains Legacy, SHA-256, and the distinct signed-Int32,
+UTF-16 `Fnv1a32bit`/`Fnv1a32bitFast` algorithms.
+
+MSBuild version helpers use the upstream `SimpleVersion` grammar and reject
+invalid inputs. Feature-wave checks honor the resolved
+`MSBuildDisableFeaturesFromVersion` boundary for the pinned MSBuild 18.6
+toolset (including wave rounding/clamping). `DoesTaskHostExist` validates
+runtime/architecture names, resolves current runtime/architecture, and checks
+the active toolset executable. Cross-architecture toolset probing returns a
+controlled native-tier error because no alternate toolset path is available.
+On Unix, current-host availability follows whether that SDK actually ships an
+`MSBuild` apphost. `IsRunningFromVisualStudio` is always false because
+msbuild-rs is a standalone host.
 Disallowed receivers and members are rejected before argument evaluation.
 There is no reflection, subprocess dispatch, or runtime startup.
 
@@ -66,9 +84,18 @@ Native-tier backlog (rather than approximate behavior): current-culture
 `String.StartsWith`, `EndsWith`, `CompareTo`, `IndexOf`, `LastIndexOf`,
 `ToLower`, and `ToUpper`; broad DateTime parsing/formatting; Guid equality
 binding; params-character trim overloads; Double custom formats; and unlisted
-CLR numeric overloads. These legal MSBuild calls await a proven culture
-implementation, an exact native entry, or the excluded late-stage managed
-fallback.
+CLR numeric overloads. The NuGet-backed MSBuild TFM helpers
+(`GetTargetFrameworkIdentifier`, `GetTargetFrameworkVersion`,
+`GetTargetPlatformIdentifier`, `GetTargetPlatformVersion`, and
+`IsTargetFrameworkCompatible`) were pruned instead of retaining simplified
+identifier/version ordering; `Environment.Is64BitOperatingSystem` was likewise
+pruned because process bitness is not an OS-bitness answer on every host.
+The pinned direct baselines retained in the pruning test are
+`net8.0-windows10` platform `10.0`, `net48` platform `0.0`, `net48` compatible
+with `netstandard2.0`, and `netcoreapp1.0` incompatible with
+`netstandard2.1`.
+These legal calls await a maintained NuGet-compatible implementation, an exact
+native entry, or the excluded late-stage managed fallback.
 
 On Windows, `$(Registry:...)` and the native MSBuild registry intrinsics are
 read-only and support string/expanded-string, DWORD, QWORD, multi-string, and

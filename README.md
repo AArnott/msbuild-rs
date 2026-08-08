@@ -148,7 +148,9 @@ correctness-tested core and, later, an in-process CoreCLR fallback for other
 legal MSBuild property functions. The native tier preserves typed overloads,
 null, params arrays, Char, and array-result boundaries. Culture-sensitive
 String comparison/search/casing and broad CLR formatting are deliberately not
-allowlisted until they can be matched exactly; see the compatibility worklist.
+allowlisted until they can be matched exactly. Simplified NuGet TFM helpers and
+OS-bitness guesses are likewise pruned rather than returning plausible but
+incorrect answers; see the compatibility worklist.
 CoreCLR will load lazily so it does not affect projects that stay on native fast
 paths.
 

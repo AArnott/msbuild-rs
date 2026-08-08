@@ -635,6 +635,7 @@ pub struct Import {
 #[derive(Debug, Clone, Default)]
 pub struct ProjectModel {
     pub properties: PropertyMap,
+    environment: Option<Vec<(String, String)>>,
     pub items: CaseInsensitiveMap<Vec<Item>>,
     item_definitions: CaseInsensitiveMap<Arc<MetadataMap>>,
     all_evaluated_item_definition_metadata: Vec<EvaluatedItemDefinitionMetadata>,
@@ -659,6 +660,14 @@ impl ProjectModel {
 
     pub fn get_property(&self, name: &str) -> Option<&String> {
         self.properties.get(name)
+    }
+
+    pub(crate) fn set_environment(&mut self, environment: Vec<(String, String)>) {
+        self.environment = Some(environment);
+    }
+
+    pub(crate) fn environment(&self) -> Option<&[(String, String)]> {
+        self.environment.as_deref()
     }
 
     pub(crate) fn get_property_escaped(&self, name: &str) -> Option<&str> {

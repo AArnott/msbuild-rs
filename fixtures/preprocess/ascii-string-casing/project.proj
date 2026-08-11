@@ -1,0 +1,30 @@
+<Project>
+  <PropertyGroup>
+    <Configuration>Debug</Configuration>
+    <AsciiMixed>Ab-Cd_123</AsciiMixed>
+    <EscapedAscii>a%3bb</EscapedAscii>
+    <Empty />
+  </PropertyGroup>
+
+  <Import Project="imports/MicroBuild.Version.props" />
+
+  <PropertyGroup>
+    <Upper>$(AsciiMixed.ToUpper())</Upper>
+    <Lower>$(AsciiMixed.ToLower())</Lower>
+    <UpperInvariant>$(AsciiMixed.ToUpperInvariant())</UpperInvariant>
+    <LowerInvariant>$(AsciiMixed.ToLowerInvariant())</LowerInvariant>
+    <EmptyUpper>$(Empty.ToUpperInvariant())</EmptyUpper>
+    <Chained>$(AsciiMixed.ToUpperInvariant().Substring(3).ToLower())</Chained>
+    <EscapedUpper>$(EscapedAscii.ToUpper())</EscapedUpper>
+    <CaseInsensitiveLookup>$(AsciiMixed.tOuPpErInVaRiAnT())</CaseInsensitiveLookup>
+    <TypedChain>$([System.String]::Copy('aBc').ToLowerInvariant().Length)</TypedChain>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CasingSource Include="Ab-cD;xyZ;a%3bb" />
+    <ItemUpper Include="@(CasingSource->ToUpper())" />
+    <ItemLower Include="@(CasingSource->ToLower())" />
+    <ItemUpperInvariant Include="@(CasingSource->ToUpperInvariant())" />
+    <ItemLowerInvariant Include="@(CasingSource->ToLowerInvariant())" />
+  </ItemGroup>
+</Project>

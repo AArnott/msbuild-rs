@@ -1,0 +1,44 @@
+{
+  "name": "item-pipeline-provenance-and-escaping",
+  "project": "project.proj",
+  "properties": [],
+  "items": [
+    { "type": "EmptyTransformCount", "metadata": [] },
+    { "type": "EmptyTransformMaterialized", "metadata": [] },
+    { "type": "CountCombine", "metadata": [] },
+    { "type": "AnyCount", "metadata": [] },
+    { "type": "PropertyArguments", "metadata": ["M"] },
+    { "type": "NestedVectorArgument", "metadata": [] },
+    { "type": "EscapedCombine", "metadata": ["M"] },
+    { "type": "TransformMetadataIdentity", "metadata": ["M"] },
+    { "type": "TransformIdentityFunction", "metadata": ["M"] },
+    { "type": "ClearIdentityCount", "metadata": [] },
+    { "type": "CombineIdentityCount", "metadata": [] },
+    { "type": "SemiSeparator", "metadata": ["M"] },
+    { "type": "PipeSeparator", "metadata": ["M"] },
+    { "type": "AnySource", "metadata": ["M", "SourceDefault"] },
+    { "type": "AnySeparated", "metadata": ["M", "SourceDefault"] },
+    { "type": "CountSeparated", "metadata": ["M", "SourceDefault"] },
+    { "type": "DistinctEscaped", "metadata": [] },
+    { "type": "DistinctCaseEscaped", "metadata": [] },
+    {
+      "type": "Copy",
+      "metadata": ["M", "SourceDefault", "DestinationDefault", "Overlap"]
+    },
+    {
+      "type": "Same",
+      "metadata": ["M", "SourceDefault", "DestinationDefault", "Overlap"]
+    },
+    {
+      "type": "Changed",
+      "metadata": ["M", "SourceDefault", "DestinationDefault", "Overlap"]
+    },
+    {
+      "type": "Cleared",
+      "metadata": ["M", "SourceDefault", "DestinationDefault", "Overlap"]
+    },
+    { "type": "GlobCopy", "metadata": ["RecursiveDir", "Custom"] },
+    { "type": "GlobSame", "metadata": ["RecursiveDir", "Custom"] },
+    { "type": "GlobChanged", "metadata": ["RecursiveDir", "Custom"] }
+  ]
+}

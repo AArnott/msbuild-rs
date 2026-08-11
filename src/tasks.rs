@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::escaping::{tokenize_list, unescape_once};
 use crate::object_model::{ProjectModel, Task};
 
 /// Context passed to task executors containing all necessary execution parameters
@@ -33,7 +34,7 @@ pub struct MessageTask;
 impl TaskExecutor for MessageTask {
     fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
         if let Some(text) = context.attributes.get("Text") {
-            info!("{text}");
+            info!("{}", unescape_once(text));
         }
         Ok(())
     }
@@ -44,6 +45,7 @@ pub struct ErrorTask;
 impl TaskExecutor for ErrorTask {
     fn execute(&self, context: &TaskExecutionContext) -> Result<()> {
         if let Some(text) = context.attributes.get("Text") {
+            let text = unescape_once(text);
             error!("{text}");
             return Err(anyhow!("Build failed: {text}"));
         }
@@ -61,32 +63,32 @@ impl TaskExecutor for CopyTask {
             .get("SourceFiles")
             .ok_or_else(|| anyhow!("Copy task missing SourceFiles attribute"))?;
 
-        let destination_folder = context
-            .attributes
-            .get("DestinationFolder")
-            .ok_or_else(|| anyhow!("Copy task missing DestinationFolder attribute"))?;
+        let destination_folder = unescape_once(
+            context
+                .attributes
+                .get("DestinationFolder")
+                .ok_or_else(|| anyhow!("Copy task missing DestinationFolder attribute"))?,
+        );
 
         // Resolve destination folder relative to project directory
-        let dest_path = if Path::new(destination_folder).is_absolute() {
-            PathBuf::from(destination_folder)
+        let dest_path = if Path::new(&destination_folder).is_absolute() {
+            PathBuf::from(&destination_folder)
         } else {
-            context.project_directory.join(destination_folder)
+            context.project_directory.join(&destination_folder)
         };
 
         // Create destination directory if it doesn't exist
         fs::create_dir_all(&dest_path)?;
 
         // Copy each file
-        for source_file in source_files.split(';') {
-            if source_file.trim().is_empty() {
-                continue;
-            }
+        for source_file in tokenize_list(source_files)? {
+            let source_file = unescape_once(source_file);
 
             // Resolve source file relative to project directory
-            let source_path = if Path::new(source_file.trim()).is_absolute() {
-                PathBuf::from(source_file.trim())
+            let source_path = if Path::new(&source_file).is_absolute() {
+                PathBuf::from(&source_file)
             } else {
-                context.project_directory.join(source_file.trim())
+                context.project_directory.join(&source_file)
             };
 
             if source_path.exists() {
@@ -133,12 +135,17 @@ impl TaskRegistry {
         self.tasks.insert(name.to_string(), executor);
     }
 
-    pub fn execute_task(&self, task: &Task, model: &ProjectModel) -> Result<()> {
+    pub fn execute_task(
+        &self,
+        task: &Task,
+        model: &ProjectModel,
+        current_file: &Path,
+    ) -> Result<()> {
         if let Some(executor) = self.tasks.get(&task.name) {
             // Check task condition first
             if let Some(condition) = &task.condition {
                 use crate::expression::ExpressionEvaluator;
-                let evaluator = ExpressionEvaluator::new(model);
+                let evaluator = ExpressionEvaluator::with_current_file(model, current_file);
                 if !evaluator.evaluate_condition(condition)? {
                     return Ok(());
                 }
@@ -146,7 +153,7 @@ impl TaskRegistry {
 
             // Evaluate all attribute values before passing to task
             use crate::expression::ExpressionEvaluator;
-            let evaluator = ExpressionEvaluator::new(model);
+            let evaluator = ExpressionEvaluator::with_current_file(model, current_file);
             let mut evaluated_attributes = HashMap::new();
 
             for (key, value) in &task.attributes {
@@ -198,7 +205,7 @@ mod tests {
             condition: None,
         };
 
-        registry.execute_task(&task, &model)?;
+        registry.execute_task(&task, &model, Path::new("test.proj"))?;
 
         Ok(())
     }
@@ -214,6 +221,6 @@ mod tests {
             condition: Some("$([MSBuild]::VersionLessThan($(SdkVersion), 8.0))".to_string()),
         };
 
-        registry.execute_task(&task, &model)
+        registry.execute_task(&task, &model, Path::new("test.proj"))
     }
 }

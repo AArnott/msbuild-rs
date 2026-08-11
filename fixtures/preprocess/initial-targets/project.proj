@@ -1,0 +1,12 @@
+<Project DefaultTargets="Build" InitialTargets="$(FixtureInitialTarget);@(FixtureItems);%(FixtureMetadata)" ToolsVersion="Current">
+  <PropertyGroup>
+    <EnableNbgv>true</EnableNbgv>
+    <FixtureInitialTarget>NBGV_SetDefaults</FixtureInitialTarget>
+  </PropertyGroup>
+  <ItemGroup>
+    <FixtureItems Include="must-remain-literal" />
+  </ItemGroup>
+  <Import Project="imports/Nerdbank.GitVersioning.Tasks.targets"
+          Condition="'$(EnableNbgv)' == 'true'" />
+  <Target Name="Build" />
+</Project>

@@ -22,6 +22,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Set up pinned .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.302
+          global-json-file: global.json
+
+      - name: Log .NET SDK and MSBuild SDK path
+        shell: pwsh
+        run: |
+          dotnet --info
+          if ((dotnet --version).Trim() -cne "10.0.302") {
+            throw "Expected .NET SDK 10.0.302."
+          }
+          $sdkPath = (dotnet msbuild sample_projects/simple.proj -nologo -getProperty:MSBuildSDKsPath).Trim()
+          Write-Host "MSBuildSDKsPath=$sdkPath"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,6 +60,38 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Compare evaluation compatibility fixtures
+        shell: pwsh
+        run: |
+          $executable = if ($IsWindows) { "target/debug/msbuild-rs.exe" } else { "target/debug/msbuild-rs" }
+          ./scripts/run-compatibility-fixtures.ps1 -RustExecutable $executable
+
+      - name: Verify generated performance fixture smoke case
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: |
+          $generated = "benchmark-results/generated-smoke"
+          ./scripts/generate-performance-fixtures.ps1 -Preset Smoke -OutputDirectory $generated
+          ./scripts/generate-performance-fixtures.ps1 -OutputDirectory $generated -VerifyOnly
+          $manifest = Get-Content -Raw "$generated/manifest.json" | ConvertFrom-Json
+          $fixture = $manifest.cases | Where-Object name -eq "representative"
+          ./scripts/compare-preprocess.ps1 `
+            -Project (Join-Path $generated $fixture.project) `
+            -FixtureName $fixture.name `
+            -FixtureHash $fixture.fixtureHash `
+            -FixtureManifestPath (Join-Path $generated "manifest.json") `
+            -FixtureManifestCase $fixture.name `
+            -RustExecutable target/debug/msbuild-rs `
+            -OutputDirectory benchmark-results/generated-smoke-parity `
+            -ParityOnly
+
+      - name: Test path normalization
+        shell: pwsh
+        run: |
+          ./scripts/tests/path-normalization.tests.ps1
+          ./scripts/tests/performance-fixture-identity.tests.ps1
+          ./scripts/tests/preprocess-semantic-xml.tests.ps1
 
       - name: Run demo mode
         run: cargo run -- --demo

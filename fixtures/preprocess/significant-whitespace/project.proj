@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <PaddedProperty> x </PaddedProperty>
+    <PlainProperty>x</PlainProperty>
+  </PropertyGroup>
+  <ItemGroup>
+    <Sample Include="one">
+      <PaddedMetadata> y </PaddedMetadata>
+      <PlainMetadata>y</PlainMetadata>
+    </Sample>
+  </ItemGroup>
+</Project>

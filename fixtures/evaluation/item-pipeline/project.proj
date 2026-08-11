@@ -1,0 +1,64 @@
+<Project>
+  <PropertyGroup>
+    <Args>'M','x'</Args>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <I>
+      <SourceDefault>source-default</SourceDefault>
+      <Overlap>source</Overlap>
+    </I>
+    <Copy>
+      <DestinationDefault>destination-default</DestinationDefault>
+      <Overlap>destination</Overlap>
+    </Copy>
+    <Same>
+      <DestinationDefault>destination-default</DestinationDefault>
+      <Overlap>destination</Overlap>
+    </Same>
+    <Changed>
+      <DestinationDefault>destination-default</DestinationDefault>
+      <Overlap>destination</Overlap>
+    </Changed>
+    <Cleared>
+      <DestinationDefault>destination-default</DestinationDefault>
+    </Cleared>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ArgText Include="M" />
+    <I Include="a;b">
+      <M>x</M>
+      <Custom>source</Custom>
+    </I>
+    <EmptyTransformCount Include="@(I-&gt;'%(Missing)'-&gt;Count())" />
+    <EmptyTransformMaterialized Include="@(I->'%(Missing)')" />
+    <CountCombine Include="@(I-&gt;Count()-&gt;Combine('x'))" />
+    <AnyCount Include="@(I-&gt;AnyHaveMetadataValue('M','x')-&gt;Count())" />
+    <PropertyArguments Include="@(I-&gt;WithMetadataValue($(Args)))" />
+    <NestedVectorArgument Include="@(I-&gt;HasMetadata(@(ArgText))-&gt;Count())" />
+    <EscapedCombine Include="@(I-&gt;Combine('%3B'))" />
+    <TransformMetadataIdentity Include="@(I-&gt;'%(Identity).changed'-&gt;Metadata('Identity'))" />
+    <TransformIdentityFunction Include="@(I-&gt;'%(Identity).changed'-&gt;Identity())" />
+    <ClearIdentityCount Include="@(I-&gt;ClearMetadata()-&gt;Metadata('Identity')-&gt;Count())" />
+    <CombineIdentityCount Include="@(I-&gt;Combine('x')-&gt;Metadata('Identity')-&gt;Count())" />
+    <SemiSeparator Include="@(I, ';')" />
+    <PipeSeparator Include="@(I, '|')" />
+    <AnySource Include="@(I-&gt;AnyHaveMetadataValue('M','x'))" />
+    <AnySeparated Include="@(I-&gt;AnyHaveMetadataValue('M','x'), '|')" />
+    <CountSeparated Include="@(I-&gt;Count(), '|')" />
+    <Escaped Include="%41;A;K;K;σ;ς" />
+    <DistinctEscaped Include="@(Escaped-&gt;Distinct())" />
+    <DistinctCaseEscaped Include="@(Escaped-&gt;DistinctWithCase())" />
+    <Copy Include="@(I)" />
+    <Same Include="@(I->'%(Identity)')" />
+    <Changed Include="@(I->'%(Identity).changed')" />
+    <Cleared Include="@(I-&gt;ClearMetadata())" />
+    <Glob Include="tree/**/*.txt">
+      <Custom>glob</Custom>
+    </Glob>
+    <GlobCopy Include="@(Glob)" />
+    <GlobSame Include="@(Glob->'%(Identity)')" />
+    <GlobChanged Include="@(Glob->'%(Identity).changed')" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,30 @@
+{
+  "name": "installed-sdk-style-project",
+  "project": "project.csproj",
+  "properties": [
+    "TargetFramework",
+    "TargetFrameworkIdentifier",
+    "TargetFrameworkVersion",
+    "TargetPlatformIdentifier",
+    "UsingMicrosoftNETSdk",
+    "NETCoreSdkVersion",
+    "NETCoreSdkRuntimeIdentifier",
+    "DefaultLanguageSourceExtension",
+    "EnableDefaultCompileItems",
+    "MSBuildEnableWorkloadResolver",
+    "_EnableDefaultWindowsPlatform",
+    "MSBuildProjectName",
+    "MSBuildProjectDirectory",
+    "MSBuildProjectFullPath",
+    "MSBuildSDKsPath",
+    "MSBuildToolsPath",
+    "MSBuildRuntimeType",
+    "MSBuildVersion"
+  ],
+  "items": [
+    {
+      "type": "KnownFrameworkReference",
+      "metadata": []
+    }
+  ]
+}

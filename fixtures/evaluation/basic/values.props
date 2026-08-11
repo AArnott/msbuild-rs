@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <ImportedValue>from-import</ImportedValue>
+    <ImportedDerived>$(ImportedValue)-value</ImportedDerived>
+    <ParentSeenByImport>$(ParentBeforeImport)</ParentSeenByImport>
+    <ImportOrder>from-import</ImportOrder>
+    <ImportedThisFile>$(MSBuildThisFile)</ImportedThisFile>
+    <ImportedThisFileFullPath>$(MSBuildThisFileFullPath)</ImportedThisFileFullPath>
+  </PropertyGroup>
+</Project>

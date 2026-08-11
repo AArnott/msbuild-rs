@@ -1,0 +1,96 @@
+<Project>
+  <PropertyGroup>
+    <Source>This IS SOME STUff</Source>
+    <Index>3</Index>
+    <List>a;b;c;d;e</List>
+    <NoArguments>$(Source.Trim())</NoArguments>
+    <NestedAndChained>$(Source.Substring(1$(Index)).Trim().Substring($(Index)))</NestedAndChained>
+    <SplitAndIndexed>$(List.Split(';')[2])</SplitAndIndexed>
+    <StaticChain>$([System.Version]::Parse('10.2.3.4').ToString(2))</StaticChain>
+    <VersionBuild>$([System.Version]::Parse('10.2.3.4').Build)</VersionBuild>
+    <VersionConstructor>$([System.Version]::new(1, 2, 3).ToString())</VersionConstructor>
+    <MathAbsolute>$([System.Math]::Abs(-32769))</MathAbsolute>
+    <ConvertedHex>$([System.Convert]::ToInt64('28', 16))</ConvertedHex>
+    <GuidCompact>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('N'))</GuidCompact>
+    <PathFileName>$([System.IO.Path]::GetFileName('dir/file.txt'))</PathFileName>
+    <PathCombined>$([System.IO.Path]::Combine('root', 'sub', 'file.txt'))</PathCombined>
+    <StringCopied>$([System.String]::Copy('copy'))</StringCopied>
+    <TypedNumericChain>$([MSBuild]::Add(1, 2).CompareTo(3))</TypedNumericChain>
+    <FunctionCondition Condition="$(Source.Contains('STUff'))">passed</FunctionCondition>
+    <StableHash>$([MSBuild]::StableStringHash('abc'))</StableHash>
+    <StableSha256>$([MSBuild]::StableStringHash('abc', 'Sha256'))</StableSha256>
+    <StableFnv>$([MSBuild]::StableStringHash('abc', 'Fnv1a32bit'))</StableFnv>
+    <StableFnvFast>$([MSBuild]::StableStringHash('abc', 'Fnv1a32bitFast'))</StableFnvFast>
+    <PathDotExtension>$([System.IO.Path]::GetExtension('.gitignore'))</PathDotExtension>
+    <PathTrailingFile>$([System.IO.Path]::GetFileName('dir/'))</PathTrailingFile>
+    <PathDriveRooted>$([System.IO.Path]::IsPathRooted('C:relative'))</PathDriveRooted>
+    <PathRelative>$([MSBuild]::MakeRelative('C:\a\b', 'C:\a\c'))</PathRelative>
+    <PathRelativeUnicode>$([MSBuild]::MakeRelative('C:\Ärea\base', 'c:\ärea\child'))</PathRelativeUnicode>
+    <PathRelativeUnicodeDistinct>$([MSBuild]::MakeRelative('C:\ƛrea\base', 'c:\Ƛrea\child'))</PathRelativeUnicodeDistinct>
+    <PathFull>$([System.IO.Path]::GetFullPath('child/../file.txt', '$(MSBuildProjectDirectory)'))</PathFull>
+    <ExpandedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('%msbuild_rs_expand_case%-%MISSING%'))</ExpandedEnvironment>
+    <MalformedEnvironment>$([System.Environment]::ExpandEnvironmentVariables('prefix%MISSING'))</MalformedEnvironment>
+    <FeatureBeforeBoundary>$([MSBuild]::AreFeaturesEnabled('18.5'))</FeatureBeforeBoundary>
+    <FeatureAtBoundary>$([MSBuild]::AreFeaturesEnabled('18.6'))</FeatureAtBoundary>
+    <TaskHostCurrent>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'CurrentArchitecture'))</TaskHostCurrent>
+    <TaskHostX86>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'x86'))</TaskHostX86>
+    <TaskHostX64>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'x64'))</TaskHostX64>
+    <TaskHostArm64>$([MSBuild]::DoesTaskHostExist('CurrentRuntime', 'arm64'))</TaskHostArm64>
+    <AsciiSubstring>$([MSBuild]::SubstringByAsciiChars('ab/éZ', 1, 20))</AsciiSubstring>
+    <EscapedFunction>$([MSBuild]::Escape(';'))</EscapedFunction>
+    <UnescapedFunction>$([MSBuild]::Unescape('%3b'))</UnescapedFunction>
+    <EscapedPathResult>$([System.IO.Path]::GetFileName('dir/a%3Bb'))</EscapedPathResult>
+    <FormattedDate>$([System.DateTime]::Parse('2010-12-25').ToString('yyyy/MM/dd HH:mm:ss'))</FormattedDate>
+    <AddWrap>$([MSBuild]::Add(9223372036854775807, 1))</AddWrap>
+    <SubtractWrap>$([MSBuild]::Subtract(-9223372036854775808, 1))</SubtractWrap>
+    <MultiplyWrap>$([MSBuild]::Multiply(9223372036854775807, 2))</MultiplyWrap>
+    <MaskedLeftShift>$([MSBuild]::LeftShift(1, -1))</MaskedLeftShift>
+    <MaskedRightShift>$([MSBuild]::RightShift(-2, 32))</MaskedRightShift>
+    <DivideInteger>$([MSBuild]::Divide(7, 2))</DivideInteger>
+    <ModuloInteger>$([MSBuild]::Modulo(7, 2))</ModuloInteger>
+    <NestedTypedAbs>$([System.Math]::Abs($([System.Int64]::Parse('-32768'))))</NestedTypedAbs>
+    <SignedRadixInt>$([System.Convert]::ToInt32('FFFFFFFF', 16))</SignedRadixInt>
+    <SignedRadixString>$([System.Convert]::ToString(-1, 16))</SignedRadixString>
+    <NestedSignedRadix>$([System.Convert]::ToString($([System.Int64]::Parse('-1')), 16))</NestedSignedRadix>
+    <PathCombineEmpty>$([System.IO.Path]::Combine())</PathCombineEmpty>
+    <PathCombineOne>$([System.IO.Path]::Combine('a'))</PathCombineOne>
+    <PathCombineMany>$([System.IO.Path]::Combine('a', 'b', 'c', 'd', 'e'))</PathCombineMany>
+    <NormalizeMany>$([MSBuild]::NormalizePath('a', 'b', 'c', 'd', 'e'))</NormalizeMany>
+    <VersionEmpty>$([System.Version]::new())</VersionEmpty>
+    <VersionString>$([System.Version]::new('1.2.3'))</VersionString>
+    <VersionTwo>$([System.Version]::new(1, 2))</VersionTwo>
+    <VersionFour>$([System.Version]::new(1, 2, 3, 4))</VersionFour>
+    <SplitCopied>$([System.String]::Copy('a;b').Split(';'))</SplitCopied>
+    <NestedJoinArray>$([System.String]::Join(',', $([System.String]::Copy('a;b').Split(';'))))</NestedJoinArray>
+    <SplitNestedChar>$([System.String]::Copy('a;b').Split($([System.String]::Copy(';')[0])))</SplitNestedChar>
+    <LeadingEmptyArray>$([System.String]::Copy(';;a;;').Split(';'))</LeadingEmptyArray>
+    <InteriorTrailingArray>$([System.String]::Copy('a;;b;').Split(';'))</InteriorTrailingArray>
+    <SplitZero>$([System.String]::Copy('a b').Split())</SplitZero>
+    <IndexedChar>$(Source[0])</IndexedChar>
+    <SeparatorChar>$([System.IO.Path]::DirectorySeparatorChar)</SeparatorChar>
+    <OrdinalCompare>$([System.String]::CompareOrdinal('😀', '�'))</OrdinalCompare>
+    <IsoDate>$([System.DateTime]::Parse('2010-12-25T01:02:03').ToString('yyyy-MM-dd HH:mm:ss'))</IsoDate>
+    <GuidX>$([System.Guid]::Parse('00112233-4455-6677-8899-aabbccddeeff').ToString('X'))</GuidX>
+    <IntD4>$([System.Int32]::Parse('42').ToString('D4'))</IntD4>
+    <EscapeNull>$([MSBuild]::Escape(null))</EscapeNull>
+    <DefaultNull>$([MSBuild]::ValueOrDefault(null, 'fallback'))</DefaultNull>
+    <UnescapeNull>$([MSBuild]::Unescape(null))</UnescapeNull>
+    <NestedEscapedString>$([System.String]::Copy($([MSBuild]::Escape(';'))))</NestedEscapedString>
+    <RelativeFileAbove>$([MSBuild]::GetPathOfFileAbove('Cargo.toml', '.'))</RelativeFileAbove>
+    <RegistryPrefixMissing>$(Registry:HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__@Value)</RegistryPrefixMissing>
+    <RegistryViewMissingDefault>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\__msbuild_rs_fixture_missing_2f4db9f6__', 'Value', 'fallback', 'RegistryView.Default'))</RegistryViewMissingDefault>
+    <TypedNullConvert>$([System.Convert]::ToString($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullConvert>
+    <TypedNullPredicate>$([System.String]::IsNullOrEmpty($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullPredicate>
+    <TypedNullContains>$([System.String]::Copy('abc').Contains($([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullContains>
+    <TypedNullPathCombine>$([System.IO.Path]::Combine('a', $([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullPathCombine>
+    <TypedNullReplace>$([System.String]::Copy('aba').Replace('b', $([System.Environment]::GetEnvironmentVariable('MSBUILD_RS_TYPED_NULL_MUST_NOT_EXIST'))))</TypedNullReplace>
+    <IntegralDecimalAdd>$([MSBuild]::Add(10.0, 1))</IntegralDecimalAdd>
+    <TargetFrameworkIdentifier>$([MSBuild]::GetTargetFrameworkIdentifier('net10.0'))</TargetFrameworkIdentifier>
+    <TargetFrameworkVersion>$([MSBuild]::GetTargetFrameworkVersion('net10.0', 4))</TargetFrameworkVersion>
+    <TargetPlatformVersion>$([MSBuild]::GetTargetPlatformVersion('net10.0-windows10.0.19041.0', 2))</TargetPlatformVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <SplitItem Include="$([System.String]::Copy('a;b').Split(';'))" />
+    <EscapedSplitItem Include="$([System.String]::Copy('a%3Bb,c').Split(','))" />
+  </ItemGroup>
+</Project>

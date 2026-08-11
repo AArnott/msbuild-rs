@@ -1,0 +1,124 @@
+<Project>
+  <ItemDefinitionGroup>
+    <Operation>
+      <InitialDefault>initial</InitialDefault>
+      <LaterDefault>later</LaterDefault>
+    </Operation>
+    <ClearResult>
+      <DestinationDefault>destination</DestinationDefault>
+    </ClearResult>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <TextFile Include="X.txt;Y.txt;Z.txt" />
+
+    <Source Include="One">
+      <Kind>true</Kind>
+      <Path>tree/root.txt</Path>
+      <List>a;b</List>
+    </Source>
+    <Source Include="Two">
+      <Kind>false</Kind>
+      <Path>tree/missing.txt</Path>
+    </Source>
+    <Source Include="Three">
+      <Kind />
+    </Source>
+    <Source Include="Four" />
+    <Case Include="A;a;B;A" />
+
+    <Operation Include="a;b;c">
+      <State>before</State>
+    </Operation>
+    <OperationSnapshot Include="@(Operation)" />
+
+    <Intermediary Include="1" />
+    <Excluded Include="1;2" Exclude="@(Intermediary)" />
+    <Intermediary Include="2" />
+
+    <Glob Include="tree/**/*.txt" Exclude="tree/sub/skip.txt" />
+    <QuestionGlob Include="tree/sub/????.txt" />
+    <EscapedWildcard Include="tree/%2A.txt" />
+    <BracketLiteral Include="tree/literal[1].txt" />
+    <EscapedSemicolon Include="semi%3Bcolon.txt" />
+    <OperationCondition Include="a;b" Condition="'@(OperationCondition)' == ''">
+      <Seen>@(OperationCondition)</Seen>
+      <OnlyA Condition="%(Identity) == a">yes</OnlyA>
+      <Tag>true</Tag>
+      <CustomCondition Condition="%(Tag) == true">yes</CustomCondition>
+    </OperationCondition>
+    <ConditionUpdate Include="a;b">
+      <State>old-%(Identity)</State>
+    </ConditionUpdate>
+    <SameOperationUpdate Include="a;b">
+      <State>old-%(Identity)</State>
+    </SameOperationUpdate>
+    <DuplicateOperation Include="x;x;y" />
+    <TerminalRecursive Include="tree/**" />
+    <TerminalStarDirectory Include="tree/*/" />
+    <TerminalRecursiveDirectory Include="tree/**/" />
+    <StarDot Include="*.*" />
+    <PrefixedStarDot Include="D*.*" />
+    <LogicalDot Include="./tree/*.txt" />
+    <LogicalDotDot Include="tree/sub/../*.txt" />
+    <LogicalExcludePhysical Include="tree/sub/../*.txt" Exclude="tree/*.txt" />
+    <LogicalExcludeSame Include="tree/sub/../*.txt" Exclude="tree/sub/../*.txt" />
+    <LogicalRemovePhysical Include="tree/sub/../*.txt" />
+    <LogicalRemovePhysical Remove="tree/*.txt" />
+    <OrdinaryRecursiveDir Include="tree/s*/*.txt" />
+    <MixedEscapedWildcard Include="%2A-*.txt" />
+    <IllegalRecursiveWildcard Include="tree/**.txt" />
+    <LiteralMutation Include="%2A-*.txt;tree/**.txt" />
+    <LiteralMutation Update="tree/**.txt">
+      <Updated>yes</Updated>
+    </LiteralMutation>
+    <LiteralMutation Remove="%2A-*.txt" />
+    <OutsideCone Include="../outside.md;tree/root.txt" />
+    <OutsideCone Remove="**/*.md" />
+    <AbsoluteEquivalent Include="$(MSBuildProjectDirectory)/tree/root.txt" />
+    <AbsoluteEquivalent Remove="tree/root.txt" />
+    <PrunedExclude Include="tree/**/*.txt" Exclude="tree/node_modules/**" />
+    <ExcludeCacheA Include="tree/**/*.txt" Exclude="tree/sub/**" />
+    <ExcludeCacheB Include="tree/**/*.txt" Exclude="tree/node_modules/**" />
+    <FalseInvalidGlob Condition="false" Include="tree/**/../*.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Operation Update="@(Operation-&gt;WithMetadataValue('Identity', 'b'))">
+      <State>updated-%(Identity)</State>
+    </Operation>
+    <Operation Remove="@(Operation-&gt;WithMetadataValue('Identity', 'a'))" />
+    <ConditionUpdate Update="a;b" Condition="'@(ConditionUpdate->'%(State)')' == 'old-a;old-b'">
+      <State>new-%(Identity)</State>
+    </ConditionUpdate>
+    <SameOperationUpdate Update="a;b">
+      <Seen>@(SameOperationUpdate->'%(State)')</Seen>
+    </SameOperationUpdate>
+    <DuplicateOperation Update="x">
+      <Updated>yes</Updated>
+    </DuplicateOperation>
+    <DuplicateOperationSnapshot Include="@(DuplicateOperation)" />
+    <DuplicateOperation Remove="x" />
+
+    <CountResult Include="@(Source-&gt;Count());@(Missing-&gt;Count());@(Source-&gt;Metadata('Missing')-&gt;Count())" />
+    <AnyResult Include="@(Source-&gt;AnyHaveMetadataValue('Kind', 'TRUE'));@(Missing-&gt;AnyHaveMetadataValue('Kind', 'x'))" />
+    <ReverseResult Include="@(Source-&gt;Reverse())" />
+    <DistinctResult Include="@(Case-&gt;Distinct())" />
+    <DistinctCaseResult Include="@(Case-&gt;DistinctWithCase())" />
+    <MetadataResult Include="@(Source-&gt;Metadata('Path'))" />
+    <MetadataListResult Include="@(Source-&gt;Metadata('List'))" />
+    <TemplateListResult Include="@(Source->'%(List)')" />
+    <HasResult Include="@(Source -&gt; HasMetadata('Kind') -&gt; WithMetadataValue('Kind', 'true'))" />
+    <WithoutResult Include="@(Source-&gt;WithoutMetadataValue('Kind', 'true'))" />
+    <ClearResult Include="@(Source-&gt;ClearMetadata())" />
+    <ExistsResult Include="@(MetadataResult-&gt;Exists())" />
+    <DirectoryNameResult Include="@(MetadataResult-&gt;DirectoryName()-&gt;Distinct())" />
+    <CombineResult Include="@(Source-&gt;Combine('.squiggle'))" />
+    <FullPathResult Include="@(MetadataResult-&gt;FullPath())" />
+    <WellKnownTransform Include="@(Glob->'%(RecursiveDir)%(Filename).out')" />
+    <MultipleReferences Include="@(DistinctResult);@(HasResult)" />
+    <CustomSeparatorResult Include="@(Source, '|')" />
+    <TransformSeparatorResult Include="@(Source->'%(Identity).obj', ' + ')" />
+    <TransformSemicolonResult Include="@(TextFile->'%(FileName);%(FileName)%253b%(FileName)%(Extension)','    ')" />
+  </ItemGroup>
+</Project>

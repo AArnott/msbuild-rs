@@ -1,0 +1,5 @@
+{
+  "name": "installed-sdk-style-project",
+  "project": "project.csproj",
+  "comparison": "semanticXml"
+}

@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildThisFile)' == 'common.props'">
+    <ImportCount>$(ImportCount)x</ImportCount>
+    <ImportedCurrentFile>$(MSBuildThisFileFullPath)</ImportedCurrentFile>
+  </PropertyGroup>
+</Project>

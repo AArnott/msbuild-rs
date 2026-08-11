@@ -1,0 +1,32 @@
+<Project>
+  <PropertyGroup>
+    <Configuration>Debug</Configuration>
+    <Base>base</Base>
+    <Derived>$(Base)-$(Configuration)</Derived>
+    <ConditionalValue Condition="'$(Configuration)' == 'Debug'">selected</ConditionalValue>
+    <AllEvaluated>1</AllEvaluated>
+    <AllEvaluated>2</AllEvaluated>
+    <AllEvaluated>$(AllEvaluated);2</AllEvaluated>
+    <SetToItself>$(SetToItself);text</SetToItself>
+    <UsedBeforeSet>$(SetLater)</UsedBeforeSet>
+    <SetLater>later</SetLater>
+    <ParentBeforeImport>visible-to-import</ParentBeforeImport>
+    <ImportOrder>before-import</ImportOrder>
+    <GlobalChoice>project-value</GlobalChoice>
+  </PropertyGroup>
+  <ImportGroup Condition="'$(ParentBeforeImport)' == 'visible-to-import'">
+    <Import Project="values.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <ValueSeenAfterImport>$(ImportOrder)</ValueSeenAfterImport>
+    <ImportOrder>after-import</ImportOrder>
+    <RootThisFile>$(MSBuildThisFile)</RootThisFile>
+    <RootThisFileFullPath>$(MSBuildThisFileFullPath)</RootThisFileFullPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="one.cs;two.cs">
+      <Kind>source</Kind>
+    </Compile>
+    <Content Include="content.txt" />
+  </ItemGroup>
+</Project>

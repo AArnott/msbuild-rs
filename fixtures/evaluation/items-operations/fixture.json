@@ -1,0 +1,219 @@
+{
+  "name": "ordered-items-functions-transforms-and-globs",
+  "project": "project.proj",
+  "properties": [],
+  "items": [
+    {
+      "type": "Operation",
+      "metadata": ["State", "InitialDefault", "LaterDefault"]
+    },
+    {
+      "type": "OperationSnapshot",
+      "metadata": ["State", "InitialDefault", "LaterDefault"]
+    },
+    {
+      "type": "Excluded",
+      "metadata": []
+    },
+    {
+      "type": "CountResult",
+      "metadata": []
+    },
+    {
+      "type": "AnyResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "ReverseResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "DistinctResult",
+      "metadata": []
+    },
+    {
+      "type": "DistinctCaseResult",
+      "metadata": []
+    },
+    {
+      "type": "MetadataResult",
+      "metadata": ["Kind", "Path"]
+    },
+    {
+      "type": "MetadataListResult",
+      "metadata": ["Kind", "List"]
+    },
+    {
+      "type": "TemplateListResult",
+      "metadata": ["Kind", "List"]
+    },
+    {
+      "type": "HasResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "WithoutResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "ClearResult",
+      "metadata": ["Kind", "DestinationDefault"]
+    },
+    {
+      "type": "ExistsResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "DirectoryNameResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "CombineResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "FullPathResult",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "Glob",
+      "metadata": ["RecursiveDir", "RelativeDir", "Filename", "Extension"]
+    },
+    {
+      "type": "WellKnownTransform",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "QuestionGlob",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "EscapedWildcard",
+      "metadata": ["Filename"]
+    },
+    {
+      "type": "BracketLiteral",
+      "metadata": ["Filename"]
+    },
+    {
+      "type": "EscapedSemicolon",
+      "metadata": ["Filename"]
+    },
+    {
+      "type": "MultipleReferences",
+      "metadata": ["Kind"]
+    },
+    {
+      "type": "CustomSeparatorResult",
+      "metadata": []
+    },
+    {
+      "type": "TransformSeparatorResult",
+      "metadata": []
+    },
+    {
+      "type": "TransformSemicolonResult",
+      "metadata": []
+    },
+    {
+      "type": "OperationCondition",
+      "metadata": ["Seen", "OnlyA", "Tag", "CustomCondition"]
+    },
+    {
+      "type": "ConditionUpdate",
+      "metadata": ["State"]
+    },
+    {
+      "type": "SameOperationUpdate",
+      "metadata": ["State", "Seen"]
+    },
+    {
+      "type": "DuplicateOperation",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "DuplicateOperationSnapshot",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "TerminalRecursive",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "TerminalStarDirectory",
+      "metadata": []
+    },
+    {
+      "type": "TerminalRecursiveDirectory",
+      "metadata": []
+    },
+    {
+      "type": "StarDot",
+      "metadata": []
+    },
+    {
+      "type": "PrefixedStarDot",
+      "metadata": []
+    },
+    {
+      "type": "LogicalDot",
+      "metadata": ["RelativeDir", "FullPath"]
+    },
+    {
+      "type": "LogicalDotDot",
+      "metadata": ["RelativeDir", "FullPath"]
+    },
+    {
+      "type": "LogicalExcludePhysical",
+      "metadata": []
+    },
+    {
+      "type": "LogicalExcludeSame",
+      "metadata": []
+    },
+    {
+      "type": "LogicalRemovePhysical",
+      "metadata": []
+    },
+    {
+      "type": "OrdinaryRecursiveDir",
+      "metadata": ["RecursiveDir"]
+    },
+    {
+      "type": "MixedEscapedWildcard",
+      "metadata": []
+    },
+    {
+      "type": "IllegalRecursiveWildcard",
+      "metadata": []
+    },
+    {
+      "type": "LiteralMutation",
+      "metadata": ["Updated"]
+    },
+    {
+      "type": "OutsideCone",
+      "metadata": []
+    },
+    {
+      "type": "AbsoluteEquivalent",
+      "metadata": []
+    },
+    {
+      "type": "PrunedExclude",
+      "metadata": []
+    },
+    {
+      "type": "ExcludeCacheA",
+      "metadata": []
+    },
+    {
+      "type": "ExcludeCacheB",
+      "metadata": []
+    },
+    {
+      "type": "FalseInvalidGlob",
+      "metadata": []
+    }
+  ]
+}

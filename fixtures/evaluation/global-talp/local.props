@@ -1,0 +1,7 @@
+<Project TreatAsLocalProperty="lateLOCAL;ImportedLocal;FOO">
+  <PropertyGroup>
+    <Foo>$(Foo)-import</Foo>
+    <LateLocal>$(LateLocal)-import</LateLocal>
+    <ImportedLocal>$(ImportedLocal)-import</ImportedLocal>
+  </PropertyGroup>
+</Project>

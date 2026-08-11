@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <EnvironmentSeenBeforeOverride>$(CompatibilityEnvironmentValue)</EnvironmentSeenBeforeOverride>
+    <CompatibilityEnvironmentValue>project-override</CompatibilityEnvironmentValue>
+    <RootFile>$(MSBuildThisFile)</RootFile>
+    <RootFullPath>$(MSBuildThisFileFullPath)</RootFullPath>
+  </PropertyGroup>
+  <Import Project="values.props" />
+</Project>

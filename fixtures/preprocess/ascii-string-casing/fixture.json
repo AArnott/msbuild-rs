@@ -1,0 +1,5 @@
+{
+  "name": "ascii-string-casing-imported-preprocess",
+  "project": "project.proj",
+  "comparison": "semanticXml"
+}

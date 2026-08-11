@@ -1,0 +1,20 @@
+<Project>
+  <ItemGroup>
+    <Compile Include="One.cs;tree/beta/Two.cs;tree/../gamma/Three.cs" />
+    <Directories Include="@(Compile->GetPathsOfAllDirectoriesAbove())" />
+
+    <StringSource Include="  Ab.c%3Bd  ;.NETCoreApp,Version=v8.0;abcdef" />
+    <Trimmed Include="@(StringSource->Trim())" />
+    <TrimStartChars Include="@(StringSource->TrimStart('.NETCoreApp,Version=v'))" />
+    <Replaced Include="@(StringSource->Replace('.', '_'))" />
+    <Substring Include="@(StringSource->Substring(2, 3))" />
+    <Contains Include="@(StringSource->Contains('b'))" />
+    <Equals Include="@(StringSource->Equals('abcdef'))" />
+    <Length Include="@(StringSource->get_Length())" />
+    <Spaced Include="%20%20abc%20%20" />
+    <TrimEmptySet Include="@(Spaced->Trim(''))" />
+    <TrimCharsSource Include="xxabcxx" />
+    <TrimChars Include="@(TrimCharsSource->Trim('x'))" />
+    <TrimEndChars Include="@(TrimCharsSource->TrimEnd('x'))" />
+  </ItemGroup>
+</Project>

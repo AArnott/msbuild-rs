@@ -1,0 +1,48 @@
+<Project>
+  <PropertyGroup>
+    <Selection>first</Selection>
+    <BeforeImports>visible</BeforeImports>
+  </PropertyGroup>
+  <ImportGroup Condition="'$(MSBuildThisFile)' == 'project.proj' And '$(BeforeImports)' == 'visible'">
+    <Import Project="imports/../imports/common.props" Condition="'$(MSBuildThisFile)' == 'project.proj'" />
+    <Import Project="imports/common.props" />
+    <Import Project="missing.props" Condition="false" />
+  </ImportGroup>
+  <Choose>
+    <When Condition="'$(Selection)' == 'first'">
+      <PropertyGroup>
+        <ChooseValue>first</ChooseValue>
+        <FileConditionInWhen Condition="'$(MSBuildThisFile)' == 'project.proj'">root</FileConditionInWhen>
+      </PropertyGroup>
+      <ItemGroup>
+        <Chosen Include="first-item" />
+      </ItemGroup>
+      <Choose>
+        <When Condition="false">
+          <PropertyGroup>
+            <NestedChoose>wrong</NestedChoose>
+          </PropertyGroup>
+        </When>
+        <Otherwise>
+          <PropertyGroup>
+            <NestedChoose>otherwise</NestedChoose>
+          </PropertyGroup>
+        </Otherwise>
+      </Choose>
+    </When>
+    <When Condition="true">
+      <PropertyGroup>
+        <ChooseValue>second</ChooseValue>
+      </PropertyGroup>
+      <ItemGroup>
+        <Chosen Include="second-item" />
+      </ItemGroup>
+    </When>
+    <Otherwise>
+      <PropertyGroup>
+        <ChooseValue>otherwise</ChooseValue>
+      </PropertyGroup>
+    </Otherwise>
+  </Choose>
+  <Import Project="imports/selected.props" Condition="'$(ChooseValue)' == 'first'" />
+</Project>

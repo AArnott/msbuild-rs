@@ -1,0 +1,75 @@
+{
+  "name": "review-findings-escaping-items-paths-and-brackets",
+  "project": "project.proj",
+  "properties": [
+    "P",
+    "ContainsResult",
+    "ContainsCondition",
+    "FileNameResult"
+  ],
+  "items": [
+    {
+      "type": "RawPropertyResult",
+      "metadata": []
+    },
+    {
+      "type": "EscapedPropertyResult",
+      "metadata": []
+    },
+    {
+      "type": "FunctionResult",
+      "metadata": []
+    },
+    {
+      "type": "PathFunctionResult",
+      "metadata": []
+    },
+    {
+      "type": "RawResult",
+      "metadata": ["M", "Custom"]
+    },
+    {
+      "type": "AuthoredResult",
+      "metadata": ["M", "Custom"]
+    },
+    {
+      "type": "DistinctResult",
+      "metadata": ["Custom", "Default"]
+    },
+    {
+      "type": "MetadataResult",
+      "metadata": ["Custom", "Default"]
+    },
+    {
+      "type": "TransformResult",
+      "metadata": ["Custom", "Default"]
+    },
+    {
+      "type": "CopyResult",
+      "metadata": ["Custom", "Default"]
+    },
+    {
+      "type": "BracketItem",
+      "metadata": ["Filename"]
+    },
+    {
+      "type": "EscapedWildcard",
+      "metadata": ["Filename"]
+    },
+    {
+      "type": "Imported",
+      "metadata": [
+        "Custom",
+        "FullPath",
+        "Directory",
+        "DefiningProjectFullPath",
+        "DefiningProjectDirectory",
+        "DefiningProjectName"
+      ]
+    },
+    {
+      "type": "WildcardBracketImported",
+      "metadata": ["DefiningProjectName"]
+    }
+  ]
+}

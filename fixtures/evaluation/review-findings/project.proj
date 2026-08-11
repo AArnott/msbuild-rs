@@ -1,0 +1,51 @@
+<Project>
+  <PropertyGroup>
+    <P>a%3Bb</P>
+    <RawProperty>a;b</RawProperty>
+    <EscapedProperty>a%3Bb</EscapedProperty>
+    <ContainsResult>$(P.Contains(';'))</ContainsResult>
+    <ContainsCondition Condition="$(P.Contains(';')) == True">passed</ContainsCondition>
+    <FileNameResult>$([System.IO.Path]::GetFileName('dir%2Ffile.txt'))</FileNameResult>
+  </PropertyGroup>
+
+  <Import Project="sub/import[1].props" />
+  <Import Project="sub/wild/card[*].props" />
+
+  <ItemDefinitionGroup>
+    <Source>
+      <Default>source-default</Default>
+    </Source>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <RawPropertyResult Include="$(RawProperty)" />
+    <EscapedPropertyResult Include="$(EscapedProperty)" />
+    <FunctionResult Include="$(P.Substring(0,3))" />
+    <PathFunctionResult Include="$([System.IO.Path]::GetFileName('dir%2Fa%3Bb'))" />
+
+    <Raw Include="one">
+      <M>a;b</M>
+      <Custom>raw-meta</Custom>
+    </Raw>
+    <Authored Include="two">
+      <M>a%3Bb</M>
+      <Custom>escaped-meta</Custom>
+    </Authored>
+    <RawResult Include="@(Raw-&gt;Metadata('M'))" />
+    <AuthoredResult Include="@(Authored-&gt;Metadata('M'))" />
+
+    <Source Include="dir/one.cs">
+      <Custom>first</Custom>
+    </Source>
+    <Source Include="dir/one.cs">
+      <Custom>second</Custom>
+    </Source>
+    <DistinctResult Include="@(Source-&gt;Distinct())" />
+    <MetadataResult Include="@(Source-&gt;Metadata('Filename'))" />
+    <TransformResult Include="@(Source->'%(Filename).out')" />
+    <CopyResult Include="@(Source)" />
+
+    <BracketItem Include="[literal].txt" />
+    <EscapedWildcard Include="%2A.txt" />
+  </ItemGroup>
+</Project>

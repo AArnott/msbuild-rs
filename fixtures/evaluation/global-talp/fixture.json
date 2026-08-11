@@ -1,0 +1,23 @@
+{
+  "name": "global-properties-and-treat-as-local-property",
+  "project": "project.proj",
+  "environment": {
+    "LocalNames": "Foo;FromExpandedList"
+  },
+  "globalProperties": {
+    "Foo": "global-foo",
+    "FromExpandedList": "global-expanded",
+    "LateLocal": "global-late",
+    "ImportedLocal": "global-imported",
+    "Untouched": "global-untouched"
+  },
+  "properties": [
+    "Foo",
+    "FromExpandedList",
+    "LateLocalAboveImport",
+    "LateLocal",
+    "ImportedLocal",
+    "Untouched"
+  ],
+  "items": []
+}

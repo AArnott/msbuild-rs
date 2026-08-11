@@ -1,0 +1,51 @@
+{
+  "name": "remaining-evaluation-item-functions",
+  "project": "project.proj",
+  "properties": [],
+  "items": [
+    {
+      "type": "Directories",
+      "metadata": []
+    },
+    {
+      "type": "Trimmed",
+      "metadata": []
+    },
+    {
+      "type": "TrimStartChars",
+      "metadata": []
+    },
+    {
+      "type": "Replaced",
+      "metadata": []
+    },
+    {
+      "type": "Substring",
+      "metadata": []
+    },
+    {
+      "type": "Contains",
+      "metadata": []
+    },
+    {
+      "type": "Equals",
+      "metadata": []
+    },
+    {
+      "type": "Length",
+      "metadata": []
+    },
+    {
+      "type": "TrimEmptySet",
+      "metadata": []
+    },
+    {
+      "type": "TrimChars",
+      "metadata": []
+    },
+    {
+      "type": "TrimEndChars",
+      "metadata": []
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "environment-and-reserved-properties",
+  "project": "project.proj",
+  "environment": {
+    "CompatibilityEnvironmentValue": "from-environment"
+  },
+  "properties": [
+    "EnvironmentSeenBeforeOverride",
+    "CompatibilityEnvironmentValue",
+    "RootFile",
+    "RootFullPath",
+    "ImportedFile",
+    "ImportedFullPath",
+    "MSBuildProjectFile",
+    "MSBuildProjectName",
+    "MSBuildProjectExtension",
+    "MSBuildProjectFullPath",
+    "MSBuildProjectDirectory"
+  ],
+  "items": []
+}

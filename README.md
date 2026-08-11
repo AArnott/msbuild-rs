@@ -11,9 +11,16 @@ A MSBuild project reader and executor written in Rust.
 - **XML Parsing**: Reads MSBuild project files (.proj, .csproj, etc.) and parses their structure
 - **Object Model**: Maintains properties (name=value pairs) and items (type=name pairs with metadata)
 - **Expression Evaluation**: Supports `$(PropertyName)` and `@(ItemType)` syntax for property and item references
-- **Conditional Evaluation**: Supports `Condition` attributes on elements for conditional processing
-- **Target Dependencies**: Executes targets in dependency order using `DependsOnTargets`
+- **Conditional Evaluation**: Supports boolean, equality, relational, version,
+  filesystem, and selected intrinsic condition forms
+- **Target Dependencies**: Executes aggregated `InitialTargets`, then requested
+  targets in dependency order using `DependsOnTargets`
 - **Import Support**: Processes `<Import>` elements to include other project files
+- **SDK Imports**: Resolves the active .NET SDK through the `dotnet` host and
+  supports `Project@Sdk` plus top-level `<Sdk Name="..." Version="..." />`.
+  Installed workload locator SDKs are resolved natively from the selected
+  toolset's manifests and packs, without per-import subprocesses or NuGet
+  acquisition.
 - **Built-in Tasks**:
   - `<Message>` - Logs messages to output
   - `<Copy>` - Copies files from source to destination
@@ -36,7 +43,16 @@ msbuild-rs --demo
 
 # Load and write an evaluated project without executing targets
 msbuild-rs --project path/to/project.proj --preprocess out.xml
+
+# Query evaluated properties and item identities/metadata without executing targets
+msbuild-rs --project path/to/project.proj --get-property Configuration --get-item Compile
+
+# Supply global properties (repeat --property as needed)
+msbuild-rs --project path/to/project.proj --property Configuration=Release --get-property Configuration
 ```
+
+Global properties are immutable unless a root project or source-position import
+lists them in `TreatAsLocalProperty`, matching MSBuild's cumulative semantics.
 
 ### Project File Format
 
@@ -127,7 +143,8 @@ Built-in tasks for common operations:
 
 - **Property References**: `$(PropertyName)` - Expands to the property value
 - **Item References**: `@(ItemType)` - Expands to semicolon-separated list of item names
-- **Conditions**: Support basic equality comparisons like `'$(Prop)' == 'Value'`
+- **Conditions**: Support grouped boolean/equality/relational expressions plus
+  the documented filesystem, version, and platform predicates
 
 MSBuild also permits property functions that reference .NET types, such as:
 
@@ -135,13 +152,32 @@ MSBuild also permits property functions that reference .NET types, such as:
 $([System.Text.RegularExpressions.Regex]::IsMatch('%(FullPath)', '.+\.css\.aspx'))
 ```
 
-The compatibility plan uses native Rust implementations for common type/method combinations and, later, an in-process CoreCLR fallback for legal MSBuild property functions that have no native implementation. CoreCLR will load lazily so the managed runtime does not affect projects that stay on native fast paths.
+The compatibility plan uses an explicit, correctness-tested native Rust
+allowlist and, later, an in-process CoreCLR fallback for other legal MSBuild
+property functions. The native tier preserves typed overloads, declared type
+provenance for native null results, untyped literal null, params
+arrays, Char, and array-result boundaries across exact nested calls. On
+Windows, environment lookup uses Unicode ordinal-ignore-case keys, while
+read-only registry intrinsics preserve DWORD/QWORD numbers, embedded string
+NULs, and multi-string/byte arrays through member chains; `REG_NONE` uses the
+same byte-list model as `REG_BINARY`. Culture-sensitive floating MSBuild
+arithmetic and Math/Double/Convert overloads, Guid X parsing (X formatting
+remains), non-ASCII casing, broad CLR formatting, full NuGet TFM compatibility,
+and OS-bitness queries are deliberately pruned rather than approximated. The
+four zero-argument String casing methods have a conservative exact ASCII native
+path: invariant calls accept all ASCII, while current-culture `ToUpper` rejects
+lowercase `i` and `ToLower` rejects uppercase `I` because Turkish/Azeri results
+differ. Non-ASCII and those culture-sensitive inputs require a managed fallback
+or a .NET-versioned Unicode table. See the compatibility worklist.
+CoreCLR will load lazily so it does not affect projects that stay on native fast
+paths.
 
 ### Evaluation Order
 
-1. **Properties**: All properties are evaluated first, allowing forward references
-2. **Items**: Items are evaluated after properties and can reference properties
-3. **Targets**: Targets are executed based on dependency order and conditions
+1. **Properties and imports**: Evaluated in expanded XML document order. Each
+   assignment sees the state immediately before it; a before-set reference is empty.
+2. **Items**: Added at their source position using the property/item state then visible.
+3. **Targets**: Collected in document order and executed by dependency order.
 
 ## Building
 
@@ -155,10 +191,44 @@ cargo test
 # Run with sample projects
 cargo run -- --demo
 
-# Compare preprocessing startup and evaluation performance
+# Compare fresh-process end-to-end preprocessing. Normalized /pp parity is a
+# mandatory gate before warmups or measurements.
 cargo build --release
-./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj
+pwsh -File ./scripts/compare-preprocess.ps1 -Project ./sample_projects/simple.proj -Warmup 5 -Iterations 30
+
+# Generate fixed-seed large fixtures, verify their manifest/hashes, and run the
+# fresh-process preprocess and evaluation-query modes for simple plus every
+# generated properties, items, conditions, imports, and representative case.
+pwsh -File ./scripts/generate-performance-fixtures.ps1 -Preset Benchmark
+pwsh -File ./scripts/generate-performance-fixtures.ps1 -VerifyOnly
+pwsh -File ./scripts/run-performance-suite.ps1 -Preset Benchmark -Warmup 5 -Iterations 30
+
+# Compare a semantic evaluation fixture with dotnet msbuild without running targets
+cargo build
+pwsh -File ./scripts/compare-evaluation.ps1 -Fixture ./fixtures/evaluation/basic/fixture.json
+
+# Discover and run every semantic and preprocess compatibility fixture
+pwsh -File ./scripts/run-compatibility-fixtures.ps1
 ```
+
+`global.json` pins the .NET SDK used by the comparison scripts and CI. The
+exact `rollForward: disable` pin also lets msbuild-rs resolve the installed
+toolset directly; other SDK-selection policies retain the `dotnet --info`
+fallback. The semantic runner writes raw tool output and deterministic,
+path-normalized JSON
+to `benchmark-results/evaluation`; fixtures with `expectedFailure` compare
+controlled rejection diagnostics and require both evaluators to fail.
+The all-fixture runner is also the cross-platform semantic CI entry point.
+The installed-SDK preprocess fixture compares a semantic XML projection of the
+fully expanded tree, ignoring comments/layout, namespace serialization, and
+equivalent root SDK/default-target syntax while retaining elements, attributes,
+text, and order.
+Performance generation, parity eligibility, interleaved process timing, peak
+working set, artifact schemas, scale knobs, and interpretation guidance are
+documented in [the performance benchmarking guide](docs/performance-benchmarking.md).
+Reported ratios are fresh-process end-to-end preprocess or target-free
+evaluation-query measurements, not in-process Rust library throughput. The
+suite applies no hard performance threshold.
 
 ## Sample Projects
 
@@ -173,8 +243,9 @@ The `sample_projects/` directory contains example MSBuild projects:
 
 The project is organized into several modules:
 
-- **`parser`** - XML parsing and project file loading
-- **`object_model`** - Data structures for properties, items, and targets
+- **`loader`** - Order-preserving XML/import/SDK evaluation and preprocessing
+- **`object_model`** - Finalized properties, items, and targets
+- **`properties`** - Indexed case-insensitive property and reserved-path support
 - **`expression`** - Property and item reference evaluation
 - **`evaluation`** - Project loading and target execution orchestration
 - **`tasks`** - Built-in task implementations
@@ -184,19 +255,28 @@ The project is organized into several modules:
 
 This is a simplified MSBuild implementation focused on core functionality:
 
-- Limited condition expression support (basic equality only)
-- No SDK-style projects or automatic imports
-- No advanced MSBuild features like item transformations
+- Condition evaluation is a tested subset; legacy `MSBuildToolsVersion` shims,
+  remaining syntax/escaping permutations, and nonstandard runtime identifiers
+  are deferred
+- SDK evaluation is limited to the implemented expression/item surface; versioned
+  third-party SDK acquisition through NuGet and missing-workload resolver item
+  injection are not yet supported
+- Evaluation still applies item operations in source position rather than a
+  separate final item pass, so some SDK default globs enabled by later
+  properties can differ. The installed-SDK parity fixture leaves its
+  ASCII casing-dependent output-path and implicit-define projections enabled
+- Item transforms/functions cover the documented evaluation-time allowlist;
+  lazy wildcard reporting and target-execution-only item mutations are deferred
 - Limited task ecosystem (only Message, Copy, Error built-in)
 - No parallel target execution
 - No incremental build support
 
 ## Future Enhancements
 
-- More sophisticated condition parsing
+- Remaining condition syntax and compatibility shims
 - Additional built-in tasks (Csc, Exec, etc.)
-- SDK-style project support
-- Item transformation syntax
+- Broader SDK-style project evaluation
+- Broader item-function and target-execution mutation support
 - Parallel execution
 - Incremental builds
 - Plugin system for custom tasks
